@@ -254,11 +254,12 @@ function recientesLocal(pos, op) {
   if (pos.length > 1) throw new Fallo("uso: memoria recientes [N]", 2);
   const n = pos.length ? Number(pos[0]) : 15;
   if (!Number.isInteger(n) || n < 1 || n > 200) throw new Fallo("N tiene que ser un entero entre 1 y 200", 2);
-  // safe.directory: el repositorio es de otro usuario (my-memory) y git, si no, se niega a leerlo.
+  // safe.directory: el repositorio es de otro usuario (my-memory) y git, si no, se niega a leerlo. Sin configuración
+  // global ni del sistema: dentro de srt, ~/.gitconfig es un /dev/null que git no puede abrir y falla entero.
   const r = correr("git", [
     "-c", "safe.directory=*", "-C", MEMORIA_DIR, "log", `-${n}`, "--name-status", "--date=format:%Y-%m-%d %H:%M",
     "--format=%x1e%h%x1f%ad%x1f%s%x1f%(trailers:key=Client,valueonly,unfold)%x1f%(trailers:key=Tool,valueonly,unfold)%x1d"
-  ]);
+  ], { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
   if (r.estado !== 0) throw new Fallo(`git log falló: ${enUnaLinea(r.error, 300)}`, 1);
   const commits = [];
   for (const registro of r.salida.split("\x1e").filter(x => x.trim())) {
