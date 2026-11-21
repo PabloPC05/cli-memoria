@@ -205,7 +205,8 @@ function buscarLocal(pos, op) {
   }
   const primero = plano(terminos[0]);
   const fragmento = texto => {
-    const i = op.regex ? 0 : Math.max(0, plano(texto).indexOf(primero) - 40);
+    // Una línea corta se da entera; una larga, desde un poco antes del acierto.
+    const i = op.regex || texto.trim().length <= 160 ? 0 : Math.max(0, plano(texto).indexOf(primero) - 40);
     return enUnaLinea(texto.slice(i), 160);
   };
   const vistos = aciertos.slice(0, limite).map(a => ({ ...a, texto: fragmento(a.texto) }));
@@ -314,12 +315,22 @@ async function leerRemoto(pos, op) {
 async function listaRemota(pos, op) {
   if (pos.length > 1) throw new Fallo("uso: memoria lista [carpeta]", 2);
   const r = await conBadulaque(ctx => usarOFallar(ctx, "memoria_list", pos.length ? { folder: pos[0].replace(/\/+$/, ""), limit: 200 } : {}));
-  if (op.json || !pos.length) {
-    // Sin carpeta, el índice corto del servidor: se deja tal cual, que es lo que trae.
-    imprimirJson(r.json ?? r.texto);
+  if (!pos.length) {
+    // Sin carpeta, el servidor da su índice corto: igual que en local, una línea por carpeta con su número de notas.
+    const filas = (r.json?.index?.folders ?? []).map(f => ({ carpeta: f.folder, notas: f.count }));
+    if (!filas.length) {
+      imprimirJson(r.json ?? r.texto);
+      return 0;
+    }
+    if (op.json) imprimirJson(filas);
+    else for (const f of filas) console.log(`${f.carpeta === "." ? "(raíz)" : `${f.carpeta}/`}  ${f.notas} notas`);
     return 0;
   }
   const notas = Array.isArray(r.json) ? r.json : (r.json?.notes ?? []);
+  if (op.json) {
+    imprimirJson(notas.map(n => ({ ruta: n.path, nombre: n.name, description: n.description ?? "", actualizada: n.updated ?? n.modified ?? null })));
+    return 0;
+  }
   for (const n of notas) console.log(n.description ? `${n.path} — ${enUnaLinea(n.description, 140)}` : n.path);
   return 0;
 }
