@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { copyFile, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -15,6 +15,7 @@ import { type Logger, silentLogger } from "./log.js";
 import { firstH1, rewriteWikiLinks, splitSections, targetNameOf } from "./markdown.js";
 import type { OcrRunner } from "./ocr.js";
 import { parseTypedLinks } from "./relations.js";
+import { appendOnlyAdded, blockingMessage, type CheckOptions, checkWrite, describeRules, type NoteText, rulesApply, violationJson, warningTexts } from "./rules.js";
 import { SETUP_GUIDE_URI, SETUP_GUIDE_URL } from "./setup-guide.js";
 import { buildFtsQuery, type NoteRow, type SearchHit, SearchIndex } from "./search-index.js";
 import type { UploadStore } from "./uploads.js";
@@ -79,7 +80,16 @@ export type SearchMode = "hybrid" | "text" | "semantic";
 type SearchArgs = { query: string; folder?: string; include_archive?: boolean; limit?: number };
 
 export interface Warning {
-	code: "BROKEN_LINKS" | "UNKNOWN_RELATIONS" | "PUSH_PENDING" | "EXTRACTION_EMPTY" | "EXTRACTION_PARTIAL" | "NO_CHANGES" | "FRONTMATTER_PROBLEMS";
+	code:
+		| "BROKEN_LINKS"
+		| "UNKNOWN_RELATIONS"
+		| "PUSH_PENDING"
+		| "EXTRACTION_EMPTY"
+		| "EXTRACTION_PARTIAL"
+		| "NO_CHANGES"
+		| "FRONTMATTER_PROBLEMS"
+		| "RULES_WARNINGS"
+		| "RULES_EXISTING";
 	message: string;
 	[key: string]: unknown;
 }
@@ -437,12 +447,15 @@ export class MemoryService {
 			await this.git.run(["merge", "-q", "--ff-only", remote]);
 			await this.reconcileAfterMove(local);
 			this.log("info", "git.fast_forward", { from: local, to: remote });
+			await this.logRemoteViolations(local, remote);
 			return { status: "ok" };
 		}
 		const rebased = await this.git.run(["rebase", "-q", remote], { allowFail: true });
 		if (rebased.code === 0) {
 			await this.reconcileAfterMove(local);
 			this.log("info", "git.rebased", { onto: remote });
+			const base = (await this.git.run(["merge-base", local, remote], { allowFail: true })).stdout.trim();
+			if (base) await this.logRemoteViolations(base, remote);
 			return { status: "ok" };
 		}
 		await this.git.run(["rebase", "--abort"], { allowFail: true });
@@ -601,6 +614,52 @@ export class MemoryService {
 			return [{ code: "FRONTMATTER_PROBLEMS", message: `The frontmatter was already invalid and was left as it was: ${parsed.problems.join("; ")}. Fix it when you can.`, problems: parsed.problems }];
 		}
 		throw new MemoryError("INVALID_FRONTMATTER", `Invalid frontmatter: ${parsed.problems.join("; ")}.`, { problems: parsed.problems, path });
+	}
+
+	/**
+	 * The memory's `[rules]` for one note of a write: `after` is what will be saved, `before` what is there now (null for
+	 * a new note). A new violation of a blocking rule refuses the whole write with RULES_VIOLATED, saying per problem
+	 * the line and the fix; what the note already had comes back as a warning. `quiet` drops the warnings (notes a write
+	 * only touches on the side, like the links a move rewrites).
+	 */
+	private checkRules(after: NoteText, before: NoteText | null, opts: CheckOptions & { quiet?: boolean } = {}): Warning[] {
+		const rules = this.conventions.rules;
+		if (!rules || !rulesApply(this.conventions, after.path)) return [];
+		// A version outside the rules (the archive, an excluded folder) is no baseline: coming in, everything counts as new.
+		const previous = before && rulesApply(this.conventions, before.path) ? before : null;
+		const check = checkWrite(rules, after, previous, opts);
+		if (check.blocking.length) {
+			throw new MemoryError("RULES_VIOLATED", blockingMessage(after.path, check), {
+				path: after.path,
+				violations: check.blocking.map(violationJson),
+				...(check.existing.length ? { existing: check.existing.length } : {}),
+			});
+		}
+		return opts.quiet ? [] : warningTexts(check).map((w) => ({ ...w, path: after.path }));
+	}
+
+	/**
+	 * Commits that reached the branch from the remote (a push to it, not a tool) cannot be refused any more: the
+	 * problems they added are logged, and `lint` lists them like any other.
+	 */
+	private async logRemoteViolations(from: string, to: string): Promise<void> {
+		const rules = this.conventions.rules;
+		if (!rules) return;
+		try {
+			const changes = parseNameStatus(await this.git.out(["diff", "-M", "--name-status", from, to]));
+			for (const c of changes) {
+				if (c.status === "D" || !rulesApply(this.conventions, c.path)) continue;
+				const after = await this.git.run(["show", `${to}:${c.path}`], { allowFail: true });
+				if (after.code !== 0) continue;
+				const beforePath = c.status === "R" && c.from ? c.from : c.path;
+				const before = c.status === "A" || c.status === "C" ? null : await this.git.run(["show", `${from}:${beforePath}`], { allowFail: true });
+				const previous = before && before.code === 0 && rulesApply(this.conventions, beforePath) ? { path: beforePath, text: before.stdout } : null;
+				const check = checkWrite(rules, { path: c.path, text: after.stdout }, previous);
+				if (check.blocking.length) this.log("warn", "rules.remote_violations", { path: c.path, from, to, violations: check.blocking.map(violationJson) });
+			}
+		} catch (error) {
+			this.log("warn", "rules.remote_check_failed", { error: String(error) });
+		}
 	}
 
 	/** Relation keys used in the links that `memory.toml` does not allow, in order of appearance. */
@@ -777,6 +836,8 @@ export class MemoryService {
 		const inUse = this.index.relations().map((r) => r.relation);
 		if (allowed) parts.push(`Relation keys of this memory: ${allowed.join(", ")}.`);
 		else if (inUse.length) parts.push(`Relation keys already in use (reuse them rather than inventing synonyms): ${inUse.join(", ")}.`);
+		const rules = describeRules(this.conventions.rules);
+		if (rules) parts.push(rules);
 		const file = this.conventions.instructions.file;
 		if (file) {
 			const text = await readFile(this.abs(file), "utf8").catch(() => null);
@@ -1051,7 +1112,13 @@ export class MemoryService {
 
 	/** Maintenance worklist from the index (see lint.ts). `nowMs` is for tests. */
 	lint(args: LintArgs = {}, nowMs: number = Date.now()) {
-		return lint(this.index, this.conventions, args, nowMs);
+		return lint(this.index, this.conventions, args, nowMs, (path) => {
+			try {
+				return readFileSync(this.abs(path), "utf8");
+			} catch {
+				return null;
+			}
+		});
 	}
 
 	// ── write tools ──────────────────────────────────────────────────────────
@@ -1067,6 +1134,7 @@ export class MemoryService {
 			const taken = this.index.notesByName(name);
 			if (taken.length) throw new MemoryError("NAME_TAKEN", `A note named «${name}» already exists at ${taken[0]?.path}; names must be unique across folders.`, { existing: taken.map((t) => t.path) });
 			this.validateNote(path, args.content);
+			const ruleWarnings = this.checkRules({ path, text: args.content }, null);
 			if (!args.confirm_new) {
 				const meta = parseNote(args.content, this.conventions).meta;
 				const candidates = this.duplicateCandidates([name.replace(/-/g, " "), meta.title ?? "", ...meta.aliases]);
@@ -1075,7 +1143,7 @@ export class MemoryService {
 				}
 			}
 			await this.writeText(path, args.content);
-			return { paths: [path], result: { path }, warnings: this.linkWarnings(args.content, path) };
+			return { paths: [path], result: { path }, warnings: [...ruleWarnings, ...this.linkWarnings(args.content, path)] };
 		});
 	}
 
@@ -1107,8 +1175,9 @@ export class MemoryService {
 				}
 			});
 			const fmWarnings = this.validateNote(row.path, text, current);
+			const ruleWarnings = this.checkRules({ path: row.path, text }, { path: row.path, text: current });
 			await this.writeText(row.path, text);
-			return { paths: [row.path], result: { path: row.path }, warnings: [...fmWarnings, ...this.linkWarnings(text, row.path)] };
+			return { paths: [row.path], result: { path: row.path }, warnings: [...fmWarnings, ...ruleWarnings, ...this.linkWarnings(text, row.path)] };
 		});
 	}
 
@@ -1120,8 +1189,9 @@ export class MemoryService {
 			this.checkHash(row.path, current, args.hash, true);
 			if (typeof args.content !== "string") throw new MemoryError("INVALID_ARGUMENT", "«content» is required.");
 			const fmWarnings = this.validateNote(row.path, args.content, current);
+			const ruleWarnings = this.checkRules({ path: row.path, text: args.content }, { path: row.path, text: current });
 			await this.writeText(row.path, args.content);
-			return { paths: [row.path], result: { path: row.path }, warnings: [...fmWarnings, ...this.linkWarnings(args.content, row.path)] };
+			return { paths: [row.path], result: { path: row.path }, warnings: [...fmWarnings, ...ruleWarnings, ...this.linkWarnings(args.content, row.path)] };
 		});
 	}
 
@@ -1166,6 +1236,7 @@ export class MemoryService {
 				await rename(tmp, this.abs(to));
 			} else await rename(this.abs(row.path), this.abs(to));
 			let rewritten = 0;
+			let movedText = current;
 			if (renamed) {
 				const oldKey = oldName.toLowerCase();
 				const referrers = new Set(this.index.linksIn(row.path).map((l) => l.srcPath));
@@ -1175,13 +1246,18 @@ export class MemoryService {
 					const text = await this.readText(file);
 					const out = rewriteWikiLinks(text, (l) => (l.targetName === oldKey ? newName : null));
 					if (out.count > 0) {
+						if (src === row.path) movedText = out.text;
+						else this.checkRules({ path: file, text: out.text }, { path: file, text }, { quiet: true });
 						await this.writeText(file, out.text);
 						paths.push(file);
 						rewritten += out.count;
 					}
 				}
 			}
-			return { paths, result: { path: to, from: row.path, links_rewritten: rewritten } };
+			// The note is judged where it goes against what it was where it was: out of the archive, or out of a folder
+			// without types, its problems count as new.
+			const warnings = this.checkRules({ path: to, text: movedText }, { path: row.path, text: current });
+			return { paths, result: { path: to, from: row.path, links_rewritten: rewritten }, warnings };
 		});
 	}
 
@@ -1379,10 +1455,31 @@ export class MemoryService {
 					throw new MemoryError("HAS_BACKLINKS", `Reverting ${short} would remove notes that other notes link to; fix or remove those links first${only ? "" : ", or revert only one note with «path»"}.`, { backlinks });
 				}
 				const warnings: Warning[] = [];
+				const moveSources = new Map(changes.filter((c) => c.status === "R" && c.from).map((c) => [c.from as string, c.path]));
 				for (const [p, text] of writes) {
 					if (!/\.md$/i.test(p)) continue;
-					const previous = (await this.exists(p)) ? await this.readText(p) : text;
+					const exists = await this.exists(p);
+					const previous = exists ? await this.readText(p) : text;
 					warnings.push(...this.validateNote(p, text, previous));
+					// Rules against the note as it is now (a note moved back, where it is now); a deleted note brought back is
+					// compared with its own last version. Undoing a commit may take back the lines it added to an
+					// append-only section, and no others.
+					const rules = this.conventions.rules;
+					if (rules) {
+						const change = changes.find((c) => c.path === p || c.from === p);
+						const movedTo = moveSources.get(p);
+						let now: NoteText | null = null;
+						if (exists) now = { path: p, text: previous };
+						else if (movedTo && (await this.exists(movedTo))) now = { path: movedTo, text: await this.readText(movedTo) };
+						else {
+							const last = await this.blobAt(base, p);
+							if (last) now = { path: p, text: await this.blobText(last) };
+						}
+						const was = change ? await this.blobAt(target, change.path) : null;
+						const old = await this.blobAt(base, change?.from ?? p);
+						const allowRemoved = was ? appendOnlyAdded(rules, old ? await this.blobText(old) : null, await this.blobText(was)) : [];
+						warnings.push(...this.checkRules({ path: p, text }, now, { allowRemoved }));
+					}
 					for (const w of this.linkWarnings(text, p)) {
 						if (w.code !== "BROKEN_LINKS") warnings.push({ ...w, path: p });
 						else {
@@ -1408,7 +1505,18 @@ export class MemoryService {
 
 	async attach(
 		client: ClientIdentity,
-		args: { path: string; source: { upload_id?: string; base64?: string }; name?: string; title?: string; description: string; aliases?: string[]; reason: string; confirm_new?: boolean },
+		args: {
+			path: string;
+			source: { upload_id?: string; base64?: string };
+			name?: string;
+			title?: string;
+			description: string;
+			aliases?: string[];
+			/** The companion note's type; defaults to the rules' `attachment_type`. */
+			type?: string;
+			reason: string;
+			confirm_new?: boolean;
+		},
 	): Promise<WriteResult> {
 		if (client.scope !== "write") throw READ_ONLY;
 		const uploads = this.opts.uploads;
@@ -1457,15 +1565,21 @@ export class MemoryService {
 			} catch {
 				await copyFile(upload.file, this.abs(binPath));
 			}
-			const fm: Record<string, unknown> = { name: title, description: args.description.replace(/\s+/g, " ").trim(), aliases, attachment: fileName, extracted_with: extraction.method };
+			const fm: Record<string, unknown> = { name: title, description: args.description.replace(/\s+/g, " ").trim(), aliases };
+			const typeRule = this.conventions.rules?.type;
+			const type = (typeof args.type === "string" && args.type.trim()) || typeRule?.attachmentType || null;
+			if (type) fm[typeRule?.field ?? "type"] = type;
+			fm.attachment = fileName;
+			fm.extracted_with = extraction.method;
 			let body = `# ${title}\n\n![[${fileName}]]\n`;
 			if (extraction.ocr) body += `\n> ${this.conventions.attachments.ocrNotice.replace("{languages}", extraction.ocr.languages)}\n`;
 			if (extraction.image && extraction.pages.length === 1) body += `\n${extraction.pages[0]?.text}\n`;
 			else for (const page of extraction.pages) body += `\n## ${this.conventions.attachments.pageHeading.replace("{n}", String(page.number))}\n\n${page.text}\n`;
 			const content = `---\n${stringifyYaml(fm, { lineWidth: 0 }).trimEnd()}\n---\n${body}`;
 			this.validateNote(companion, content);
+			// The text comes from the file as it is: only the frontmatter the server writes is held to the rules here.
+			const warnings: Warning[] = this.checkRules({ path: companion, text: content }, null, { only: ["frontmatter", "type"] });
 			await this.writeText(companion, content);
-			const warnings: Warning[] = [];
 			if (extraction.method === "none") warnings.push({ code: "EXTRACTION_EMPTY", message: `No text was extracted: ${extraction.reason ?? "unknown reason"}.` });
 			const { skippedPages = 0, failedPages = [] } = extraction.ocr ?? {};
 			if (skippedPages || failedPages.length) {

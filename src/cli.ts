@@ -1,8 +1,10 @@
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { ForgejoOAuthProvider } from "./auth/oauth.js";
 import { addToken, listTokens, revokeToken } from "./auth/tokens.js";
+import { checkCommits, checkRange, checkTree, commitsReport, rangeReport, renderCommits, renderRange, renderTree, treeReport } from "./check.js";
 import { buildClientsReport, ClientActivity, renderClientsTable } from "./clients.js";
 import { loadConfig, readSecretFile } from "./config.js";
 import { Git } from "./git.js";
@@ -26,6 +28,11 @@ Usage:
   my-memory clients [--json] --config <file>   who is connected: last seen, writes, setup version
   my-memory lint [--json] [--kind <k>[,<k>]] [--folder <f>] [--limit <n>] --config <file>
                                              maintenance worklist (broken links, orphans, stale notes…)
+  my-memory check <repo-dir> [<rev> | <from>..<to> [--each]] [--conventions <memory.toml>] [--json]
+                                             the write rules ([rules] in memory.toml) over a git repo:
+                                             a tree lists every note's problems; a range is judged like a write
+                                             (exit 1 if it adds a problem that blocks: usable as a git hook);
+                                             --each judges every commit of the range on its own
   my-memory reindex [--reembed] --config <file>   full rebuild of the index and missing embeddings (stop the service first)
   my-memory migrate <repo-dir> [--apply] [--conventions <memory.toml>]
 
@@ -53,6 +60,7 @@ export async function main(argv: string[]): Promise<number> {
 			conventions: { type: "string" },
 			json: { type: "boolean" },
 			reembed: { type: "boolean" },
+			each: { type: "boolean" },
 			kind: { type: "string" },
 			folder: { type: "string" },
 			limit: { type: "string" },
@@ -161,13 +169,55 @@ export async function main(argv: string[]): Promise<number> {
 			const index = new SearchIndex(join(config.dataDir, "index.sqlite"), { readOnly: true });
 			try {
 				if (!index.getMeta("indexed_commit")) throw new Error("the index is empty: start the server once or run «my-memory reindex»");
-				const report = lint(index, conventions, { kinds: values.kind?.split(",").map((k) => k.trim()).filter(Boolean), folder: values.folder, limit });
+				const readNote = (path: string) => {
+					try {
+						return readFileSync(join(repoDir, ...path.split("/")), "utf8");
+					} catch {
+						return null;
+					}
+				};
+				const report = lint(index, conventions, { kinds: values.kind?.split(",").map((k) => k.trim()).filter(Boolean), folder: values.folder, limit }, Date.now(), readNote);
 				process.stdout.write(`${values.json ? JSON.stringify(report, null, 2) : renderLint(report)}
 `);
 				return 0;
 			} finally {
 				index.close();
 			}
+		}
+		if (command === "check") {
+			if (!sub) throw new Error("check needs the path of a clone of the notes repo (or a bare repo)");
+			const spec = arg ?? "HEAD";
+			if (spec.startsWith("-")) throw new Error(`invalid revision «${spec}»`);
+			const git = new Git(sub);
+			const range = /^(.*?)\.\.(.+)$/.exec(spec);
+			const at = range ? (range[2] as string) : spec;
+			let conventionsText: string | null;
+			if (values.conventions) conventionsText = await readFile(values.conventions, "utf8");
+			else {
+				const shown = await git.run(["show", `${at}:${CONVENTIONS_FILE}`], { allowFail: true });
+				conventionsText = shown.code === 0 ? shown.stdout : null;
+			}
+			const conventions = conventionsText === null ? defaultConventions() : parseConventions(conventionsText);
+			if (!conventions.rules) {
+				process.stdout.write(`no [rules] in ${values.conventions ?? `${CONVENTIONS_FILE} at ${at}`}: nothing to check\n`);
+				return 0;
+			}
+			if (!range) {
+				if (values.each) throw new Error("--each needs a range: <from>..<to>");
+				const result = await checkTree(git, conventions, spec);
+				process.stdout.write(`${values.json ? JSON.stringify(treeReport(result), null, 2) : renderTree(result)}\n`);
+				return 0;
+			}
+			if (values.each) {
+				const commits = await checkCommits(git, conventions, spec);
+				const report = commitsReport(commits);
+				process.stdout.write(`${values.json ? JSON.stringify(report, null, 2) : renderCommits(commits)}\n`);
+				return report.refused_commits ? 1 : 0;
+			}
+			const files = await checkRange(git, conventions, range[1] || null, range[2] as string);
+			const report = rangeReport(files);
+			process.stdout.write(`${values.json ? JSON.stringify(report, null, 2) : renderRange(files)}\n`);
+			return report.blocked ? 1 : 0;
 		}
 		if (command === "reindex") {
 			if (!values.config) throw new Error("reindex needs --config");

@@ -151,7 +151,7 @@ export async function createMcpServer(memory: MemoryService, client: ClientIdent
 		{
 			title: "Maintenance worklist",
 			description:
-				"Structural candidates for maintaining the memory, computed from the index without reading every note, worst first: problems (bad frontmatter, superseded notes outside the archive), broken_link, duplicate_candidates, old_inference (statements marked as inferred long ago), missing_page (a missing target linked from several notes), unlinked_mention (a note's name in plain text without a [[link]]), orphan (nothing links to it), stale (unchanged for long), oversized. Each item has the notes, a kind and a short detail; `counts` has the totals. It only finds candidates: read the notes and decide (merge, link, update, archive, split) before writing.",
+				"Structural candidates for maintaining the memory, computed by code (no model), worst first: problems (bad frontmatter, superseded notes outside the archive), rules (what breaks this memory's write rules, with line and fix per problem), broken_link, duplicate_candidates, old_inference (statements marked as inferred long ago), missing_page (a missing target linked from several notes), unlinked_mention (a note's name in plain text without a [[link]]), orphan (nothing links to it), stale (unchanged for long), oversized. Each item has the notes, a kind and a short detail; `counts` has the totals. It only finds candidates: read the notes and decide (merge, link, update, archive, split) before writing.",
 			inputSchema: {
 				kinds: z.array(z.enum(LINT_KINDS)).optional().describe("Only these kinds (default all)."),
 				folder: z.string().optional().describe("Only items that involve a note in this top-level folder."),
@@ -299,6 +299,7 @@ export async function createMcpServer(memory: MemoryService, client: ClientIdent
 				title: z.string().optional().describe("Human title of the companion note."),
 				description: z.string().describe("One line describing the file."),
 				aliases: z.array(z.string()).optional(),
+				type: z.string().optional().describe("The companion note's type, when this memory's rules ask for one (see the instructions)."),
 				reason,
 				confirm_new: z.boolean().optional(),
 			},
@@ -306,7 +307,7 @@ export async function createMcpServer(memory: MemoryService, client: ClientIdent
 		},
 		wrap(
 			"attach",
-			(a: { path: string; upload_id?: string; base64?: string; name?: string; title?: string; description: string; aliases?: string[]; reason: string; confirm_new?: boolean }) =>
+			(a: { path: string; upload_id?: string; base64?: string; name?: string; title?: string; description: string; aliases?: string[]; type?: string; reason: string; confirm_new?: boolean }) =>
 				memory.attach(client, { ...a, source: { upload_id: a.upload_id, base64: a.base64 } }),
 		),
 	);
