@@ -19,6 +19,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   Fallo, analizar, conBadulaque, correr, ejecutarCli, enUnaLinea, fechaCorta, imprimirJson, plano, simular, textoDe, usar, usarOFallar
 } from "../badulaque/nativa.mjs";
+import { esAyuda, resolverOrden } from "../badulaque/nativa.mjs";
 import { VENTANA_CARACTERES, VENTANA_LINEAS, miles, paginaDe, rangoDe, trozoDeListado } from "../badulaque/paginas.mjs";
 
 const VERSION = "2.2.0";
@@ -1203,17 +1204,17 @@ const OPCIONES = {
 };
 
 async function principal(argv) {
-  const [orden, ...resto] = argv;
-  if (orden === undefined || orden === "--help" || orden === "-h" || orden === "ayuda") {
+  const [dado, ...resto] = argv;
+  if (dado === undefined || esAyuda(dado)) {
     process.stdout.write(AYUDA);
     return 0;
   }
-  if (orden === "--version") {
+  if (dado === "--version") {
     console.log(VERSION);
     return 0;
   }
+  const orden = resolverOrden("memoria", dado, OPCIONES);
   const def = OPCIONES[orden];
-  if (!def) throw new Fallo(`no conozco «${orden}». Mira memoria --help`, 2);
   if (resto.includes("--help") || resto.includes("-h")) {
     process.stdout.write(AYUDA);
     return 0;
