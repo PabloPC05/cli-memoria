@@ -129,7 +129,7 @@ Un `memory.toml` mal escrito no se carga. El mensaje dice qué clave falla, por 
 - **Archivos nuevos:**
   - `test/rules.test.ts`: 20 pruebas puras de cada regla, nueva frente a existente, con los mensajes exactos, la configuración, los errores de configuración y las mayúsculas.
   - `test/rules-writes.test.ts`: 13 pruebas de integración con `MemoryService`: `create`, `edit`, `write`, `move` (renombrar, salir de `skills/` y salir del archivo), `revert` (quitar una fuente añadida, no deshacer una limpieza, recuperar una nota borrada), publicación de una copia de trabajo commit a commit y aplanada, `attach` (necesita git-lfs), commits del remoto, configuración ausente, `lint` (herramienta y CLI) y `check` (árbol, rango, `--each` y códigos de salida).
-- **En lisa** (`nix shell nixpkgs#nodejs_24 git-lfs poppler-utils tesseract`): typecheck limpio y **138 de 138 pruebas**.
+- **En lisa** (`nix shell nixpkgs#nodejs_24 git-lfs poppler-utils tesseract`): typecheck limpio y **139 de 139 pruebas** (en `main` eran 106).
 - **En el Mac:** typecheck limpio. Fallan las 6 pruebas de `attach` que ya fallaban en `main`, porque falta git-lfs. La de esta rama se salta sola sin LFS.
 
 ## 6. Simulación sobre la memoria real
