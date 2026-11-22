@@ -53,6 +53,20 @@ TOML
   printf -- '---\nname: Alfa\ndescription: Proyecto alfa de juguete\n---\n# Alfa\nPrimera línea.\n\n## Estado\nTodo va bien.\n\n## Pendiente\nComprar pan.\n' > projects/alfa.md
   printf -- '---\nname: Café\ndescription: Notas sobre el café\n---\n# Café\nEspresso, filtrado y moka.\n' > topics/cafe.md
   printf -- '---\nname: Vieja\ndescription: Nota de juguete para borrar\n---\n# Vieja\nYa no sirve.\n' > topics/vieja.md
+  # Una nota larga para probar la lectura navegable: secciones y subsecciones, una sección enorme (Pendiente, con cinco
+  # colas de 40 líneas: pasa de 8.000 caracteres), un prefijo ambiguo (Pendiente / Pendiente de pago), acentos y un
+  # «# encabezado» dentro de un bloque de código que no cuenta.
+  {
+    printf -- '---\nname: Largo\ndescription: Nota larga de juguete con secciones y subsecciones\n---\n# Largo\nIntro del largo.\n\n'
+    printf '## Estado\nTodo va bien.\n```sh\n# no soy un encabezado\n```\n\n'
+    printf '## Pendiente\nCosas pendientes de la canción.\n'
+    for c in 1 2 3 4 5; do
+      printf '### Cola %s\n' "$c"
+      for j in $(seq 0 39); do printf -- '- tarea %s.%s: hacer algo pendiente con un texto de relleno para que pese bastante\n' "$c" "$j"; done
+    done
+    printf -- '- zorro-azul: una línea única en la cola cinco\n'
+    printf '## Pendiente de pago\nPagar la luz.\n\n## Acciones\nAcción uno.\n\n## Acentuación\nCafé y canción.\n'
+  } > projects/largo.md
   git add -A && git commit -q -m "alta de juguete"
 ) || { echo "no pude crear las notas de juguete" >&2; exit 2; }
 
@@ -114,6 +128,8 @@ curl -s -o /dev/null "http://127.0.0.1:$PUERTO_MM/mcp" || { echo "my-memory no a
 # m1 y m2: los agentes uno y dos, cada uno con su copia de trabajo y su clave.
 m1() { MEMORIA_DIR="$REPO" MEMORIA_COPIA="$T/copia1" HOME="$T/h1" BADULAQUE_CLAVE=clave-uno BADULAQUE_URL="http://127.0.0.1:$PUERTO_PA/" "$NODE" "$AQUI/memoria.mjs" "$@"; }
 m2() { MEMORIA_DIR="$REPO" MEMORIA_COPIA="$T/copia2" HOME="$T/h2" BADULAQUE_CLAVE=clave-dos BADULAQUE_URL="http://127.0.0.1:$PUERTO_PA/" "$NODE" "$AQUI/memoria.mjs" "$@"; }
+# mr1: lo mismo que m1 pero sin MEMORIA_DIR (como en el Mac): la lectura va por la pasarela, no por el disco.
+mr1() { MEMORIA_DIR="" MEMORIA_COPIA="$T/copiar" HOME="$T/h1" BADULAQUE_CLAVE=clave-uno BADULAQUE_URL="http://127.0.0.1:$PUERTO_PA/" "$NODE" "$AQUI/memoria.mjs" "$@"; }
 mkdir -p "$T/h1" "$T/h2"
 c1() { git -C "$T/copia1" "$@"; }
 c2() { git -C "$T/copia2" "$@"; }
@@ -126,6 +142,112 @@ rc_es() { if [ "$RC" = "$1" ]; then ok "$2"; else mal "$2" "rc=$RC, se esperaba 
 # del servidor: lo que hay de verdad en su repositorio.
 srv() { git -C "$REPO" "$@"; }
 srv_head() { srv rev-parse HEAD; }
+
+# --- 0. leer y buscar con salida navegable ---------------------------------------------------------------------
+
+L="$REPO/projects/largo.md"
+linea_de() { grep -n -m1 -F -- "$1" "$L" | cut -d: -f1; }
+corre m1 leer cafe
+espera "Espresso, filtrado y moka" "leer: una nota corta sale entera"
+no_espera "nota larga" "leer: una corta no lleva índice ni aviso"
+corre m1 leer largo
+espera "nota larga: lee una sección con --seccion '<título>' o un rango con --lineas A-B" "leer larga: el aviso de una línea"
+espera "hash: $(git -C "$REPO" hash-object "$L")" "leer larga: la cabecera lleva el hash de la nota"
+espera "descripción: Nota larga de juguete" "leer larga: la cabecera lleva la descripción"
+espera "$(linea_de '## Pendiente') · " "leer larga: el índice da la línea de inicio de cada sección"
+espera "### Cola 3" "leer larga: el índice lista las subsecciones"
+espera "## Acentuación" "leer larga: el índice conserva los acentos"
+no_espera "no soy un encabezado" "leer larga: un # dentro de un bloque de código no es un encabezado"
+no_espera "tarea 3.5" "leer larga: sin opciones no da el contenido"
+[ "$(m1 leer largo | wc -c)" -lt 2000 ] && ok "leer larga: el índice es corto (menos de 2.000 caracteres)" || mal "leer larga: el índice es corto"
+corre m1 leer largo --seccion estado
+espera "Todo va bien." "seccion: sin distinguir mayúsculas"
+no_espera "tarea" "seccion: solo esa sección"
+espera "(sección «Estado», líneas $(linea_de '## Estado')-" "seccion: dice qué líneas son"
+corre m1 leer largo --seccion ACENTUACION
+espera "Café y canción." "seccion: sin acentos ni mayúsculas"
+corre m1 leer largo --seccion acentu
+espera "Café y canción." "seccion: un prefijo único basta"
+corre m1 leer largo --seccion pen
+rc_es 2 "seccion: un prefijo ambiguo falla (rc 2)"
+espera "encaja con 2 secciones" "seccion: …y dice que encaja con dos"
+espera "Pendiente de pago" "seccion: …y las lista con su línea"
+corre m1 leer largo --seccion pendiente
+espera "### Cola 1" "seccion: igual a un encabezado gana al prefijo, e incluye las subsecciones"
+no_espera "Pagar la luz" "seccion: …y no la siguiente del mismo nivel"
+espera "(sección «Pendiente», página 1 de 3: --pagina 2" "seccion enorme: pagina, y dice cuántas páginas hay"
+no_espera "tarea 5.39" "seccion enorme: la primera página no trae todo"
+[ "$(m1 leer largo --seccion pendiente | wc -c)" -lt 8600 ] && ok "seccion enorme: una página pesa menos de 8.600 caracteres" || mal "seccion enorme: una página pesa menos de 8.600 caracteres"
+corre m1 leer largo --seccion pendiente --pagina 3
+espera "tarea 5.39" "seccion enorme: la última página trae el final"
+espera "la última" "seccion enorme: …y dice que es la última"
+corre m1 leer largo --seccion pendiente --pagina 4
+rc_es 2 "seccion enorme: una página que no existe falla (rc 2)"
+espera "hay 3" "seccion enorme: …y dice cuántas hay"
+corre m1 leer largo --seccion pendiente --todo
+espera "tarea 1.0:" "seccion --todo: sin ventanas (el principio)"
+espera "zorro-azul" "seccion --todo: sin ventanas (el final)"
+corre m1 leer largo --seccion "pendiente > cola 3"
+espera "tarea 3.0:" "seccion: «Padre > Hija» baja a la subsección"
+no_espera "tarea 2.0:" "seccion: …y solo esa"
+corre m1 leer largo --lineas 8-10
+espera "## Estado" "lineas: el rango pedido"
+espera "(líneas 8-10 de" "lineas: dice qué líneas son y cuántas tiene la nota"
+corre m1 leer largo --lineas 2000
+rc_es 2 "lineas: pasarse del final falla (rc 2)"
+corre m1 leer largo --lineas abc
+rc_es 2 "lineas: un rango mal escrito falla (rc 2)"
+corre m1 leer largo --seccion estado --lineas 1-3
+rc_es 2 "--seccion y --lineas juntas: error de uso"
+corre m1 leer largo --seccion nohay
+rc_es 2 "seccion que no existe: rc 2"
+espera "### Pendiente › Cola 2" "seccion que no existe: lista las que hay"
+corre m1 leer largo --todo
+espera "Pagar la luz." "--todo: la nota entera"
+espera "tarea 1.0:" "--todo: …desde el principio"
+corre m1 leer largo --pagina 2
+espera "(página 2 de " "--pagina sin seccion: lee la nota seguida"
+corre m1 leer cafe --seccion inexistente
+rc_es 2 "seccion en una nota corta que no la tiene: rc 2"
+
+corre m1 buscar zorro-azul
+espera "projects/largo.md:$(linea_de zorro-azul) · Pendiente › Cola 5 · - zorro-azul" "buscar: ruta:línea · sección · fragmento"
+espera "(1 resultado)" "buscar: dice el total (uno)"
+corre m1 buscar CANCION --carpeta projects
+espera "· Acentuación · Café y canción." "buscar: sin acentos y con su sección"
+corre m1 buscar juguete --carpeta projects
+espera "projects/alfa.md:3 · cabecera · description: Proyecto alfa" "buscar: un acierto en el frontmatter dice «cabecera»"
+corre m1 buscar tarea --limite 5
+espera "(200 resultados; mostrando 1-5: --pagina 2 (o --limite N))" "buscar: total, lo que muestra y cómo seguir"
+[ "$(m1 buscar tarea --limite 5 | wc -l)" = 6 ] && ok "buscar: cinco líneas y el aviso" || mal "buscar: cinco líneas y el aviso"
+corre m1 buscar tarea --limite 5 --pagina 2
+espera "tarea 1.5:" "buscar: la página 2 sigue por donde iba"
+no_espera "tarea 1.4:" "buscar: …sin repetir"
+espera "mostrando 6-10" "buscar: …y dice dónde va"
+corre m1 buscar tarea --limite 5 --pagina 40
+espera "mostrando 196-200" "buscar: la última página no dice cómo seguir"
+no_espera "--pagina 41" "buscar: …porque no hay más"
+corre m1 buscar tarea --limite 5 --pagina 41
+rc_es 2 "buscar: una página que no existe falla (rc 2)"
+corre m1 buscar nadadenada
+espera "(0 resultados)" "buscar: sin resultados, lo dice"
+corre m1 buscar zorro-azul --json
+espera '"seccion": "Pendiente › Cola 5"' "buscar --json: lleva la sección"
+corre m1 lista projects --limite 1
+espera "(2 notas; mostrando 1: --pagina 2 (o --limite N))" "lista: total y paginación"
+
+# lo mismo por el Badulaque (sin MEMORIA_DIR, como en el Mac)
+corre mr1 leer largo
+espera "nota larga: lee una sección con --seccion" "remoto leer larga: el índice"
+espera "hash: " "remoto leer larga: con su hash"
+corre mr1 leer largo --seccion estado
+espera "Todo va bien." "remoto seccion: solo esa sección"
+no_espera "tarea" "remoto seccion: …y nada más"
+corre mr1 leer cafe
+espera "Espresso, filtrado y moka" "remoto leer corta: entera"
+corre mr1 buscar zorro-azul
+espera "projects/largo.md:" "remoto buscar: la ruta"
+espera "(1 resultado)" "remoto buscar: el total"
 
 # --- 1. la copia ----------------------------------------------------------------------------------------------
 

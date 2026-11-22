@@ -13,13 +13,17 @@
 //
 // Uso: memoria --help. Sin dependencias. Ver kit/README.md.
 
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   Fallo, analizar, conBadulaque, correr, ejecutarCli, enUnaLinea, fechaCorta, imprimirJson, plano, simular, textoDe, usar, usarOFallar
 } from "../badulaque/nativa.mjs";
+import { VENTANA_CARACTERES, VENTANA_LINEAS, miles, paginaDe, rangoDe, trozoDeListado } from "../badulaque/paginas.mjs";
 
-const VERSION = "2.0.0";
+const VERSION = "2.1.0";
+/** Una nota de más caracteres que esto es «larga»: `memoria leer` da su índice de secciones en vez de ella entera. */
+const NOTA_LARGA = 4000;
 const MEMORIA_DIR = (process.env.MEMORIA_DIR ?? "").trim();
 const LOCAL = MEMORIA_DIR !== "" && existsSync(MEMORIA_DIR);
 const COPIA = (process.env.MEMORIA_COPIA ?? "").trim() || join(process.env.HOME ?? "", "memoria");
@@ -28,13 +32,22 @@ const SERVIDOR = "refs/memoria/servidor";
 const AYUDA = `memoria: la memoria de Pablo como comandos (versión ${VERSION}).
 
 Lectura (${LOCAL ? `local, en ${MEMORIA_DIR}` : "por el Badulaque: no hay MEMORIA_DIR"}):
-  memoria buscar <texto…> [--carpeta X] [--limite N] [--archivo] [--regex] [--json]
-      Una línea por resultado: ruta:línea: fragmento. Varias palabras: todas en la misma línea, sin acentos ni
-      mayúsculas. Un texto entre comillas con espacios es una frase. --archivo incluye archive/.
-  memoria leer <nombre|ruta> [--seccion X]
-      La nota entera (con su frontmatter) o una sección, por el texto de su encabezado.
-  memoria lista [carpeta] [--json]
-      Sin carpeta, las carpetas con su número de notas. Con carpeta, cada nota con su description.
+  memoria buscar <texto…> [--carpeta X] [--limite N] [--pagina N] [--archivo] [--regex] [--json]
+      Una línea por resultado: ruta:línea · sección · fragmento (la sección sirve para ir luego con leer --seccion). Varias
+      palabras: todas en la misma línea, sin acentos ni mayúsculas. Un texto entre comillas con espacios es una frase.
+      --archivo incluye archive/. Acaba con el total («12 resultados; mostrando 1-5: --pagina 2»): --limite da los de
+      cada página (20 por defecto).
+  memoria leer <nombre|ruta> [--seccion X | --lineas A-B] [--pagina N] [--todo]
+      Una nota corta (hasta ~${miles(NOTA_LARGA)} caracteres) sale entera, con su frontmatter. Una larga da su cabecera (nombre,
+      descripción, hash), el índice de sus secciones (línea de inicio y caracteres de cada una) y cómo seguir.
+      --seccion X: esa sección con sus subsecciones, por el texto de su encabezado sin mayúsculas ni acentos y con
+      un prefijo basta si es único (si no, lista las que encajan; «A > B» baja por subsecciones).
+      --lineas A-B: esas líneas (de 1, las del índice). --todo: la nota entera, sin ventanas.
+      Lo que pasa de ~${VENTANA_LINEAS} líneas o ~${miles(VENTANA_CARACTERES)} caracteres sale por páginas: la primera, y el aviso
+      «(página 1 de 3: --pagina 2)»; repite la misma orden con --pagina N. Sin --seccion ni --lineas, --pagina lee la nota
+      seguida, de página en página.
+  memoria lista [carpeta] [--limite N] [--pagina N] [--json]
+      Sin carpeta, las carpetas con su número de notas. Con carpeta, cada nota con su description y el total (50 por página).
   memoria recientes [N] [--json]
       Los últimos N cambios (15 por defecto): cuándo, quién, para qué y las notas que tocó.
 
@@ -155,11 +168,20 @@ function resolverNota(referencia) {
   );
 }
 
+/** Dónde acaba el frontmatter: el índice (desde 0) de la primera línea que ya no es suyo (0 si no hay). */
+function finDeCabecera(lineas) {
+  if (lineas[0]?.trim() !== "---") return 0;
+  const fin = lineas.indexOf("---", 1);
+  return fin === -1 ? 0 : fin + 1;
+}
+
 /** Los encabezados de una nota fuera de los bloques de código: { nivel, texto, linea } (línea desde 0). */
 function encabezados(lineas) {
   const lista = [];
   let cerca = null;
+  const inicio = finDeCabecera(lineas);
   lineas.forEach((l, i) => {
+    if (i < inicio) return;
     const valla = /^\s*(```+|~~~+)/.exec(l);
     if (valla) {
       if (cerca === null) cerca = valla[1][0];
@@ -173,20 +195,134 @@ function encabezados(lineas) {
   return lista;
 }
 
-/** La sección de un encabezado, hasta el siguiente del mismo nivel o superior. */
-function seccionDe(contenido, pedida) {
-  const lineas = contenido.split("\n");
+/**
+ * Las secciones de una nota: cada encabezado con { nivel, texto, linea (desde 0), fin (exclusivo, desde 0), cadena }.
+ * Una sección llega hasta el siguiente encabezado del mismo nivel o superior, así que incluye sus subsecciones.
+ * `cadena` es el camino desde el encabezado de nivel más alto («Pendiente › Cola»).
+ */
+function secciones(lineas) {
   const lista = encabezados(lineas);
-  const quiere = plano(pedida.replace(/^#+\s*/, "").trim());
-  const e = lista.find(h => plano(h.texto) === quiere) ?? lista.find(h => plano(h.texto).startsWith(quiere));
-  if (!e) {
-    throw new Fallo(
-      `no hay ninguna sección «${pedida}». Hay:\n${lista.map(h => `  ${"#".repeat(h.nivel)} ${h.texto}`).join("\n")}`,
-      2
-    );
+  const pila = [];
+  return lista.map(h => {
+    while (pila.length && pila[pila.length - 1].nivel >= h.nivel) pila.pop();
+    pila.push(h);
+    const siguiente = lista.find(o => o.linea > h.linea && o.nivel <= h.nivel);
+    return { ...h, fin: siguiente ? siguiente.linea : lineas.length, cadena: pila.map(x => x.texto) };
+  });
+}
+
+const rotulo = h => `${"#".repeat(h.nivel)} ${h.texto}`;
+
+/** El camino de una sección sin el título de la nota (su encabezado de nivel 1) si hay otros debajo: es lo que sirve para ir a ella. */
+const camino = (h, lista) => (h.cadena.length > 1 && lista[0]?.nivel === 1 ? h.cadena.slice(1) : h.cadena).join(" › ");
+
+/** La sección que pide `pedida`: igual al encabezado, o con un prefijo único (sin mayúsculas ni acentos). */
+function buscarSeccion(lista, pedida) {
+  const limpio = t => plano(t.replace(/^#+\s*/, "").replace(/\s+/g, " ").trim());
+  const quiere = limpio(pedida);
+  if (!quiere) throw new Fallo("--seccion necesita el texto de un encabezado", 2);
+  const pasos = quiere.split(/\s*[>›]\s*/).filter(Boolean);
+  // «A > B»: cada paso es el comienzo del encabezado de ese nivel de la cadena (los últimos pasos con los últimos niveles).
+  const encaja = (h, exacto) => {
+    if (pasos.length > h.cadena.length) return false;
+    const cola = h.cadena.slice(h.cadena.length - pasos.length).map(limpio);
+    return pasos.every((p, i) => (exacto ? cola[i] === p : cola[i].startsWith(p)));
+  };
+  const exactos = lista.filter(h => encaja(h, true));
+  const candidatos = exactos.length ? exactos : lista.filter(h => encaja(h, false));
+  if (candidatos.length === 1) return candidatos[0];
+  const muestra = hs => hs.slice(0, 20).map(h => `  línea ${h.linea + 1} · ${"#".repeat(h.nivel)} ${camino(h, lista)}`).join("\n") + (hs.length > 20 ? `\n  … y ${hs.length - 20} más` : "");
+  if (!candidatos.length) {
+    throw new Fallo(`no hay ninguna sección «${pedida}». Hay:\n${muestra(lista)}\nLas ves con su tamaño con: memoria leer <nota>`, 2);
   }
-  const siguiente = lista.find(h => h.linea > e.linea && h.nivel <= e.nivel);
-  return lineas.slice(e.linea, siguiente ? siguiente.linea : lineas.length).join("\n").replace(/\s+$/, "\n");
+  throw new Fallo(`«${pedida}» encaja con ${candidatos.length} secciones; di cuál (más texto, «Padre > Hija» o --lineas A-B):\n${muestra(candidatos)}`, 2);
+}
+
+/** Dónde está la línea `linea` (desde 0) de una nota: «cabecera», «inicio» o la cadena de encabezados que la contiene. */
+function seccionDeLinea(lineas, lista, linea) {
+  if (linea < finDeCabecera(lineas)) return "cabecera";
+  let mejor = null;
+  for (const h of lista) if (h.linea <= linea && linea < h.fin && (!mejor || h.nivel > mejor.nivel)) mejor = h;
+  if (!mejor) return "inicio";
+  return enUnaLinea(camino(mejor, lista), 70);
+}
+
+/** El hash de una nota: el blob de git, el mismo `hash` que usa el servidor de la memoria. */
+function hashDeNota(contenido) {
+  const cuerpo = Buffer.from(contenido, "utf8");
+  return createHash("sha1").update(Buffer.concat([Buffer.from(`blob ${cuerpo.length}\0`), cuerpo])).digest("hex");
+}
+
+/**
+ * Lo que `memoria leer` saca de una nota, local o por el Badulaque:
+ * corta → entera; larga → cabecera + índice de secciones + aviso; con --seccion, --lineas o --pagina, ese trozo en ventanas.
+ */
+function mostrarNota({ ruta, contenido, hash }, op) {
+  if (op.seccion !== undefined && op.lineas !== undefined) throw new Fallo("--seccion y --lineas no se combinan: elige una", 2);
+  if (op.todo && op.pagina !== undefined) throw new Fallo("--todo y --pagina no se combinan: --todo da la nota entera sin ventanas", 2);
+  const lineas = contenido.replace(/\n$/, "").split("\n");
+  const total = lineas.length;
+  const lista = secciones(lineas);
+  const sale = (texto, pie) => {
+    process.stdout.write(texto.endsWith("\n") ? texto : `${texto}\n`);
+    if (pie) console.log(pie);
+  };
+  let trozo = lineas;
+  let primera = 1;
+  let que = "";
+  if (op.seccion !== undefined) {
+    const h = buscarSeccion(lista, op.seccion);
+    trozo = lineas.slice(h.linea, h.fin);
+    primera = h.linea + 1;
+    que = `sección «${camino(h, lista)}», `;
+  } else if (op.lineas !== undefined) {
+    const { desde, hasta } = rangoDe(op.lineas, total);
+    trozo = lineas.slice(desde - 1, hasta);
+    primera = desde;
+  } else if (op.pagina === undefined && !op.todo) {
+    if (contenido.length <= NOTA_LARGA) {
+      sale(contenido);
+      return 0;
+    }
+    return indiceDeNota({ ruta, contenido, hash }, lineas, lista, sale);
+  }
+  if (op.todo) {
+    // Sin ventanas, pero diciendo dónde está lo que se ve.
+    sale(trozo.join("\n"), op.seccion !== undefined || op.lineas !== undefined ? `(${que}líneas ${primera}-${primera + trozo.length - 1} de ${total})` : "");
+    return 0;
+  }
+  const { texto, pie } = paginaDe(trozo, { primeraLinea: primera, lineasTotales: total, n: op.pagina ?? 1 });
+  sale(texto, que ? pie.replace("(", `(${que}`) : pie);
+  return 0;
+}
+
+/** El índice de una nota larga: cabecera, secciones (línea, caracteres, título) y cómo seguir. */
+function indiceDeNota({ ruta, contenido, hash }, lineas, lista, sale) {
+  const f = frontmatter(contenido);
+  const salida = [];
+  salida.push(`${ruta}${f.name ? ` · ${f.name}` : ""}`);
+  if (f.description) salida.push(`descripción: ${enUnaLinea(f.description, 200)}`);
+  salida.push(`hash: ${hash ?? hashDeNota(contenido)} · ${lineas.length} líneas · ${miles(contenido.length)} caracteres`);
+  if (lista.length) {
+    // Un índice enorme tampoco sirve: si hay muchos encabezados, solo los niveles de arriba (y lo dice).
+    const nivelMin = Math.min(...lista.map(h => h.nivel));
+    let hasta = 6;
+    while (hasta > nivelMin && lista.filter(h => h.nivel <= hasta).length > 60) hasta--;
+    const vistas = lista.filter(h => h.nivel <= hasta);
+    salida.push("secciones (línea · caracteres con sus subsecciones · título):");
+    for (const h of vistas) {
+      const caracteres = lineas.slice(h.linea, h.fin).join("\n").length + 1;
+      salida.push(`${"  ".repeat(h.nivel - nivelMin)}${h.linea + 1} · ${miles(caracteres)} · ${rotulo(h)}`);
+    }
+    if (vistas.length < lista.length) {
+      salida.push(`(${lista.length - vistas.length} encabezados más profundos sin listar: --seccion '<título>' y su índice de subsecciones sale al leerla)`);
+    }
+  } else {
+    salida.push("sin encabezados: léela por rangos con --lineas A-B");
+  }
+  salida.push(`nota larga: lee una sección con --seccion '<título>' o un rango con --lineas A-B (o --pagina N / --todo: ${miles(contenido.length)} caracteres)`);
+  sale(salida.join("\n"));
+  return 0;
 }
 
 // --- patrón de búsqueda sin acentos ------------------------------------------
@@ -201,11 +337,14 @@ function regexSinAcentos(texto) {
 
 // --- comandos de lectura locales ----------------------------------------------
 
+const USO_LEER = "uso: memoria leer <nombre|ruta> [--seccion X | --lineas A-B] [--pagina N] [--todo]";
+
 function buscarLocal(pos, op) {
   const terminos = pos.map(t => t.trim()).filter(Boolean);
   if (!terminos.length) throw new Fallo("dime qué buscas: memoria buscar <texto…>", 2);
-  const limite = op.limite ?? 30;
-  const rgArgs = ["--no-heading", "--with-filename", "--line-number", "--color", "never", "--no-messages", "--ignore-case", "--max-count", "5", "-g", "*.md"];
+  const limite = op.limite ?? 20;
+  // --sort path: el orden es siempre el mismo, para que las páginas no se mezclen.
+  const rgArgs = ["--no-heading", "--with-filename", "--line-number", "--color", "never", "--no-messages", "--ignore-case", "--sort", "path", "-g", "*.md"];
   if (!op.archivo) rgArgs.push("-g", "!archive/**");
   if (op.regex) {
     rgArgs.push("-e", terminos.join(" "));
@@ -230,24 +369,36 @@ function buscarLocal(pos, op) {
     const i = op.regex || texto.trim().length <= 160 ? 0 : Math.max(0, plano(texto).indexOf(primero) - 40);
     return enUnaLinea(texto.slice(i), 160);
   };
-  const vistos = aciertos.slice(0, limite).map(a => ({ ...a, texto: fragmento(a.texto) }));
-  if (op.json) imprimirJson(vistos);
-  else for (const a of vistos) console.log(`${a.ruta}:${a.linea}: ${a.texto}`);
-  if (!aciertos.length) process.stderr.write("memoria: sin resultados\n");
-  else if (aciertos.length > limite) process.stderr.write(`memoria: ${aciertos.length - limite} resultados más (sube --limite o afina el texto)\n`);
+  const { desde, hasta, pie } = trozoDeListado(aciertos.length, limite, op.pagina ?? 1);
+  // La sección de cada resultado visible (se lee cada nota una sola vez).
+  const notas = new Map();
+  const seccionDe = a => {
+    if (!notas.has(a.ruta)) {
+      const lineas = readFileSync(resolve(MEMORIA_DIR, a.ruta), "utf8").replace(/\n$/, "").split("\n");
+      notas.set(a.ruta, { lineas, lista: secciones(lineas) });
+    }
+    const n = notas.get(a.ruta);
+    return seccionDeLinea(n.lineas, n.lista, a.linea - 1);
+  };
+  const vistos = aciertos.slice(desde, hasta).map(a => ({ ruta: a.ruta, linea: a.linea, seccion: seccionDe(a), texto: fragmento(a.texto) }));
+  if (op.json) {
+    imprimirJson(vistos);
+    process.stderr.write(`memoria: ${pie}\n`);
+  } else {
+    for (const a of vistos) console.log(`${a.ruta}:${a.linea} · ${a.seccion} · ${a.texto}`);
+    console.log(`(${pie})`);
+  }
   return 0;
 }
 
 function leerLocal(pos, op) {
-  if (pos.length !== 1) throw new Fallo("uso: memoria leer <nombre|ruta> [--seccion X]", 2);
+  if (pos.length !== 1) throw new Fallo(USO_LEER, 2);
   const ruta = resolverNota(pos[0]);
-  const contenido = readFileSync(resolve(MEMORIA_DIR, ruta), "utf8");
-  process.stdout.write(op.seccion ? seccionDe(contenido, op.seccion) : contenido.endsWith("\n") ? contenido : `${contenido}\n`);
-  return 0;
+  return mostrarNota({ ruta, contenido: readFileSync(resolve(MEMORIA_DIR, ruta), "utf8") }, op);
 }
 
 function listaLocal(pos, op) {
-  if (pos.length > 1) throw new Fallo("uso: memoria lista [carpeta]", 2);
+  if (pos.length > 1) throw new Fallo("uso: memoria lista [carpeta] [--limite N] [--pagina N]", 2);
   if (!pos.length) {
     const cuentas = new Map();
     for (const r of todasLasNotas()) {
@@ -267,8 +418,14 @@ function listaLocal(pos, op) {
     const f = frontmatter(texto);
     return { ruta, nombre: ruta.split("/").pop().replace(/\.md$/, ""), description: f.description ?? "", actualizada: statSync(resolve(MEMORIA_DIR, ruta)).mtime.toISOString() };
   });
-  if (op.json) imprimirJson(filas);
-  else for (const f of filas) console.log(f.description ? `${f.ruta} — ${enUnaLinea(f.description, 140)}` : f.ruta);
+  const { desde, hasta, pie } = trozoDeListado(filas.length, op.limite ?? 50, op.pagina ?? 1);
+  if (op.json) {
+    imprimirJson(filas.slice(desde, hasta));
+    process.stderr.write(`memoria: ${pie.replace("resultados", "notas").replace("resultado", "nota")}\n`);
+  } else {
+    for (const f of filas.slice(desde, hasta)) console.log(f.description ? `${f.ruta} — ${enUnaLinea(f.description, 140)}` : f.ruta);
+    console.log(`(${pie.replace("resultados", "notas").replace("resultado", "nota")})`);
+  }
   return 0;
 }
 
@@ -311,30 +468,50 @@ const lineaDeHit = h => `${h.path}:${h.section?.line_start ?? 1}: ${enUnaLinea(h
 async function buscarRemoto(pos, op) {
   const consulta = pos.join(" ").trim();
   if (!consulta) throw new Fallo("dime qué buscas: memoria buscar <texto…>", 2);
+  const limite = op.limite ?? 20;
+  const pagina = op.pagina ?? 1;
+  // El servidor no pagina: se piden los de las páginas anteriores y la actual, y se corta aquí.
   const r = await conBadulaque(ctx => usarOFallar(ctx, "memoria_search", {
-    query: consulta, limit: op.limite ?? 10,
+    query: consulta, limit: limite * pagina,
     ...(op.carpeta ? { folder: op.carpeta.replace(/\/+$/, "") } : {}), ...(op.archivo ? { include_archive: true } : {})
   }));
-  const hits = r.json?.hits ?? [];
-  if (op.json) imprimirJson(hits);
-  else for (const h of hits) console.log(lineaDeHit(h));
-  if (!hits.length) process.stderr.write("memoria: sin resultados\n");
+  const todos = r.json?.hits ?? [];
+  const sabido = Number(r.json?.total ?? r.json?.count);
+  const total = Number.isFinite(sabido) && sabido >= todos.length ? sabido : todos.length;
+  const desde = (pagina - 1) * limite;
+  const vistos = todos.slice(desde, desde + limite);
+  const titulo = h => h.section?.heading ?? h.section?.title ?? h.section?.name ?? h.section?.path ?? "";
+  const filas = vistos.map(h => ({ ruta: h.path, linea: h.section?.line_start ?? 1, seccion: titulo(h) || "?", texto: enUnaLinea(h.snippet ?? h.description ?? "", 160) }));
+  let pie;
+  if (!total) pie = "0 resultados";
+  else if (!vistos.length) throw new Fallo(`la página ${pagina} no existe: ${total} resultados, ${limite} por página`, 2);
+  else {
+    pie = `${total} ${total === 1 ? "resultado" : "resultados"}`;
+    if (total > vistos.length) pie += `; mostrando ${desde + 1}-${desde + vistos.length}`;
+    if (desde + vistos.length < total) pie += `: --pagina ${pagina + 1} (o --limite N)`;
+  }
+  if (op.json) {
+    imprimirJson(filas);
+    process.stderr.write(`memoria: ${pie}\n`);
+  } else {
+    for (const a of filas) console.log(`${a.ruta}:${a.linea} · ${a.seccion} · ${a.texto}`);
+    console.log(`(${pie})`);
+  }
   return 0;
 }
 
 async function leerRemoto(pos, op) {
-  if (pos.length !== 1) throw new Fallo("uso: memoria leer <nombre|ruta> [--seccion X]", 2);
+  if (pos.length !== 1) throw new Fallo(USO_LEER, 2);
   const ref = pos[0].replace(/^\[\[|\]\]$/g, "");
   const argumentos = ref.includes("/") || ref.endsWith(".md") ? { path: ref.endsWith(".md") ? ref : `${ref}.md` } : { name: ref };
-  if (op.seccion) argumentos.section = op.seccion.replace(/^#+\s*/, "");
+  // Se pide la nota entera y el recorte (índice, sección, rango, página) se hace aquí, igual que en local.
   const r = await conBadulaque(ctx => usarOFallar(ctx, "memoria_read", argumentos));
-  const texto = typeof r.json?.content === "string" ? r.json.content : r.texto;
-  process.stdout.write(texto.endsWith("\n") ? texto : `${texto}\n`);
-  return 0;
+  const contenido = typeof r.json?.content === "string" ? r.json.content : r.texto;
+  return mostrarNota({ ruta: r.json?.path ?? argumentos.path ?? ref, contenido, hash: typeof r.json?.hash === "string" ? r.json.hash : undefined }, op);
 }
 
 async function listaRemota(pos, op) {
-  if (pos.length > 1) throw new Fallo("uso: memoria lista [carpeta]", 2);
+  if (pos.length > 1) throw new Fallo("uso: memoria lista [carpeta] [--limite N] [--pagina N]", 2);
   const r = await conBadulaque(ctx => usarOFallar(ctx, "memoria_list", pos.length ? { folder: pos[0].replace(/\/+$/, ""), limit: 200 } : {}));
   if (!pos.length) {
     // Sin carpeta, el servidor da su índice corto: igual que en local, una línea por carpeta con su número de notas.
@@ -352,7 +529,9 @@ async function listaRemota(pos, op) {
     imprimirJson(notas.map(n => ({ ruta: n.path, nombre: n.name, description: n.description ?? "", actualizada: n.updated ?? n.modified ?? null })));
     return 0;
   }
-  for (const n of notas) console.log(n.description ? `${n.path} — ${enUnaLinea(n.description, 140)}` : n.path);
+  const { desde, hasta, pie } = trozoDeListado(notas.length, op.limite ?? 50, op.pagina ?? 1);
+  for (const n of notas.slice(desde, hasta)) console.log(n.description ? `${n.path} — ${enUnaLinea(n.description, 140)}` : n.path);
+  console.log(`(${pie.replace("resultados", "notas").replace("resultado", "nota")})`);
   return 0;
 }
 
@@ -852,9 +1031,9 @@ async function publicar(pos, op) {
 // --- entrada --------------------------------------------------------------------
 
 const OPCIONES = {
-  buscar: { carpeta: "valor", limite: "entero", archivo: "bool", regex: "bool", json: "bool" },
-  leer: { seccion: "valor" },
-  lista: { json: "bool" },
+  buscar: { carpeta: "valor", limite: "entero", pagina: "entero", archivo: "bool", regex: "bool", json: "bool" },
+  leer: { seccion: "valor", lineas: "valor", pagina: "entero", todo: "bool" },
+  lista: { limite: "entero", pagina: "entero", json: "bool" },
   recientes: { json: "bool" },
   copia: {},
   estado: { json: "bool" },
