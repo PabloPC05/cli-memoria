@@ -121,6 +121,12 @@ describe("retired names", () => {
 		expect(check("people/ana.md", person("Busca en la memoria.\n\nOtra línea.\n"), old)).toEqual({ blocking: [], warnings: [], existing: [] });
 	});
 
+	it("is case-sensitive unless the pattern asks otherwise", () => {
+		expect(check("topics/x.md", person("Ver Memoria_2025.pdf y lisa ia.\n", "Notes"), null).blocking).toEqual([]);
+		const loose = parseConventions(RULES.replace("{ pattern = '\\bLisa IA\\b',", "{ pattern = '\\bLisa IA\\b', ignore_case = true,")).rules as Rules;
+		expect(checkWrite(loose, { path: "topics/x.md", text: person("Y lisa ia.\n", "Notes") }, null).blocking.map((v) => v.rule)).toEqual(["obsolete"]);
+	});
+
 	it("leaves alone the notes a pattern excepts", () => {
 		expect(check("projects/historia-de-lisa.md", person("Antes se llamaba Lisa IA.\n", "Work"), null).blocking).toEqual([]);
 		expect(rulesOf(check("projects/historia-de-lisa.md", person("Usa memoria_read.\n", "Work"), null), "blocking")).toEqual(["obsolete"]);

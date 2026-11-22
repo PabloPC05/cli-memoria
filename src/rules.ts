@@ -163,7 +163,8 @@ export function parseRules(value: unknown): Rules | null {
 				if (t.ignore_case !== undefined && typeof t.ignore_case !== "boolean") throw new Error(`${key}.ignore_case must be true or false`);
 				let regex: RegExp;
 				try {
-					regex = new RegExp(pattern, t.ignore_case === false ? "gu" : "giu");
+					// Case-sensitive unless asked: «Memoria_2025.pdf» is a file, «memoria_read» a tool.
+					regex = new RegExp(pattern, t.ignore_case === true ? "giu" : "gu");
 				} catch (error) {
 					throw new Error(`${key}.pattern is not a valid regular expression: ${(error as Error).message}`);
 				}
