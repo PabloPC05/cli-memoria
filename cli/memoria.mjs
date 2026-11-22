@@ -11,16 +11,16 @@
 //   ajenos. El servidor es el único que escribe en el repositorio real: firma con la clave del agente y aplica sus reglas.
 //   `crear` y `editar` siguen siendo atajos de una sola nota por el Badulaque (y lo único que hay en el Mac).
 //
-// Uso: memoria --help. Sin dependencias. Ver kit/README.md.
+// Uso: memoria --help. Sin dependencias (sus módulos van en cli/lib/). Ver cli/README.md.
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   Fallo, analizar, conBadulaque, correr, ejecutarCli, enUnaLinea, fechaCorta, imprimirJson, plano, simular, textoDe, usar, usarOFallar
-} from "../badulaque/nativa.mjs";
-import { esAyuda, resolverOrden } from "../badulaque/nativa.mjs";
-import { VENTANA_CARACTERES, VENTANA_LINEAS, miles, paginaDe, rangoDe, trozoDeListado } from "../badulaque/paginas.mjs";
+} from "./lib/nativa.mjs";
+import { esAyuda, resolverOrden } from "./lib/nativa.mjs";
+import { VENTANA_CARACTERES, VENTANA_LINEAS, miles, paginaDe, rangoDe, trozoDeListado } from "./lib/paginas.mjs";
 
 const VERSION = "2.2.0";
 /** Una nota de más caracteres que esto es «larga»: `memoria leer` da su índice de secciones en vez de ella entera. */

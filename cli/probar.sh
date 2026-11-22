@@ -7,12 +7,17 @@
 # Entre la CLI y my-memory pone una pasarela mínima (la misma que el Badulaque para estas llamadas: buscador_usar con
 # «memoria_<herramienta>»), con una clave por agente que se traduce a su token de my-memory.
 #
-# Uso:  NODE=<node 22 o más> MY_MEMORY=<my-memory> kit/memoria/probar.sh
+# Uso:  NODE=<node 22 o más> MY_MEMORY=<my-memory> [MEMORIA=<memoria>] cli/probar.sh
+#   MY_MEMORY: el servidor (bin/my-memory del paquete por defecto, o el instalado).
+#   MEMORIA: la CLI que se prueba, ya empaquetada (p. ej. result/bin/memoria de `nix build .#memoria`, o la del kit de
+#   lisa). Sin MEMORIA, se prueba cli/memoria.mjs de este repositorio con NODE. NODE corre también la pasarela de juguete.
 # Requiere git, curl y jq. Imprime OK o FALLO por prueba y sale con 1 si alguna falla.
 set -u
 
 AQUI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${NODE:?falta NODE}" "${MY_MEMORY:?falta MY_MEMORY}"
+# La CLI: el ejecutable de MEMORIA, o este repositorio con NODE.
+if [ -n "${MEMORIA:-}" ]; then CLI=("$MEMORIA"); else CLI=("$NODE" "$AQUI/memoria.mjs"); fi
 for h in git curl jq; do command -v "$h" >/dev/null || { echo "Falta $h" >&2; exit 2; }; done
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/probar-memoria.XXXXXX")"
@@ -126,10 +131,10 @@ curl -s -o /dev/null "http://127.0.0.1:$PUERTO_MM/mcp" || { echo "my-memory no a
 # --- cómo se llama a la CLI -------------------------------------------------------------------------------------
 
 # m1 y m2: los agentes uno y dos, cada uno con su copia de trabajo y su clave.
-m1() { MEMORIA_DIR="$REPO" MEMORIA_COPIA="$T/copia1" HOME="$T/h1" BADULAQUE_CLAVE=clave-uno BADULAQUE_URL="http://127.0.0.1:$PUERTO_PA/" "$NODE" "$AQUI/memoria.mjs" "$@"; }
-m2() { MEMORIA_DIR="$REPO" MEMORIA_COPIA="$T/copia2" HOME="$T/h2" BADULAQUE_CLAVE=clave-dos BADULAQUE_URL="http://127.0.0.1:$PUERTO_PA/" "$NODE" "$AQUI/memoria.mjs" "$@"; }
+m1() { MEMORIA_DIR="$REPO" MEMORIA_COPIA="$T/copia1" HOME="$T/h1" BADULAQUE_CLAVE=clave-uno BADULAQUE_URL="http://127.0.0.1:$PUERTO_PA/" "${CLI[@]}" "$@"; }
+m2() { MEMORIA_DIR="$REPO" MEMORIA_COPIA="$T/copia2" HOME="$T/h2" BADULAQUE_CLAVE=clave-dos BADULAQUE_URL="http://127.0.0.1:$PUERTO_PA/" "${CLI[@]}" "$@"; }
 # mr1: lo mismo que m1 pero sin MEMORIA_DIR (como en el Mac): la lectura va por la pasarela, no por el disco.
-mr1() { MEMORIA_DIR="" MEMORIA_COPIA="$T/copiar" HOME="$T/h1" BADULAQUE_CLAVE=clave-uno BADULAQUE_URL="http://127.0.0.1:$PUERTO_PA/" "$NODE" "$AQUI/memoria.mjs" "$@"; }
+mr1() { MEMORIA_DIR="" MEMORIA_COPIA="$T/copiar" HOME="$T/h1" BADULAQUE_CLAVE=clave-uno BADULAQUE_URL="http://127.0.0.1:$PUERTO_PA/" "${CLI[@]}" "$@"; }
 mkdir -p "$T/h1" "$T/h2"
 c1() { git -C "$T/copia1" "$@"; }
 c2() { git -C "$T/copia2" "$@"; }
