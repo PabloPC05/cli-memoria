@@ -414,6 +414,58 @@ espera "HAS_BACKLINKS" "borrar una nota que otra enlaza: lo frena el servidor"
 c1 reset -q --hard refs/memoria/servidor
 c1 status --porcelain | grep -q . && mal "copia limpia tras el fallo" || ok "copia limpia tras el fallo"
 
+# --- 6b. el resto de las herramientas del servidor: historial, enlaces, revisar, escribir, mover, borrar, revertir ------------
+
+corre m1 historial topics/cafes
+rc_es 0 "historial: de una nota"
+espera "Café otra vez" "historial: sale la razón del commit"
+espera "(1 commit de topics/cafes.md)" "historial: acaba con el total"
+corre m1 historial topics/cafes --json
+espera '"commit"' "historial --json: da los commits"
+corre m1 enlaces ana
+rc_es 0 "enlaces: de una nota"
+espera "salientes" "enlaces: acaba con los totales"
+corre m1 enlaces ana --entrantes
+no_espera "salientes" "enlaces --entrantes: solo cuenta los que llegan"
+corre m1 enlaces ana --entrantes --salientes
+rc_es 2 "enlaces: --entrantes y --salientes juntos son un error de uso"
+corre m1 revisar --limite 3
+rc_es 0 "revisar: candidatos de mantenimiento"
+espera "candidatos" "revisar: acaba con el total"
+corre m1 revisar --tipos orphan --json
+espera '"items"' "revisar --json"
+antes=$(srv_head)
+printf -- '---\nname: Café\ndescription: Otra de café, reescrita\n---\n# Café\nReescrita entera por memoria escribir.\n' > "$T/nueva-cafes.md"
+corre m1 escribir topics/cafes --razon "Reescribir cafés" --archivo "$T/nueva-cafes.md" --simular
+espera '"simulado": true' "escribir --simular: enseña la llamada"
+[ "$(srv_head)" = "$antes" ] && ok "escribir --simular: no escribió nada" || mal "escribir --simular: no escribió nada"
+corre m1 escribir topics/cafes --razon "Reescribir cafés" --archivo "$T/nueva-cafes.md"
+rc_es 0 "escribir: toma el hash de ahora y reemplaza la nota"
+grep -q "Reescrita entera" "$REPO/topics/cafes.md" && ok "escribir: el servidor tiene la nota nueva" || mal "escribir: el servidor tiene la nota nueva"
+corre m1 escribir topics/cafes --razon "Mal hash" --archivo "$T/nueva-cafes.md" --hash 0000000000000000
+[ "$RC" != 0 ] && ok "escribir con un hash viejo: falla y no pisa" || mal "escribir con un hash viejo: falla" "$SAL"
+corre m1 mover topics/cafes topics/cafes-juntos --razon "Renombrar cafés"
+rc_es 0 "mover: renombra"
+[ -f "$REPO/topics/cafes-juntos.md" ] && [ ! -f "$REPO/topics/cafes.md" ] && ok "mover: el servidor la tiene en su sitio nuevo" || mal "mover: el servidor la tiene en su sitio nuevo"
+ult=$(srv log -1 --format=%H)
+corre m1 revertir "$ult" --razon "Deshacer el renombrado" --simular
+espera '"simulado": true' "revertir --simular"
+corre m1 revertir "$ult" --razon "Deshacer el renombrado"
+rc_es 0 "revertir: deshace el commit"
+[ -f "$REPO/topics/cafes.md" ] && [ ! -f "$REPO/topics/cafes-juntos.md" ] && ok "revertir: la nota vuelve a su sitio" || mal "revertir: la nota vuelve a su sitio"
+corre m1 borrar topics/cafes --razon "Fuera cafés" --simular
+espera '"simulado": true' "borrar --simular"
+corre m1 borrar topics/cafes --razon "Fuera cafés"
+rc_es 0 "borrar: la quita"
+[ ! -f "$REPO/topics/cafes.md" ] && ok "borrar: el servidor ya no la tiene" || mal "borrar: el servidor ya no la tiene"
+corre m1 adjuntar docs/x.pdf --archivo "$T/nueva-cafes.md" --descripcion "Una prueba" --razon "Adjunto" --simular
+espera '"memoria_attach"' "adjuntar --simular: enseña la llamada"
+corre m1 adjuntar docs/x.pdf --descripcion "Una prueba" --razon "Adjunto"
+rc_es 2 "adjuntar sin --archivo: error de uso"
+corre m1 borrar topics/nada-de-nada --razon "x"
+[ "$RC" != 0 ] && ok "borrar una nota que no existe: falla" || mal "borrar una nota que no existe: falla"
+c1 fetch -q 2>/dev/null; m1 actualizar >/dev/null 2>&1
+
 # --- 7. el repositorio de las notas no se toca a mano -----------------------------------------------------------------------
 
 srv fsck --no-dangling >/dev/null 2>&1 && ok "servidor: el repositorio sigue sano (git fsck)" || mal "servidor: git fsck"
