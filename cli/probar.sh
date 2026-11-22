@@ -52,7 +52,7 @@ TOML
   printf -- '---\nname: Ana\ndescription: Amiga de juguete\n---\n# Ana\nLe gusta el café.\n\n## Trabajo\nTrabaja en [[alfa]].\n' > people/ana.md
   printf -- '---\nname: Alfa\ndescription: Proyecto alfa de juguete\n---\n# Alfa\nPrimera línea.\n\n## Estado\nTodo va bien.\n\n## Pendiente\nComprar pan.\n' > projects/alfa.md
   printf -- '---\nname: Café\ndescription: Notas sobre el café\n---\n# Café\nEspresso, filtrado y moka.\n' > topics/cafe.md
-  printf -- '---\nname: Vieja\ndescription: Nota de juguete para borrar\n---\n# Vieja\nYa no sirve.\n' > topics/vieja.md
+  printf -- '---\nname: Vieja\ndescription: Nota de juguete para borrar\n---\n# Vieja\nYa no sirve. Una causa perdida.\n' > topics/vieja.md
   # Una nota larga para probar la lectura navegable: secciones y subsecciones, una sección enorme (Pendiente, con cinco
   # colas de 40 líneas: pasa de 8.000 caracteres), un prefijo ambiguo (Pendiente / Pendiente de pago), acentos y un
   # «# encabezado» dentro de un bloque de código que no cuenta.
@@ -219,7 +219,7 @@ corre m1 buscar juguete --carpeta projects
 espera "projects/alfa.md:3 · cabecera · description: Proyecto alfa" "buscar: un acierto en el frontmatter dice «cabecera»"
 corre m1 buscar tarea --limite 5
 espera "(200 resultados; mostrando 1-5: --pagina 2 (o --limite N))" "buscar: total, lo que muestra y cómo seguir"
-[ "$(m1 buscar tarea --limite 5 | wc -l)" = 6 ] && ok "buscar: cinco líneas y el aviso" || mal "buscar: cinco líneas y el aviso"
+[ "$(m1 buscar tarea --limite 5 | wc -l)" = 7 ] && ok "buscar: cinco líneas, la description de la nota (una vez) y el aviso" || mal "buscar: cinco líneas, la description de la nota y el aviso"
 corre m1 buscar tarea --limite 5 --pagina 2
 espera "tarea 1.5:" "buscar: la página 2 sigue por donde iba"
 no_espera "tarea 1.4:" "buscar: …sin repetir"
@@ -231,6 +231,28 @@ corre m1 buscar tarea --limite 5 --pagina 41
 rc_es 2 "buscar: una página que no existe falla (rc 2)"
 corre m1 buscar nadadenada
 espera "(0 resultados)" "buscar: sin resultados, lo dice"
+corre m1 buscar juguete --carpeta projects
+espera "  ↳ Proyecto alfa de juguete" "buscar: cada nota lleva su description, una línea corta bajo su primer resultado"
+# Varias palabras: si la frase exacta no da nada, por separado, con las notas que las tienen todas primero y su description.
+corre m1 buscar "cafe notas"
+espera "por palabras sueltas, primero las notas con todas:" "buscar por palabras: avisa de que la frase exacta no dio nada"
+[ "$(m1 buscar "cafe notas" | sed -n 2p | cut -d: -f1)" = "topics/cafe.md" ] && ok "buscar por palabras: la nota con todas (nombre y description) va primero" || mal "buscar por palabras: la nota con todas va primero"
+espera "  ↳ Notas sobre el café" "buscar por palabras: lleva la description de la nota"
+espera "(1 nota por palabras sueltas (1 con todas: cafe, notas))" "buscar por palabras: el resumen"
+corre m1 buscar "el café de la nota"
+espera "topics/cafe.md" "buscar por palabras: las palabras vacías (el, de, la) no cuentan"
+corre m1 buscar "cafe zzzz"
+espera "topics/cafe.md" "buscar por palabras: sin ninguna con todas, salen las que tienen alguna"
+corre m1 buscar "nadadenada zzzz"
+espera "(0 resultados, ni con las palabras sueltas" "buscar por palabras: sin nada, lo dice"
+corre m1 buscar "cafe notas" --json
+espera '"descripcion": "Notas sobre el café"' "buscar por palabras --json: lleva la description"
+corre m1 lista --carpeta projects
+espera "projects/alfa.md" "lista --carpeta X es lista X (el error más común: no hace fallar)"
+corre m1 buscar usa
+espera "(0 resultados)" "buscar: un término de 3 letras o menos solo cuenta entero («usa» no es «causa»)"
+corre m1 buscar causa
+espera "topics/vieja.md" "buscar: …y uno largo sí es subcadena"
 corre m1 buscar zorro-azul --json
 espera '"seccion": "Pendiente › Cola 5"' "buscar --json: lleva la sección"
 corre m1 lista projects --limite 1

@@ -355,6 +355,65 @@ function regexSinAcentos(texto) {
 
 const USO_LEER = "uso: memoria leer <nombre|ruta> [--seccion X | --lineas A-B] [--pagina N] [--todo]";
 
+// Palabras que no sirven para buscar (una frase como «correo de la universidad» se busca por «correo» y «universidad»).
+const PALABRAS_VACIAS = new Set(["de", "del", "la", "las", "el", "los", "un", "una", "unos", "unas", "y", "o", "en", "con", "por", "para", "que", "mi", "mis", "tu", "tus", "su", "sus", "a", "al", "lo", "se", "es", "me", "te"]);
+
+/** Las palabras de una frase para buscarlas por separado: sin acentos, sin signos, sin palabras vacías y sin repetir. */
+function palabrasDe(terminos) {
+  const todas = plano(terminos.join(" ")).split(/[^a-z0-9ñ]+/).filter(Boolean);
+  const utiles = todas.filter(w => w.length > 1 && !PALABRAS_VACIAS.has(w));
+  return [...new Set(utiles.length ? utiles : todas)];
+}
+
+/** ¿Está la palabra en el texto (ya sin acentos ni mayúsculas)? Las de 3 letras o menos, solo enteras: «usa» no es «causa». */
+const tienePalabra = (texto, w) => {
+  if (w.length > 3) return texto.includes(w);
+  let i = texto.indexOf(w);
+  while (i !== -1) {
+    if (!/[a-z0-9]/.test(texto[i - 1] ?? " ") && !/[a-z0-9]/.test(texto[i + w.length] ?? " ")) return true;
+    i = texto.indexOf(w, i + 1);
+  }
+  return false;
+};
+
+/**
+ * Búsqueda por palabras sueltas, para cuando la frase exacta no da nada: cada nota puntúa por palabra según dónde la tiene (nombre 8,
+ * descripción 5, títulos 3, cuerpo 1) y salen primero las que las tienen todas. Una línea por nota, con su `description` debajo.
+ */
+function buscarPorPalabras(palabras, op) {
+  const notas = [];
+  for (const ruta of todasLasNotas(op.carpeta ? op.carpeta.replace(/\/+$/, "") : "")) {
+    if (!op.archivo && ruta.startsWith("archive/")) continue;
+    let texto;
+    try {
+      texto = readFileSync(resolve(MEMORIA_DIR, ruta), "utf8");
+    } catch {
+      continue;
+    }
+    const lineas = texto.replace(/\n$/, "").split("\n");
+    const lista = secciones(lineas);
+    const f = frontmatter(texto);
+    const nombre = plano(ruta.replace(/\.md$/, ""));
+    const descripcion = plano(f.description ?? "");
+    const titulos = plano(lista.map(h => h.texto).join("\n"));
+    const planas = lineas.map(plano);
+    let puntos = 0;
+    let con = 0;
+    for (const w of palabras) {
+      const peso = tienePalabra(nombre, w) ? 8 : tienePalabra(descripcion, w) ? 5 : tienePalabra(titulos, w) ? 3 : planas.some(l => tienePalabra(l, w)) ? 1 : 0;
+      if (peso) {
+        con++;
+        puntos += peso;
+      }
+    }
+    if (con) notas.push({ ruta, lineas, lista, descripcion: f.description ?? "", planas, puntos, con });
+  }
+  const mejor = Math.max(0, ...notas.map(n => n.con));
+  const minimo = mejor === palabras.length ? palabras.length : Math.max(1, Math.ceil(palabras.length / 2));
+  const vistas = notas.filter(n => n.con >= minimo).sort((a, b) => b.con - a.con || b.puntos - a.puntos || a.ruta.localeCompare(b.ruta));
+  return { vistas, todas: vistas.filter(n => n.con === palabras.length).length };
+}
+
 function buscarLocal(pos, op) {
   const terminos = pos.map(t => t.trim()).filter(Boolean);
   if (!terminos.length) throw new Fallo("dime qué buscas: memoria buscar <texto…>", 2);
@@ -364,11 +423,13 @@ function buscarLocal(pos, op) {
   if (!op.archivo) rgArgs.push("-g", "!archive/**");
   if (op.regex) {
     rgArgs.push("-e", terminos.join(" "));
-  } else if (terminos.length === 1) {
-    rgArgs.push("-e", regexSinAcentos(terminos[0]));
   } else {
+    // Un término de 3 letras o menos solo cuenta entero («usa» no es «causa» ni «usando»): 483 resultados no sirven a nadie.
+    const parte = t => plano(t).length <= 3 ? `(?<![\\p{L}\\p{N}])${regexSinAcentos(t)}(?![\\p{L}\\p{N}])` : regexSinAcentos(t);
+    if (terminos.length === 1 && plano(terminos[0]).length > 3) rgArgs.push("-e", regexSinAcentos(terminos[0]));
+    else if (terminos.length === 1) rgArgs.push("-P", "-e", parte(terminos[0]));
     // Todas las palabras en la misma línea, en cualquier orden (PCRE2: miradas hacia delante).
-    rgArgs.push("-P", "-e", `^${terminos.map(t => `(?=.*${regexSinAcentos(t)})`).join("")}.*$`);
+    else rgArgs.push("-P", "-e", `^${terminos.map(t => `(?=.*${parte(t)})`).join("")}.*$`);
   }
   const donde = op.carpeta ? dentro(op.carpeta.replace(/\/+$/, "")).relativa || "." : ".";
   const r = correr("rg", [...rgArgs, "--", donde], { cwd: MEMORIA_DIR });
@@ -378,6 +439,11 @@ function buscarLocal(pos, op) {
     const m = /^(.*?):(\d+):(.*)$/.exec(l);
     if (!m) continue;
     aciertos.push({ ruta: m[1].replace(/^\.\//, ""), linea: Number(m[2]), texto: m[3] });
+  }
+  // Sin nada con la frase exacta: las palabras por separado (si son dos o más), con las notas que las tienen todas primero.
+  if (!aciertos.length && !op.regex) {
+    const palabras = palabrasDe(terminos);
+    if (palabras.length >= 2) return mostrarPorPalabras(palabras, terminos, op, op.limite ?? 10);
   }
   const primero = plano(terminos[0]);
   const fragmento = texto => {
@@ -396,14 +462,62 @@ function buscarLocal(pos, op) {
     const n = notas.get(a.ruta);
     return seccionDeLinea(n.lineas, n.lista, a.linea - 1);
   };
-  const vistos = aciertos.slice(desde, hasta).map(a => ({ ruta: a.ruta, linea: a.linea, seccion: seccionDe(a), texto: fragmento(a.texto) }));
+  // La `description` de cada nota, una vez, bajo su primer resultado: dice de qué va la nota sin tener que abrirla.
+  const descripciones = new Map();
+  const descripcionDe = ruta => {
+    if (!descripciones.has(ruta)) descripciones.set(ruta, enUnaLinea(frontmatter(notas.get(ruta).lineas.join("\n")).description ?? "", 110));
+    return descripciones.get(ruta);
+  };
+  const vistos = aciertos.slice(desde, hasta).map(a => ({ ruta: a.ruta, linea: a.linea, seccion: seccionDe(a), texto: fragmento(a.texto), descripcion: descripcionDe(a.ruta) }));
   if (op.json) {
     imprimirJson(vistos);
     process.stderr.write(`memoria: ${pie}\n`);
   } else {
-    for (const a of vistos) console.log(`${a.ruta}:${a.linea} · ${a.seccion} · ${a.texto}`);
+    const dichas = new Set();
+    for (const a of vistos) {
+      console.log(`${a.ruta}:${a.linea} · ${a.seccion} · ${a.texto}`);
+      if (a.descripcion && !dichas.has(a.ruta)) console.log(`  ↳ ${a.descripcion}`);
+      dichas.add(a.ruta);
+    }
     console.log(`(${pie})`);
   }
+  return 0;
+}
+
+function mostrarPorPalabras(palabras, terminos, op, limite) {
+  const { vistas, todas } = buscarPorPalabras(palabras, op);
+  const pagina = op.pagina ?? 1;
+  if (!vistas.length) {
+    if (op.json) imprimirJson([]);
+    else console.log(`(0 resultados, ni con las palabras sueltas: ${palabras.join(", ")})`);
+    return 0;
+  }
+  const { desde, hasta, pie } = trozoDeListado(vistas.length, limite, pagina);
+  const filas = vistas.slice(desde, hasta).map(n => {
+    // La línea con más de las palabras (la primera, si hay empate): ahí se ve por qué sale la nota.
+    let mejor = 0;
+    let cuenta = -1;
+    n.planas.forEach((l, i) => {
+      const c = palabras.filter(w => tienePalabra(l, w)).length;
+      if (c > cuenta) { cuenta = c; mejor = i; }
+    });
+    return {
+      ruta: n.ruta, linea: mejor + 1, seccion: seccionDeLinea(n.lineas, n.lista, mejor), texto: enUnaLinea(n.lineas[mejor], 160),
+      palabras: n.con, descripcion: enUnaLinea(n.descripcion, 110)
+    };
+  });
+  const resumen = `${vistas.length} ${vistas.length === 1 ? "nota" : "notas"} por palabras sueltas (${todas} con todas: ${palabras.join(", ")})`;
+  if (op.json) {
+    imprimirJson(filas);
+    process.stderr.write(`memoria: ${resumen}\n`);
+    return 0;
+  }
+  console.log(`sin «${terminos.join(" ")}» exacto; por palabras sueltas, primero las notas con todas:`);
+  for (const a of filas) {
+    console.log(`${a.ruta}:${a.linea} · ${a.seccion} · ${a.texto}`);
+    if (a.descripcion) console.log(`  ↳ ${a.descripcion}`);
+  }
+  console.log(`(${resumen}${pie.includes("mostrando") ? `; ${pie.replace(/^\d+ resultados?; /, "")}` : ""})`);
   return 0;
 }
 
@@ -1185,7 +1299,7 @@ async function publicar(pos, op) {
 const OPCIONES = {
   buscar: { carpeta: "valor", limite: "entero", pagina: "entero", archivo: "bool", regex: "bool", json: "bool" },
   leer: { seccion: "valor", lineas: "valor", pagina: "entero", todo: "bool" },
-  lista: { limite: "entero", pagina: "entero", json: "bool" },
+  lista: { carpeta: "valor", limite: "entero", pagina: "entero", json: "bool" },
   recientes: { json: "bool" },
   copia: {},
   estado: { json: "bool" },
@@ -1223,7 +1337,7 @@ async function principal(argv) {
   switch (orden) {
     case "buscar": return LOCAL ? buscarLocal(pos, op) : buscarRemoto(pos, op);
     case "leer": return LOCAL ? leerLocal(pos, op) : leerRemoto(pos, op);
-    case "lista": return LOCAL ? listaLocal(pos, op) : listaRemota(pos, op);
+    case "lista": if (op.carpeta && !pos.length) pos.push(op.carpeta); return LOCAL ? listaLocal(pos, op) : listaRemota(pos, op);
     case "recientes": return LOCAL ? recientesLocal(pos, op) : recientesRemoto(pos, op);
     case "copia": return copiar(pos);
     case "estado": return estado(pos, op);
