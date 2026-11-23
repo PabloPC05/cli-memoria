@@ -378,7 +378,7 @@ describe("lint and check report the same rules", () => {
 		expect(await env.memory.instructions()).toContain("Every write is checked against this memory's rules");
 	});
 
-	it("my-memory lint reads the notes for the rules kind", async () => {
+	it("cli-memoria lint reads the notes for the rules kind", async () => {
 		env = await makeMemory(SEED);
 		await env.memory.stop();
 		const toml = join(env.root, "server.toml");

@@ -127,7 +127,7 @@ describe("writing", () => {
 		expect(r.warnings.map((w) => w.code)).toEqual(["BROKEN_LINKS"]);
 		expect(r.hash).toBe((await env.memory.read({ path: "personas/sara.md" })).hash);
 		const remoteLog = await new Git(env.root).out(["--git-dir", env.bare as string, "log", "-1", "--format=%an <%ae>|%B"]);
-		expect(remoteLog).toContain("Test Writer <test-writer@my-memory.invalid>|Nueva persona");
+		expect(remoteLog).toContain("Test Writer <test-writer@cli-memoria.invalid>|Nueva persona");
 		expect(remoteLog).toContain("Session: chat-42");
 		expect(env.memory.search({ query: "amiga" }).hits[0]?.path).toBe("personas/sara.md");
 		const back = (await env.memory.links({ name: "perfil", direction: "in" })) as { in: unknown[] };

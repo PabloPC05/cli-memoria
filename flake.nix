@@ -1,5 +1,5 @@
 {
-  description = "cli-memoria (formerly my-memory): self-hosted, git-backed memory for AI agents: an MCP server and its CLI, memoria";
+  description = "cli-memoria: self-hosted, git-backed memory for AI agents (CLI memoria and MCP server)";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 

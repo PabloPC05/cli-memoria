@@ -5,10 +5,10 @@ import { MemoryError } from "./errors.js";
 import { LINT_KINDS } from "./lint.js";
 import type { ClientsService } from "./clients.js";
 import type { Logger } from "./log.js";
-import type { ClientIdentity, MemoryService, PublishChange, SearchMode } from "./memory.js";
+import type { ClientIdentity, MemoryService, PublishChange } from "./memory.js";
 import { SETUP_GUIDE_URI, setupGuide } from "./setup-guide.js";
 
-export const SERVER_NAME = "my-memory";
+export const SERVER_NAME = "cli-memoria";
 export const SERVER_VERSION = "0.1.0";
 
 const notePath = z.string().optional().describe("Repo-relative path, e.g. «temas/universidad.md». Give either path or name.");
@@ -63,25 +63,20 @@ export async function createMcpServer(memory: MemoryService, client: ClientIdent
 		wrap("list", (a: { folder?: string; include_archive?: boolean; limit?: number; cursor?: string }) => memory.list(a)),
 	);
 
-	// With embeddings configured the tool also searches by meaning; without them it is exactly the full-text search.
-	const semantic = memory.embedder !== null;
 	server.registerTool(
 		"search",
 		{
 			title: "Search notes",
-			description: semantic
-				? "Hybrid search: full text (accents ignored, word prefixes match) fused with search by meaning, so related words and paraphrases also find notes. Returns the best sections with a snippet; read the note or the section next. Use quotes for exact phrases. The archive is excluded unless include_archive."
-				: "Full-text search (accents ignored, word prefixes match). Returns the best sections with a snippet; read the note or the section next. Use quotes for exact phrases. The archive is excluded unless include_archive.",
+			description: "Full-text search (FTS5: accents ignored, word prefixes match). Returns the best sections with a snippet; read the note or the section next. Use quotes for exact phrases. The archive is excluded unless include_archive.",
 			inputSchema: {
 				query: z.string().describe("Words to look for."),
 				folder: z.string().optional(),
 				include_archive: z.boolean().optional(),
 				limit: z.number().int().min(1).max(50).optional().describe("Default 10."),
-				...(semantic ? { mode: z.enum(["hybrid", "text", "semantic"]).optional().describe("hybrid (default): words and meaning; text: words only; semantic: meaning only.") } : {}),
 			},
 			annotations: read,
 		},
-		wrap("search", (a: { query: string; folder?: string; include_archive?: boolean; limit?: number; mode?: SearchMode }) => memory.searchAny(a)),
+		wrap("search", (a: { query: string; folder?: string; include_archive?: boolean; limit?: number }) => memory.search(a)),
 	);
 
 	server.registerTool(
@@ -168,7 +163,7 @@ export async function createMcpServer(memory: MemoryService, client: ClientIdent
 			{
 				title: "Connected clients",
 				description:
-					"Every client that can use this memory (static tokens and OAuth apps, plus ids seen in the history): scope, when it was last seen and with which tool, how many writes it made in the last 7 and 30 days and when the last one was, and the latest `memory-setup <version>` record it left in the notes. Never returns tokens.",
+					"Every client that can use this memory (static tokens, plus ids seen in the history): scope, when it was last seen and with which tool, how many writes it made in the last 7 and 30 days and when the last one was, and the latest `memory-setup <version>` record it left in the notes. Never returns tokens.",
 				inputSchema: {},
 				annotations: read,
 			},

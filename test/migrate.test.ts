@@ -76,7 +76,7 @@ describe("migration", () => {
 
 		const commit = await applyMigration(clone, plan, { conventions: CONVENTIONS });
 		const git = new Git(clone);
-		expect(await git.out(["log", "-1", "--format=%an|%s", commit])).toBe("my-memory migration|Migrate links to [[wikilinks]] with unique names\n");
+		expect(await git.out(["log", "-1", "--format=%an|%s", commit])).toBe("cli-memoria migration|Migrate links to [[wikilinks]] with unique names\n");
 		expect(await git.out(["rev-list", "--count", "HEAD"])).toBe("2\n");
 		expect(await readFile(join(clone, "archivo/archivo.md"), "utf8")).toContain("[[README|el índice]]");
 		expect(await readFile(join(clone, "memory.toml"), "utf8")).toBe(CONVENTIONS);

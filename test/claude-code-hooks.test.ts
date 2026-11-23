@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { addToken, TokenStore } from "../src/auth/tokens.js";
-import { privateApp } from "../src/http.js";
+import { createApp } from "../src/http.js";
 import { silentLogger } from "../src/log.js";
 import { UploadStore } from "../src/uploads.js";
 import { makeMemory, note } from "./helpers.js";
@@ -50,7 +50,7 @@ describe("inject-memory hook against the real server", () => {
 		token = await addToken(tokensFile, "hook", "Inject hook", "read");
 		const uploads = new UploadStore(join(env.root, "data", "uploads"));
 		await uploads.init();
-		const app = privateApp({ memory: env.memory, tokens: new TokenStore(tokensFile), uploads, log: silentLogger });
+		const app = createApp({ memory: env.memory, tokens: new TokenStore(tokensFile), uploads, log: silentLogger });
 		server = await new Promise((resolve) => {
 			const s = app.listen(0, "127.0.0.1", () => resolve(s));
 		});
@@ -62,7 +62,7 @@ describe("inject-memory hook against the real server", () => {
 	});
 
 	const hook = (input: object, extra: Record<string, string> = {}) =>
-		node([join(HOOKS, "inject-memory.mjs")], { stdin: JSON.stringify(input), env: { MY_MEMORY_URL: url, MY_MEMORY_TOKEN: token, ...extra } });
+		node([join(HOOKS, "inject-memory.mjs")], { stdin: JSON.stringify(input), env: { MEMORIA_URL: url, MEMORIA_TOKEN: token, ...extra } });
 
 	it("adds the matching section to the prompt", async () => {
 		const { code, out } = await hook({ hook_event_name: "UserPromptSubmit", prompt: "¿cuándo vence el seguro del coche?" });
@@ -84,7 +84,7 @@ describe("inject-memory hook against the real server", () => {
 	});
 
 	it("stays silent with a wrong token or nothing to find", async () => {
-		expect(await hook({ hook_event_name: "UserPromptSubmit", prompt: "¿cuándo vence el seguro del coche?" }, { MY_MEMORY_TOKEN: "wrong" })).toEqual({ code: 0, out: "" });
+		expect(await hook({ hook_event_name: "UserPromptSubmit", prompt: "¿cuándo vence el seguro del coche?" }, { MEMORIA_TOKEN: "wrong" })).toEqual({ code: 0, out: "" });
 		expect(await hook({ hook_event_name: "UserPromptSubmit", prompt: "zanahorias moradas inexistentes" })).toEqual({ code: 0, out: "" });
 	});
 });

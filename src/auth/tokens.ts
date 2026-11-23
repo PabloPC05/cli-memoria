@@ -68,7 +68,7 @@ async function load(file: string): Promise<StaticToken[]> {
 
 async function save(file: string, tokens: StaticToken[]): Promise<void> {
 	const tmp = `${file}.tmp`;
-	await writeFile(tmp, `# my-memory static tokens. Only hashes are stored; manage with \`my-memory token\`.\n${stringifyToml({ token: tokens })}\n`, { mode: 0o640 });
+	await writeFile(tmp, `# cli-memoria static tokens. Only hashes are stored; manage with \`cli-memoria token\`.\n${stringifyToml({ token: tokens })}\n`, { mode: 0o640 });
 	await chmod(tmp, 0o640).catch(() => undefined);
 	await rename(tmp, file);
 }

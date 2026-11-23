@@ -5,7 +5,6 @@ import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { stringify as stringifyYaml } from "yaml";
 import { CONVENTIONS_FILE, type Conventions, defaultConventions, parseConventions } from "./conventions.js";
-import { dot, EmbeddingClient, Embedder, type EmbeddingsConfig, reciprocalRankFusion } from "./embeddings.js";
 import { MemoryError } from "./errors.js";
 import { extractAttachment, type Extraction } from "./extract.js";
 import { parseNote, splitFrontmatter } from "./frontmatter.js";
@@ -53,7 +52,7 @@ import {
 } from "./util.js";
 
 export interface ClientIdentity {
-	/** Stable id: the token id, or `oauth:<client_id>`. Goes into the `Client:` trailer. */
+	/** Stable id: the token id. Goes into the `Client:` trailer. */
 	id: string;
 	/** Commit author name. */
 	name: string;
@@ -63,7 +62,7 @@ export interface ClientIdentity {
 
 export interface RemoteConfig {
 	url: string;
-	/** HTTP basic credentials for the remote (a Forgejo bot user and its token). */
+	/** HTTP basic credentials for the remote git server. */
 	username?: string;
 	token?: string;
 }
@@ -83,12 +82,7 @@ export interface MemoryOptions {
 	log?: Logger;
 	pushRetry?: { initialMs: number; maxMs: number };
 	fetchIntervalMs?: number;
-	/** Optional semantic search through an embeddings endpoint; without it search is full-text only. */
-	embeddings?: EmbeddingsConfig | null;
-	embeddingsRetry?: { initialMs: number; maxMs: number };
 }
-
-export type SearchMode = "hybrid" | "text" | "semantic";
 
 type SearchArgs = { query: string; folder?: string; include_archive?: boolean; limit?: number };
 
@@ -177,8 +171,6 @@ export class MemoryService {
 	private syncRequested = false;
 	/** While a `publish` runs: the notes it writes, judged together at the end instead of one by one. */
 	private rulesBatch: BatchEntry[] | null = null;
-	/** Background embedding of sections; null when `[embeddings]` is not configured. */
-	readonly embedder: Embedder | null = null;
 
 	constructor(readonly opts: MemoryOptions) {
 		this.log = opts.log ?? silentLogger;
@@ -186,11 +178,10 @@ export class MemoryService {
 		this.pushDelay = opts.pushRetry?.initialMs ?? 30_000;
 		const config: Record<string, string> = {};
 		if (opts.remote?.token) {
-			const basic = Buffer.from(`${opts.remote.username ?? "my-memory"}:${opts.remote.token}`).toString("base64");
+			const basic = Buffer.from(`${opts.remote.username ?? "cli-memoria"}:${opts.remote.token}`).toString("base64");
 			config["http.extraHeader"] = `Authorization: Basic ${basic}`;
 		}
 		this.git = new Git(opts.repoDir, { config });
-		if (opts.embeddings) this.embedder = new Embedder(new EmbeddingClient(opts.embeddings), () => this.index, this.log, opts.embeddingsRetry);
 	}
 
 	// ── lifecycle ────────────────────────────────────────────────────────────
@@ -210,7 +201,7 @@ export class MemoryService {
 				await this.git.run(["init", "-q", "-b", this.branch]);
 			}
 		}
-		const committer = this.opts.committer ?? { name: "my-memory", email: `my-memory@${this.authorDomain()}` };
+		const committer = this.opts.committer ?? { name: "cli-memoria", email: `cli-memoria@${this.authorDomain()}` };
 		for (const [k, v] of [
 			["core.autocrlf", "false"],
 			["core.quotepath", "false"],
@@ -231,12 +222,7 @@ export class MemoryService {
 		}
 		await this.loadConventions();
 		this.index = new SearchIndex(this.opts.indexPath);
-		this.embedder?.checkModel();
 		await this.reconcileIndex();
-		if (this.embedder) {
-			this.log("info", "embeddings.status", this.embedder.status());
-			this.embedder.schedule();
-		}
 		if (this.opts.remote) {
 			await this.lock.run(() => this.syncLocked("startup")).catch((error) => this.log("warn", "sync.startup_failed", { error: String(error) }));
 		}
@@ -249,7 +235,6 @@ export class MemoryService {
 	async stop(): Promise<void> {
 		for (const t of [this.pushTimer, this.fetchTimer, this.syncTimer]) if (t) clearTimeout(t);
 		await this.lock.run(async () => undefined);
-		await this.embedder?.stop();
 		this.index?.close();
 	}
 
@@ -271,12 +256,12 @@ export class MemoryService {
 
 	private gitConfig(): Record<string, string> {
 		if (!this.opts.remote?.token) return {};
-		const basic = Buffer.from(`${this.opts.remote.username ?? "my-memory"}:${this.opts.remote.token}`).toString("base64");
+		const basic = Buffer.from(`${this.opts.remote.username ?? "cli-memoria"}:${this.opts.remote.token}`).toString("base64");
 		return { "http.extraHeader": `Authorization: Basic ${basic}` };
 	}
 
 	private authorDomain(): string {
-		return this.opts.authorDomain ?? "my-memory.invalid";
+		return this.opts.authorDomain ?? "cli-memoria.invalid";
 	}
 
 	// ── conventions and index ───────────────────────────────────────────────
@@ -381,7 +366,6 @@ export class MemoryService {
 			throw error;
 		}
 		this.log("info", "index.full", { files: files.length, ms: Date.now() - started, ...this.index.counts() });
-		this.embedder?.schedule();
 	}
 
 	private async incrementalReindex(from: string, to: string): Promise<void> {
@@ -426,7 +410,6 @@ export class MemoryService {
 			throw error;
 		}
 		this.log("info", "index.incremental", { changed: changed.length, ms: Date.now() - started });
-		this.embedder?.schedule();
 	}
 
 	/** Brings the index to HEAD: nothing, incremental, or a full rebuild if it cannot tell what changed. */
@@ -439,11 +422,10 @@ export class MemoryService {
 		return this.fullReindex(head);
 	}
 
-	/** Full rebuild on demand (`my-memory reindex`). `reembed` also drops every vector, so all sections are embedded again. */
-	async rebuildIndex(opts: { reembed?: boolean } = {}): Promise<void> {
+	/** Full rebuild on demand (`cli-memoria reindex`). */
+	async rebuildIndex(): Promise<void> {
 		await this.lock.run(async () => {
 			await this.loadConventions();
-			if (opts.reembed) this.index.clearVectors();
 			await this.fullReindex(await this.git.head());
 		});
 	}
@@ -1001,44 +983,10 @@ export class MemoryService {
 			}));
 	}
 
-	/** Full-text search only (bm25). */
+	/** Full-text search (FTS5 bm25). */
 	search(args: SearchArgs) {
 		const { mode, hits } = this.textHits(args);
 		return { mode, hits: MemoryService.hitsOut(hits) };
-	}
-
-	/**
-	 * The `search` tool. With embeddings configured, `hybrid` (the default) fuses the full-text ranking with the
-	 * ranking by cosine similarity to the query's vector (Reciprocal Rank Fusion), and `semantic` uses the vectors
-	 * alone. If the query cannot be embedded, the answer is the full-text search, the same as without embeddings.
-	 */
-	async searchAny(args: SearchArgs & { mode?: SearchMode }) {
-		const want = this.embedder ? (args.mode ?? "hybrid") : "text";
-		if (want === "text") return this.search(args);
-		const opts = this.searchOpts(args);
-		const pool = Math.max(opts.limit * 3, 30);
-		this.ftsQuery(args); // the same error as a text search, before calling the endpoint
-		const vector = await (this.embedder as Embedder).embedQuery(args.query);
-		if (!vector) return this.search(args);
-		// Everything below reads the index synchronously, after the await: a reindex cannot renumber the sections in between.
-		const ranked = this.index
-			.sectionVectors(opts)
-			.filter((s) => s.vector.length === vector.length)
-			.map((s) => ({ id: s.sectionId, similarity: dot(s.vector, vector) }))
-			.sort((a, b) => b.similarity - a.similarity)
-			.slice(0, pool);
-		const round = (x: number) => Math.round(x * 10_000) / 10_000;
-		if (want === "semantic") {
-			return { mode: "semantic" as const, hits: MemoryService.hitsOut(ranked.slice(0, opts.limit).map((r) => this.index.sectionHit(r.id, round(r.similarity)))) };
-		}
-		const text = this.textHits(args, pool);
-		const byId = new Map(text.hits.map((h) => [h.sectionId, h]));
-		const fused = [...reciprocalRankFusion([text.hits.map((h) => h.sectionId), ranked.map((r) => r.id)])].sort((a, b) => b[1] - a[1]).slice(0, opts.limit);
-		const hits = fused.map(([id, score]) => {
-			const h = byId.get(id);
-			return h ? { ...h, score: round(score) } : this.index.sectionHit(id, round(score));
-		});
-		return { mode: "hybrid" as const, hits: MemoryService.hitsOut(hits) };
 	}
 
 	async read(args: NoteRef & { section?: string; revision?: string }) {

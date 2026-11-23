@@ -1,10 +1,9 @@
 import type { Server } from "node:http";
 import { join } from "node:path";
-import { ForgejoOAuthProvider } from "./auth/oauth.js";
 import { TokenStore } from "./auth/tokens.js";
 import { buildClientsReport, ClientActivity, type ClientsService } from "./clients.js";
 import type { ServerConfig } from "./config.js";
-import { privateApp, publicApp } from "./http.js";
+import { createApp } from "./http.js";
 import { jsonLogger, type Logger } from "./log.js";
 import { MemoryService } from "./memory.js";
 import { detectOcr } from "./ocr.js";
@@ -13,12 +12,11 @@ import { UploadStore } from "./uploads.js";
 export interface RunningServer {
 	memory: MemoryService;
 	tokens: TokenStore;
-	oauth: ForgejoOAuthProvider | null;
-	servers: Server[];
+	server: Server;
 	stop: () => Promise<void>;
 }
 
-function listen(app: ReturnType<typeof privateApp>, address: string, port: number): Promise<Server> {
+function listen(app: ReturnType<typeof createApp>, address: string, port: number): Promise<Server> {
 	return new Promise((resolve, reject) => {
 		const server = app.listen(port, address, () => resolve(server));
 		server.once("error", reject);
@@ -42,14 +40,9 @@ export async function startServer(config: ServerConfig, log: Logger = jsonLogger
 		ocr,
 		log,
 		fetchIntervalMs: config.fetchIntervalSeconds > 0 ? config.fetchIntervalSeconds * 1000 : undefined,
-		embeddings: config.embeddings,
 	});
 	await memory.start();
 	const tokens = new TokenStore(config.tokensFile);
-	const oauth =
-		config.oauth && config.publicUrl
-			? new ForgejoOAuthProvider(join(config.dataDir, "state.sqlite"), { ...config.oauth, publicUrl: config.publicUrl, log })
-			: null;
 	const activity = new ClientActivity(join(config.dataDir, "activity.sqlite"));
 	const clients: ClientsService = {
 		record: (client, tool) => activity.record(client, tool),
@@ -58,7 +51,6 @@ export async function startServer(config: ServerConfig, log: Logger = jsonLogger
 				git: memory.git,
 				repoDir: memory.opts.repoDir,
 				staticClients: () => tokens.list(),
-				oauthClients: () => oauth?.listClients() ?? [],
 				activity: () => activity.all(),
 			}),
 	};
@@ -70,33 +62,22 @@ export async function startServer(config: ServerConfig, log: Logger = jsonLogger
 		}
 	}, 60_000);
 	flushActivity.unref();
-	const servers: Server[] = [];
-	if (config.listen.public && oauth && config.publicUrl) {
-		servers.push(await listen(publicApp({ memory, oauth, publicUrl: config.publicUrl, log, clients }), config.listen.public.address, config.listen.public.port));
-	}
-	if (config.listen.private) {
-		servers.push(await listen(privateApp({ memory, tokens, oauth, uploads, webhookSecret: config.webhookSecret, log, clients }), config.listen.private.address, config.listen.private.port));
-	}
+	const server = await listen(createApp({ memory, tokens, uploads, webhookSecret: config.webhookSecret, log, clients }), config.listen.address, config.listen.port);
 	const sweep = setInterval(() => uploads.sweep().catch(() => undefined), 60 * 60 * 1000);
 	sweep.unref();
 	log("info", "server.started", {
-		public: config.listen.public ? `${config.listen.public.address}:${config.listen.public.port}` : null,
-		private: config.listen.private ? `${config.listen.private.address}:${config.listen.private.port}` : null,
+		listen: `${config.listen.address}:${config.listen.port}`,
 		tokens: tokens.count,
-		oauth: Boolean(oauth),
-		embeddings: config.embeddings ? config.embeddings.model : null,
 	});
 	return {
 		memory,
 		tokens,
-		oauth,
-		servers,
+		server,
 		stop: async () => {
 			clearInterval(sweep);
 			clearInterval(flushActivity);
-			await Promise.all(servers.map((s) => new Promise<void>((r) => s.close(() => r()))));
+			await new Promise<void>((r) => server.close(() => r()));
 			await memory.stop();
-			oauth?.close();
 			activity.close();
 		},
 	};

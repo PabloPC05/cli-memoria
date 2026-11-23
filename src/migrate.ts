@@ -210,7 +210,7 @@ export async function applyMigration(repoDir: string, plan: MigrationPlan, opts:
 	await git.run(["add", "-A"]);
 	await git.run(["commit", "-q", "-F", "-"], {
 		input: `${opts.message ?? "Migrate links to [[wikilinks]] with unique names"}\n\nTool: migrate\n`,
-		env: { GIT_AUTHOR_NAME: "my-memory migration", GIT_AUTHOR_EMAIL: "migration@my-memory.invalid", GIT_COMMITTER_NAME: "my-memory migration", GIT_COMMITTER_EMAIL: "migration@my-memory.invalid" },
+		env: { GIT_AUTHOR_NAME: "cli-memoria migration", GIT_AUTHOR_EMAIL: "migration@cli-memoria.invalid", GIT_COMMITTER_NAME: "cli-memoria migration", GIT_COMMITTER_EMAIL: "migration@cli-memoria.invalid" },
 	});
 	return (await git.head()) as string;
 }

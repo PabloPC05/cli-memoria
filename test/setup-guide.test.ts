@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { addToken, TokenStore } from "../src/auth/tokens.js";
-import { privateApp } from "../src/http.js";
+import { createApp } from "../src/http.js";
 import { silentLogger } from "../src/log.js";
 import { SETUP_GUIDE_URI, SETUP_GUIDE_URL, setupGuide } from "../src/setup-guide.js";
 import { UploadStore } from "../src/uploads.js";
@@ -14,7 +14,7 @@ import { makeMemory, note, tempDir } from "./helpers.js";
 describe("setup guide", () => {
 	it("is bundled and readable relative to the package", () => {
 		const guide = setupGuide();
-		expect(guide).toContain("# Set up my-memory for your agent");
+		expect(guide).toContain("# Set up cli-memoria for your agent");
 	});
 
 	it("returns null for a missing file", async () => {
@@ -41,7 +41,7 @@ describe("setup guide over MCP", () => {
 		token = await addToken(tokensFile, "sam-reader", "Sam (reader)", "read");
 		const uploads = new UploadStore(join(env.root, "data", "uploads"));
 		await uploads.init();
-		const app = privateApp({ memory: env.memory, tokens: new TokenStore(tokensFile), uploads, log: silentLogger });
+		const app = createApp({ memory: env.memory, tokens: new TokenStore(tokensFile), uploads, log: silentLogger });
 		server = await new Promise((resolve) => {
 			const s = app.listen(0, "127.0.0.1", () => resolve(s));
 		});

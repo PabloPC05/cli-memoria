@@ -1,15 +1,15 @@
 // Claude Code PreToolUse hook: refuse writes to Claude Code's own memory (~/.claude/projects/*/memory/), so durable
-// knowledge goes to my-memory instead. Installed by the agent setup guide (docs/agent-setup.md, step 4c).
+// knowledge goes to cli-memoria instead. Installed by the agent setup guide (docs/agent-setup.md, step 4c).
 //
 // settings.json:
 //   "hooks": { "PreToolUse": [ { "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell",
 //     "hooks": [ { "type": "command", "command": "node", "args": ["<home>/.claude/hooks/block-native-memory.mjs"] } ] } ] }
 //
-// MEMORY_MCP_HINT (optional) replaces the tool hint in the message, e.g. "the MCP server memoria (memoria_search,
-// memoria_create, memoria_edit)". Reading the folder, or merely mentioning it, is allowed; only writes are refused.
+// MEMORY_MCP_HINT (optional) replaces the tool hint in the message, e.g. "the memoria CLI (`memoria buscar`, `memoria crear`, `memoria editar`)".
+// Reading the folder, or merely mentioning it, is allowed; only writes are refused.
 const hint =
   process.env.MEMORY_MCP_HINT ||
-  "the my-memory MCP server (search, then create or edit; the tools may carry a prefix such as memoria_)";
+  "cli-memoria (via the `memoria` CLI or MCP tools: search, then create or edit)";
 
 const memoryPath = String.raw`[^\s"'|;&<>]*\.claude/projects/[^/\s"'|;&<>]+/memory(?:/[^\s"'|;&<>]*)?`;
 const memoryDir = new RegExp(memoryPath);

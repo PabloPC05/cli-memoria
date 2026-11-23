@@ -1,25 +1,23 @@
 import { createHmac } from "node:crypto";
 import express, { type NextFunction, type Request, type Response } from "express";
-import { getOAuthProtectedResourceMetadataUrl, mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
-import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import type { ForgejoOAuthProvider } from "./auth/oauth.js";
 import type { TokenStore } from "./auth/tokens.js";
 import type { ClientsService } from "./clients.js";
 import type { Logger } from "./log.js";
 import type { ClientIdentity, MemoryService } from "./memory.js";
-import { createMcpServer, SERVER_NAME } from "./tools.js";
+import { createMcpServer } from "./tools.js";
 import type { UploadStore } from "./uploads.js";
 import { safeEqual } from "./util.js";
 
-/** Who is calling, from the validated token. Static tokens carry their own name; OAuth ones name the person and the app. */
-export function identityFrom(req: Request): ClientIdentity {
+type AuthedRequest = Request & { auth?: AuthInfo };
+
+/** Who is calling, from the validated static token. */
+export function identityFrom(req: AuthedRequest): ClientIdentity {
 	const auth = req.auth as AuthInfo;
 	const extra = (auth.extra ?? {}) as Record<string, string>;
 	const session = req.header("x-memory-session")?.slice(0, 200) ?? null;
-	if (extra.via === "static") return { id: auth.clientId, name: extra.name ?? auth.clientId, scope: auth.scopes.includes("write") ? "write" : "read", session };
-	return { id: `oauth:${auth.clientId}`, name: `${extra.user ?? "OAuth user"} (${extra.clientName ?? "OAuth client"})`, scope: auth.scopes.includes("write") ? "write" : "read", session };
+	return { id: auth.clientId, name: extra.name ?? auth.clientId, scope: auth.scopes.includes("write") ? "write" : "read", session };
 }
 
 /** Names of the tools called in a JSON-RPC body (one message or a batch); null entries for other requests. */
@@ -72,77 +70,39 @@ function errorHandler(log: Logger) {
 }
 
 /**
- * Public listener (behind the public reverse proxy): OAuth endpoints and MCP with OAuth access tokens only.
- * Static tokens are never accepted here, so a leaked one is useless from the internet.
+ * HTTP app: stateless MCP endpoint authenticated with per-client static Bearer tokens,
+ * streaming uploads (`PUT /uploads/:filename`) and an optional git push webhook (`POST /hooks/git`).
  */
-export function publicApp(opts: { memory: MemoryService; oauth: ForgejoOAuthProvider; publicUrl: string; log: Logger; clients?: ClientsService | null }): express.Express {
-	const app = express();
-	app.disable("x-powered-by");
-	app.set("trust proxy", "loopback");
-	const issuer = new URL(opts.publicUrl);
-	const resource = new URL("/mcp", issuer);
-	const minute = { windowMs: 60_000, standardHeaders: true, legacyHeaders: false };
-	app.use(
-		mcpAuthRouter({
-			provider: opts.oauth,
-			issuerUrl: issuer,
-			resourceServerUrl: resource,
-			scopesSupported: ["write"],
-			resourceName: SERVER_NAME,
-			authorizationOptions: { rateLimit: { ...minute, max: 30 } },
-			tokenOptions: { rateLimit: { ...minute, max: 30 } },
-			clientRegistrationOptions: { rateLimit: { ...minute, max: 10 } },
-		}),
-	);
-	app.get("/oauth/callback", asyncRoute(opts.oauth.callback));
-	app.all("/mcp", requireBearerAuth({ verifier: opts.oauth, resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resource) }), express.json({ limit: "64mb" }), asyncRoute(mcpHandler(opts.memory, opts.log, opts.clients ?? null)));
-	app.use((_req, res) => {
-		res.status(404).json({ error: "not_found" });
-	});
-	app.use(errorHandler(opts.log));
-	return app;
-}
-
-/**
- * Private listener (private network only): MCP with static tokens (or OAuth ones), uploads and the Forgejo webhook.
- */
-export function privateApp(opts: { memory: MemoryService; tokens: TokenStore; oauth?: ForgejoOAuthProvider | null; uploads: UploadStore; webhookSecret?: string | null; log: Logger; clients?: ClientsService | null }): express.Express {
+export function createApp(opts: { memory: MemoryService; tokens: TokenStore; uploads: UploadStore; webhookSecret?: string | null; log: Logger; clients?: ClientsService | null }): express.Express {
 	const app = express();
 	app.disable("x-powered-by");
 
-	const authenticate = async (req: Request, res: Response): Promise<boolean> => {
+	const authenticate = (req: AuthedRequest, res: Response): boolean => {
 		const m = /^Bearer\s+(.+)$/i.exec(req.header("authorization") ?? "");
 		if (m?.[1]) {
 			const token = m[1].trim();
 			const stat = opts.tokens.verify(token);
 			if (stat) {
-				req.auth = { token, clientId: stat.id, scopes: [stat.scope], extra: { via: "static", name: stat.name } };
+				req.auth = { token, clientId: stat.id, scopes: [stat.scope], extra: { name: stat.name } };
 				return true;
 			}
-			if (opts.oauth) {
-				try {
-					req.auth = await opts.oauth.verifyAccessToken(token);
-					return true;
-				} catch {
-					// fall through to 401
-				}
-			}
 		}
-		opts.log("warn", "auth.rejected", { listener: "private", path: req.path });
+		opts.log("warn", "auth.rejected", { path: req.path });
 		res.status(401).set("WWW-Authenticate", 'Bearer error="invalid_token"').json({ error: "invalid_token" });
 		return false;
 	};
 	const authenticated = (req: Request, res: Response, next: NextFunction) => {
-		authenticate(req, res).then((ok) => ok && next(), next);
+		if (authenticate(req, res)) next();
 	};
 
-	app.post("/hooks/forgejo", express.raw({ type: "*/*", limit: "10mb" }), (req, res) => {
+	app.post("/hooks/git", express.raw({ type: "*/*", limit: "10mb" }), (req, res) => {
 		if (!opts.webhookSecret) {
 			res.status(404).end();
 			return;
 		}
 		const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
-		const given = (req.header("x-forgejo-signature") ?? req.header("x-gitea-signature") ?? "").trim().toLowerCase();
+		const rawSig = (req.header("x-hub-signature-256") ?? req.header("x-webhook-signature") ?? "").trim().toLowerCase();
+		const given = rawSig.startsWith("sha256=") ? rawSig.slice("sha256=".length) : rawSig;
 		const expected = createHmac("sha256", opts.webhookSecret).update(body).digest("hex");
 		if (!given || !safeEqual(given, expected)) {
 			opts.log("warn", "webhook.bad_signature", {});

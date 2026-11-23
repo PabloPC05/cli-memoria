@@ -192,7 +192,7 @@ mention_min_length = 5
 	});
 });
 
-describe("my-memory lint", () => {
+describe("cli-memoria lint", () => {
 	it("reads the running server's index read-only and validates --limit", async () => {
 		env = await makeMemory(SEED);
 		const file = join(env.root, "config.toml");

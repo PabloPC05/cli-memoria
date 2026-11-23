@@ -4,6 +4,10 @@ Agents compare the `memory-setup <version>` line of the instructions they instal
 of [the guide](../agent-setup.md), and propose updates when this file lists a newer one. Bump the version only for
 changes an installed agent should act on.
 
+## 0.4.0 — 2026-11-23
+
+Renamed to `cli-memoria` (repository URL updated to `PabloPC05/cli-memoria`) and CLI-first discovery: on shell-capable hosts, agents now check for the `memoria` CLI first (`MEMORIA_DIR` for fast local reads, `MEMORIA_URL` + `MEMORIA_TOKEN` for direct writes to `/mcp`), falling back to direct MCP tools where no shell is available. `inject-memory.mjs` now reads `MEMORIA_URL` / `MEMORIA_TOKEN` (while keeping `MY_MEMORY_URL` / `MY_MEMORY_TOKEN` as legacy fallbacks). Installed agents: update your Source URL to `PabloPC05/cli-memoria` and bump the `memory-setup` marker to 0.4.0.
+
 ## 0.3.3 — 2026-10-18
 
 Relevant notes can reach the agent without it having to think of searching, as Supermemory does with hooks.

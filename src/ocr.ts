@@ -84,7 +84,7 @@ class TesseractRunner implements OcrRunner {
 
 	async pdfPage(file: string, page: number): Promise<string> {
 		// One temp dir per page: the PNG of a 300 dpi page can be tens of MB, so it never outlives its page.
-		const dir = await mkdtemp(join(tmpdir(), "my-memory-ocr-"));
+		const dir = await mkdtemp(join(tmpdir(), "cli-memoria-ocr-"));
 		try {
 			const prefix = join(dir, "page");
 			const n = String(page);

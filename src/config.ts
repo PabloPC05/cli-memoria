@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
-import type { EmbeddingsConfig } from "./embeddings.js";
 import type { Level } from "./log.js";
 import { defaultOcrSettings, type OcrSettings } from "./ocr.js";
 
@@ -15,22 +14,10 @@ export interface ServerConfig {
 	branch: string;
 	authorDomain: string;
 	remote: { url: string; username: string; token: string | null } | null;
-	listen: { public: Listen | null; private: Listen | null };
-	publicUrl: string | null;
+	listen: Listen;
 	tokensFile: string | null;
 	webhookSecret: string | null;
-	oauth: {
-		forgejoUrl: string;
-		forgejoInternalUrl: string;
-		clientId: string;
-		clientSecret: string;
-		allowedUsers: string[];
-		accessTtlSeconds: number;
-		refreshTtlSeconds: number;
-	} | null;
 	fetchIntervalSeconds: number;
-	/** Optional semantic search; null keeps search full-text only. */
-	embeddings: (EmbeddingsConfig & { apiKeyFile: string | null }) | null;
 	pdftotext: string;
 	ocr: OcrSettings;
 	logLevel: Level;
@@ -56,37 +43,6 @@ function readSecret(value: unknown, key: string, base: string, read = true): str
 	const text = readFileSync(secretPath(value, base), "utf8").trim();
 	if (!text) throw new Error(`${key}: the file is empty`);
 	return text;
-}
-
-/** Reads a secret named in the config (a path or `credential:NAME`); for the CLI, which loads configs without secrets. */
-export function readSecretFile(value: string): string {
-	const text = readFileSync(secretPath(value, process.cwd()), "utf8").trim();
-	if (!text) throw new Error(`${value}: the file is empty`);
-	return text;
-}
-
-function num(v: unknown, key: string, fallback: number, min: number): number {
-	if (v === undefined) return fallback;
-	if (typeof v !== "number" || !Number.isFinite(v) || v < min) throw new Error(`${key} must be a number >= ${min}`);
-	return v;
-}
-
-function embeddings(t: Record<string, unknown> | undefined, base: string, read: boolean): ServerConfig["embeddings"] {
-	if (!t) return null;
-	const url = str(t.url, "embeddings.url");
-	if (!/^https?:\/\//.test(url)) throw new Error("embeddings.url must be an http(s) URL");
-	const keyFile = t.api_key_file === undefined ? null : str(t.api_key_file, "embeddings.api_key_file");
-	return {
-		url,
-		model: str(t.model, "embeddings.model"),
-		apiKey: readSecret(t.api_key_file, "embeddings.api_key_file", base, read),
-		apiKeyFile: keyFile === null || keyFile.startsWith("credential:") ? keyFile : secretPath(keyFile, base),
-		dimensions: t.dimensions === undefined ? null : Math.floor(num(t.dimensions, "embeddings.dimensions", 0, 1)),
-		batchSize: Math.floor(num(t.batch_size, "embeddings.batch_size", 32, 1)),
-		timeoutSeconds: num(t.timeout_seconds, "embeddings.timeout_seconds", 60, 1),
-		queryPrefix: t.query_prefix === undefined ? "" : String(t.query_prefix),
-		documentPrefix: t.document_prefix === undefined ? "" : String(t.document_prefix),
-	};
 }
 
 function str(v: unknown, key: string, fallback?: string): string {
@@ -119,8 +75,8 @@ function ocrSettings(v: unknown): OcrSettings {
 	};
 }
 
-function listen(v: unknown, key: string): Listen | null {
-	if (v === undefined) return null;
+function parseListen(v: unknown, key: string): Listen {
+	if (typeof v !== "object" || v === null || Array.isArray(v)) throw new Error(`${key} must be a table with port`);
 	const t = v as Record<string, unknown>;
 	if (typeof t.port !== "number" || !Number.isInteger(t.port)) throw new Error(`${key}.port must be an integer`);
 	return { address: str(t.address, `${key}.address`, "127.0.0.1"), port: t.port };
@@ -132,43 +88,24 @@ export function loadConfig(file: string, opts: { secrets?: boolean } = {}): Serv
 	const base = resolve(file, "..");
 	const doc = parseToml(readFileSync(file, "utf8")) as Record<string, unknown>;
 	const remote = doc.remote as Record<string, unknown> | undefined;
-	const oauth = doc.oauth as Record<string, unknown> | undefined;
-	const listenT = (doc.listen ?? {}) as Record<string, unknown>;
-	const dataDir = resolve(base, str(doc.data_dir, "data_dir", "/var/lib/my-memory"));
-	const config: ServerConfig = {
+	const listenRaw = doc.listen as Record<string, unknown> | undefined;
+	if (!listenRaw) throw new Error("configure [listen] with address and port");
+	// Accept legacy [listen.private] so existing config files keep working during migration.
+	const listen = listenRaw.port !== undefined ? parseListen(listenRaw, "listen") : listenRaw.private !== undefined ? parseListen(listenRaw.private, "listen.private") : parseListen(listenRaw, "listen");
+	const dataDir = resolve(base, str(doc.data_dir, "data_dir", "/var/lib/cli-memoria"));
+	return {
 		dataDir,
 		branch: str(doc.branch, "branch", "main"),
-		authorDomain: str(doc.author_domain, "author_domain", "my-memory.invalid"),
+		authorDomain: str(doc.author_domain, "author_domain", "cli-memoria.invalid"),
 		remote: remote
-			? { url: str(remote.url, "remote.url"), username: str(remote.username, "remote.username", "my-memory"), token: readSecret(remote.token_file, "remote.token_file", base, read) }
+			? { url: str(remote.url, "remote.url"), username: str(remote.username, "remote.username", "cli-memoria"), token: readSecret(remote.token_file, "remote.token_file", base, read) }
 			: null,
-		listen: { public: listen(listenT.public, "listen.public"), private: listen(listenT.private, "listen.private") },
-		publicUrl: doc.public_url === undefined ? null : str(doc.public_url, "public_url").replace(/\/+$/, ""),
+		listen,
 		tokensFile: doc.tokens_file === undefined ? null : resolve(base, str(doc.tokens_file, "tokens_file")),
 		webhookSecret: readSecret(doc.webhook_secret_file, "webhook_secret_file", base, read),
-		oauth: oauth
-			? {
-					forgejoUrl: str(oauth.forgejo_url, "oauth.forgejo_url"),
-					forgejoInternalUrl: str(oauth.forgejo_internal_url ?? oauth.forgejo_url, "oauth.forgejo_internal_url"),
-					clientId: readSecret(oauth.client_id_file, "oauth.client_id_file", base, read) ?? str(oauth.client_id, "oauth.client_id"),
-					clientSecret: readSecret(oauth.client_secret_file, "oauth.client_secret_file", base, read) ?? "",
-					allowedUsers: Array.isArray(oauth.allowed_users) ? (oauth.allowed_users as string[]) : [],
-					accessTtlSeconds: typeof oauth.access_ttl_seconds === "number" ? oauth.access_ttl_seconds : 3600,
-					refreshTtlSeconds: typeof oauth.refresh_ttl_seconds === "number" ? oauth.refresh_ttl_seconds : 30 * 24 * 3600,
-				}
-			: null,
 		fetchIntervalSeconds: typeof doc.fetch_interval_seconds === "number" ? doc.fetch_interval_seconds : 300,
-		embeddings: embeddings(doc.embeddings as Record<string, unknown> | undefined, base, read),
 		pdftotext: str(doc.pdftotext, "pdftotext", "pdftotext"),
 		ocr: ocrSettings(doc.ocr),
 		logLevel: (["debug", "info", "warn", "error"].includes(doc.log_level as string) ? doc.log_level : "info") as Level,
 	};
-	if (config.listen.public) {
-		if (!config.oauth) throw new Error("listen.public needs [oauth]: only OAuth tokens are accepted on the public listener");
-		if (!config.publicUrl) throw new Error("listen.public needs public_url");
-		if (!config.oauth.clientSecret) throw new Error("oauth.client_secret_file is required");
-		if (config.oauth.allowedUsers.length === 0) throw new Error("oauth.allowed_users must name at least one Forgejo login");
-	}
-	if (!config.listen.public && !config.listen.private) throw new Error("configure at least one of listen.public or listen.private");
-	return config;
 }

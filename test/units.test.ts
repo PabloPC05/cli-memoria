@@ -1,11 +1,15 @@
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
+import { loadConfig } from "../src/config.js";
 import { defaultConventions, parseConventions } from "../src/conventions.js";
 import { parseNote, splitFrontmatter } from "../src/frontmatter.js";
 import { maskCode, parseWikiLinks, rewriteWikiLinks, splitSections } from "../src/markdown.js";
 import { parseTypedLinks } from "../src/relations.js";
-import { buildFtsQuery } from "../src/search-index.js";
+import { buildFtsQuery, SCHEMA_VERSION, SearchIndex } from "../src/search-index.js";
 import { blobHash, checkNewFilename, checkPath, looksLikeSame, parseNameStatus, parseSince } from "../src/util.js";
-import { CONVENTIONS } from "./helpers.js";
+import { CONVENTIONS, tempDir } from "./helpers.js";
 
 const conv = parseConventions(CONVENTIONS);
 
@@ -182,5 +186,46 @@ describe("history helpers", () => {
 			{ status: "R", path: "temas/c.md", from: "temas/b.md" },
 			{ status: "D", path: 'temas/q"uote.md' },
 		]);
+	});
+});
+
+describe("index schema and config", () => {
+	it("replaces an index made with a previous schema version", async () => {
+		const path = join(await tempDir(), "index.sqlite");
+		const old = new DatabaseSync(path);
+		old.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES ('schema_version', '3'), ('indexed_commit', 'abc');");
+		old.exec("CREATE TABLE vectors (hash TEXT PRIMARY KEY, vector BLOB NOT NULL);");
+		old.close();
+		const index = new SearchIndex(path);
+		expect(index.getMeta("schema_version")).toBe(SCHEMA_VERSION);
+		expect(index.getMeta("indexed_commit")).toBeNull();
+		index.close();
+	});
+
+	it("opens an index read-only for the CLI, refusing another schema version instead of resetting it", async () => {
+		const dir = await tempDir();
+		const path = join(dir, "index.sqlite");
+		expect(() => new SearchIndex(join(dir, "missing.sqlite"), { readOnly: true })).toThrow(/cannot open the index/);
+		const old = new DatabaseSync(path);
+		old.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES ('schema_version', '3'), ('indexed_commit', 'abc');");
+		old.close();
+		expect(() => new SearchIndex(path, { readOnly: true })).toThrow(/schema version 3 and this cli-memoria expects/);
+		const check = new DatabaseSync(path);
+		expect(check.prepare("SELECT value FROM meta WHERE key = 'indexed_commit'").get()).toEqual({ value: "abc" }); // untouched
+		check.close();
+		new SearchIndex(path).close(); // the server's open rebuilds it
+		const ro = new SearchIndex(path, { readOnly: true });
+		expect(ro.getMeta("schema_version")).toBe(SCHEMA_VERSION);
+		expect(() => ro.setMeta("x", "y")).toThrow(/readonly/i);
+		ro.close();
+	});
+
+	it("loads [listen] and keeps legacy [listen.private] working", async () => {
+		const dir = await tempDir();
+		const file = join(dir, "config.toml");
+		await writeFile(file, 'data_dir = "data"\n[listen]\naddress = "127.0.0.1"\nport = 8782\n');
+		expect(loadConfig(file).listen).toEqual({ address: "127.0.0.1", port: 8782 });
+		await writeFile(file, 'data_dir = "data"\n[listen.private]\nport = 8783\n');
+		expect(loadConfig(file).listen).toEqual({ address: "127.0.0.1", port: 8783 });
 	});
 });

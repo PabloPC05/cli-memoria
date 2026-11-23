@@ -2,7 +2,7 @@ self:
 { pkgs, ... }:
 
 {
-  name = "my-memory-module";
+  name = "cli-memoria-module";
 
   nodes.machine =
     { pkgs, ... }:
@@ -13,20 +13,20 @@ self:
         pkgs.curl
         pkgs.jq
       ];
-      services.my-memory = {
+      services.cli-memoria = {
         enable = true;
         remote.url = "/srv/notes.git";
-        listen.private = {
+        listen = {
           address = "127.0.0.1";
           port = 8782;
         };
-        tokensFile = "/etc/my-memory-tokens.toml";
+        tokensFile = "/etc/cli-memoria-tokens.toml";
         fetchIntervalSeconds = 0;
       };
       # The service starts in the test script, once the remote exists. The remote here is a local
       # path, which ProtectSystem=strict makes read-only unless allowed (a real remote is HTTP).
-      systemd.services.my-memory.wantedBy = pkgs.lib.mkForce [ ];
-      systemd.services.my-memory.serviceConfig.ReadWritePaths = [ "/srv/notes.git" ];
+      systemd.services.cli-memoria.wantedBy = pkgs.lib.mkForce [ ];
+      systemd.services.cli-memoria.serviceConfig.ReadWritePaths = [ "/srv/notes.git" ];
     };
 
   testScript = ''
@@ -41,16 +41,16 @@ self:
       "git -C /tmp/seed -c user.name=t -c user.email=t@t add -A",
       "git -C /tmp/seed -c user.name=t -c user.email=t@t commit -qm seed",
       "git -C /tmp/seed push -q origin main",
-      "chown -R my-memory:my-memory /srv/notes.git",
+      "chown -R cli-memoria:cli-memoria /srv/notes.git",
     )
-    token = machine.succeed("my-memory token add tester --name Tester --scope write --file /etc/my-memory-tokens.toml").strip()
-    machine.succeed("chgrp my-memory /etc/my-memory-tokens.toml && chmod 0640 /etc/my-memory-tokens.toml")
-    machine.succeed("systemctl start my-memory")
+    token = machine.succeed("cli-memoria token add tester --name Tester --scope write --file /etc/cli-memoria-tokens.toml").strip()
+    machine.succeed("chgrp cli-memoria /etc/cli-memoria-tokens.toml && chmod 0640 /etc/cli-memoria-tokens.toml")
+    machine.succeed("systemctl start cli-memoria")
     machine.wait_for_open_port(8782)
 
     # OCR tools are found at startup (tesseract with spa+eng, pdftoppm).
-    machine.succeed("journalctl -u my-memory -o cat | grep ocr.tools | grep -F '\"pdf\":true,\"image\":true'")
-    machine.succeed("journalctl -u my-memory -o cat | grep ocr.tools | grep -F '\"languages\":\"spa+eng\"'")
+    machine.succeed("journalctl -u cli-memoria -o cat | grep ocr.tools | grep -F '\"pdf\":true,\"image\":true'")
+    machine.succeed("journalctl -u cli-memoria -o cat | grep ocr.tools | grep -F '\"languages\":\"spa+eng\"'")
 
     def call(body):
         return machine.succeed(
@@ -61,7 +61,7 @@ self:
         )
 
     init = call('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')
-    assert "my-memory" in init, init
+    assert "cli-memoria" in init, init
 
     found = call('{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search","arguments":{"query":"asignaturas"}}}')
     assert "temas/universidad.md" in found, found

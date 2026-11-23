@@ -16,7 +16,7 @@ export function note(name: string, description: string, body = "", extra = ""): 
 	return `---\nname: ${name}\ndescription: ${description}\n${extra}---\n# ${name}\n\n${body}\n`;
 }
 
-/** A bare repo playing Forgejo, seeded with files in one initial commit. */
+/** A bare repo playing the git remote, seeded with files in one initial commit. */
 export async function seedRemote(root: string, files: Record<string, string>): Promise<string> {
 	const bare = join(root, "remote.git");
 	await new Git(root).run(["init", "-q", "--bare", "-b", "main", bare]);

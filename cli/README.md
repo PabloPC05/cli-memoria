@@ -1,6 +1,6 @@
 # `memoria`, la CLI de cli-memoria
 
-cli-memoria (antes my-memory) es una memoria compartida en git con su servidor y su CLI `memoria`.
+`cli-memoria` es una memoria compartida en git con su servidor y su CLI `memoria`.
 
 `memoria` expone las notas Markdown en git como comandos de terminal pensados para agentes: salida compacta (una línea por resultado, con el total y cómo seguir), `--json` para filtrar con `jq`, `--simular` en todo lo que escribe y códigos de salida estables. Sin dependencias de npm: Node 22 o más y unos `.mjs`.
 
@@ -31,12 +31,12 @@ nix/memoria.nix      el paquete `memoria` del flake
 ## Cómo lee y cómo escribe
 
 - **Leer** (`buscar`, `leer`, `lista`, `recientes`): con `MEMORIA_DIR`, directamente en una copia del repositorio de
-  notas (basta de solo lectura), con `rg` y `git`, sin pasar por MCP. Sin `MEMORIA_DIR`, las mismas lecturas por la
-  pasarela (`search`, `read`, `list` y `recent` de my-memory).
+  notas (basta de solo lectura), con `rg` y `git`, sin pasar por MCP. Sin `MEMORIA_DIR`, las mismas lecturas van al
+  servidor (`search`, `read`, `list` y `recent` de `cli-memoria`).
   - `buscar` da una línea por resultado (`ruta:línea · sección · fragmento`) y, bajo el primer resultado de cada nota,
     `↳ (cambiada el AAAA-MM-DD) su description`. La fecha es la del último commit que tocó la nota, de una sola pasada
     de `git log` por todo el historial (unos 40 ms con 2.200 commits; lo mismo que hace el servidor al indexar). Sin
-    `MEMORIA_DIR`, la que dé el servidor: `read` la da (`updated_at`); `search`, hoy no, y entonces no sale.
+    `MEMORIA_DIR`, la fecha viene también en la respuesta de `search` y `read` (`updated_at`).
   - `buscar <texto> --en <nota>`: las líneas de esa nota que coinciden, con su número y su sección, y el total: se mira
     dentro de una nota sin leerla entera, y luego se lee lo que haga falta con `leer --lineas A-B` o `--seccion S`.
   - Las notas en bruto están en `MEMORIA_DIR`, para `rg -n` cuando haga falta algo que `buscar` no da.
@@ -89,16 +89,16 @@ El paquete va en `x86_64-linux`, `aarch64-linux`, `x86_64-darwin` y `aarch64-dar
 
 ```sh
 NODE=$(command -v node) \
-MY_MEMORY=$(nix build --no-link --print-out-paths .#default)/bin/my-memory \
+CLI_MEMORIA=$(nix build --no-link --print-out-paths .#default)/bin/cli-memoria \
   cli/probar.sh
 
 # la CLI empaquetada en vez de cli/memoria.mjs
-MEMORIA=$(nix build --no-link --print-out-paths .#memoria)/bin/memoria NODE=… MY_MEMORY=… cli/probar.sh
+MEMORIA=$(nix build --no-link --print-out-paths .#memoria)/bin/memoria NODE=… CLI_MEMORIA=… cli/probar.sh
 ```
 
-Levanta un my-memory de verdad en una carpeta temporal, con notas de juguete, dos agentes y una pasarela de juguete;
+Levanta un servidor `cli-memoria` de verdad en una carpeta temporal, con notas de juguete, dos agentes y una pasarela de juguete;
 prueba la lectura navegable, `buscar --en`, las fechas, la ayuda y los alias, la copia de trabajo, `publicar` (también
-choques entre agentes), las herramientas por la pasarela y que ningún token salga en las salidas. Vale con un my-memory con
+choques entre agentes), el modo directo (`MEMORIA_URL`/`MEMORIA_TOKEN`), el modo pasarela y que ningún token salga en las salidas. Vale con un servidor con
 `publish` y sin él: dice al empezar cuál es, y las pruebas de `publicar` esperan lo que toca en cada caso. No toca ninguna memoria real. Necesita `git`, `curl`, `jq` y `rg`.
 
 ## Códigos de salida

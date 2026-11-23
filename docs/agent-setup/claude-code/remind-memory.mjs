@@ -1,5 +1,5 @@
 // Claude Code UserPromptSubmit hook: when the user's message talks about saving or remembering something, add a
-// reminder to that turn that "memory" means my-memory (a note there, not a local file). Installed by the agent
+// reminder to that turn that "memory" means cli-memoria (a note there, not a local file). Installed by the agent
 // setup guide (docs/agent-setup.md, step 4c). Instructions alone were not enough: asked for "a markdown in my
 // memory", an agent wrote a local file.
 //
@@ -7,11 +7,11 @@
 //   "hooks": { "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "node",
 //     "args": ["<home>/.claude/hooks/remind-memory.mjs"] } ] } ] }
 //
-// MEMORY_MCP_HINT (optional) names the server and tools, e.g. "the MCP server memoria (memoria_search, memoria_create,
-// memoria_edit)". The trigger covers English and Spanish; extend it for other languages.
+// MEMORY_MCP_HINT (optional) names the CLI or server tools, e.g. "the memoria CLI (`memoria buscar`, `memoria crear`, `memoria editar`)".
+// The trigger covers English and Spanish; extend it for other languages.
 const hint =
   process.env.MEMORY_MCP_HINT ||
-  "the my-memory MCP server (search, then create or edit; the tools may carry a prefix such as memoria_)";
+  "cli-memoria (via the `memoria` CLI or MCP tools: search, then create or edit)";
 
 export const trigger = new RegExp(
   [

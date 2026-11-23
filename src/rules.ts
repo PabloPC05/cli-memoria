@@ -8,7 +8,7 @@ import { normalizeWords, topFolder } from "./util.js";
  * Write rules: what a memory declares in the `[rules]` table of its `memory.toml` and the server enforces on every
  * write, so that code and not the model that writes decides what may enter the memory. A write may not add a
  * violation; what a note already had only warns, so old notes stay editable while they get cleaned up.
- * Everything here is pure (text in, findings out): the server, `lint` and `my-memory check` share it.
+ * Everything here is pure (text in, findings out): the server, `lint` and `cli-memoria check` share it.
  */
 
 export const RULE_IDS = ["frontmatter", "type", "obsolete", "append_only", "forbidden_section", "template", "size"] as const;
@@ -323,7 +323,7 @@ export function datesThePast(line: string): boolean {
 
 /**
  * Violations a note has as it stands (every rule but `append_only`, which compares two versions).
- * Used for each side of a write and, on its own, by `lint` and `my-memory check`.
+ * Used for each side of a write and, on its own, by `lint` and `cli-memoria check`.
  */
 export function noteViolations(rules: Rules, path: string, text: string, only?: RuleId[]): Violation[] {
 	const on = (r: RuleId) => !only || only.includes(r);

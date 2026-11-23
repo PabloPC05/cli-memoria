@@ -15,35 +15,20 @@ let
     optional
     optionalAttrs
     ;
-  cfg = config.services.my-memory;
+  cfg = config.services.cli-memoria;
   toml = pkgs.formats.toml { };
 
   # Tesseract with just the language data the OCR config asks for. Only referenced (so only built) with OCR on.
   ocrTesseract = pkgs.tesseract.override { enableLanguages = lib.unique cfg.ocr.languages; };
 
-  listenType = types.submodule {
-    options = {
-      address = mkOption {
-        type = types.str;
-        default = "127.0.0.1";
-      };
-      port = mkOption { type = types.port; };
-    };
-  };
-
   # Secrets reach the service through systemd credentials; the config only names them.
   credentials =
     optional (cfg.remote != null && cfg.remote.tokenFile != null) "remote-token:${cfg.remote.tokenFile}"
-    ++ optional (cfg.webhookSecretFile != null) "webhook-secret:${cfg.webhookSecretFile}"
-    ++ optional (cfg.oauth != null) "oauth-client-id:${cfg.oauth.clientIdFile}"
-    ++ optional (cfg.oauth != null) "oauth-client-secret:${cfg.oauth.clientSecretFile}"
-    ++ optional (
-      cfg.embeddings != null && cfg.embeddings.apiKeyFile != null
-    ) "embeddings-api-key:${cfg.embeddings.apiKeyFile}";
+    ++ optional (cfg.webhookSecretFile != null) "webhook-secret:${cfg.webhookSecretFile}";
 
   settings =
     {
-      data_dir = "/var/lib/my-memory";
+      data_dir = "/var/lib/cli-memoria";
       inherit (cfg) branch;
       author_domain = cfg.authorDomain;
       fetch_interval_seconds = cfg.fetchIntervalSeconds;
@@ -61,11 +46,10 @@ let
           tesseract = "${ocrTesseract}/bin/tesseract";
           pdftoppm = "${pkgs.poppler-utils}/bin/pdftoppm";
         };
-      listen =
-        optionalAttrs (cfg.listen.public != null) { public = cfg.listen.public; }
-        // optionalAttrs (cfg.listen.private != null) { private = cfg.listen.private; };
+      listen = {
+        inherit (cfg.listen) address port;
+      };
     }
-    // optionalAttrs (cfg.publicUrl != null) { public_url = cfg.publicUrl; }
     // optionalAttrs (cfg.tokensFile != null) { tokens_file = cfg.tokensFile; }
     // optionalAttrs (cfg.webhookSecretFile != null) { webhook_secret_file = "credential:webhook-secret"; }
     // optionalAttrs (cfg.remote != null) {
@@ -74,41 +58,18 @@ let
           inherit (cfg.remote) url username;
         }
         // optionalAttrs (cfg.remote.tokenFile != null) { token_file = "credential:remote-token"; };
-    }
-    // optionalAttrs (cfg.oauth != null) {
-      oauth = {
-        forgejo_url = cfg.oauth.forgejoUrl;
-        forgejo_internal_url = cfg.oauth.forgejoInternalUrl;
-        client_id_file = "credential:oauth-client-id";
-        client_secret_file = "credential:oauth-client-secret";
-        allowed_users = cfg.oauth.allowedUsers;
-        access_ttl_seconds = cfg.oauth.accessTtlSeconds;
-        refresh_ttl_seconds = cfg.oauth.refreshTtlSeconds;
-      };
-    }
-    // optionalAttrs (cfg.embeddings != null) {
-      embeddings =
-        {
-          inherit (cfg.embeddings) url model;
-          batch_size = cfg.embeddings.batchSize;
-          timeout_seconds = cfg.embeddings.timeoutSeconds;
-          query_prefix = cfg.embeddings.queryPrefix;
-          document_prefix = cfg.embeddings.documentPrefix;
-        }
-        // optionalAttrs (cfg.embeddings.dimensions != null) { inherit (cfg.embeddings) dimensions; }
-        // optionalAttrs (cfg.embeddings.apiKeyFile != null) { api_key_file = "credential:embeddings-api-key"; };
     };
 
-  configFile = toml.generate "my-memory.toml" settings;
+  configFile = toml.generate "cli-memoria.toml" settings;
 in
 {
-  options.services.my-memory = {
-    enable = mkEnableOption "my-memory, a git-backed memory server for AI agents (MCP)";
+  options.services.cli-memoria = {
+    enable = mkEnableOption "cli-memoria, a git-backed memory server for AI agents (MCP)";
 
     package = mkOption {
       type = types.package;
       default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-      description = "The my-memory package.";
+      description = "The cli-memoria package.";
     };
 
     branch = mkOption {
@@ -118,20 +79,20 @@ in
 
     authorDomain = mkOption {
       type = types.str;
-      default = "my-memory.invalid";
+      default = "cli-memoria.invalid";
       description = "Domain of commit author emails (<client-id>@<domain>).";
     };
 
     remote = mkOption {
       default = null;
-      description = "Git remote of the notes repo (e.g. a Forgejo repo). Without it the repo stays local.";
+      description = "Git remote of the notes repo. Without it the repo stays local.";
       type = types.nullOr (
         types.submodule {
           options = {
             url = mkOption { type = types.str; };
             username = mkOption {
               type = types.str;
-              default = "my-memory";
+              default = "cli-memoria";
             };
             tokenFile = mkOption {
               type = types.nullOr types.str;
@@ -144,121 +105,31 @@ in
     };
 
     listen = {
-      public = mkOption {
-        type = types.nullOr listenType;
-        default = null;
-        description = "Listener for the public reverse proxy: OAuth only.";
+      address = mkOption {
+        type = types.str;
+        default = "127.0.0.1";
+        description = "Bind address for the HTTP listener (MCP, uploads and git webhook).";
       };
-      private = mkOption {
-        type = types.nullOr listenType;
-        default = null;
-        description = "Listener for trusted networks: static tokens, uploads and the webhook.";
+      port = mkOption {
+        type = types.port;
+        default = 8782;
+        description = "Bind port for the HTTP listener.";
       };
-    };
-
-    publicUrl = mkOption {
-      type = types.nullOr types.str;
-      default = null;
-      example = "https://memory.example.com";
     };
 
     tokensFile = mkOption {
       type = types.nullOr types.str;
       default = null;
       description = ''
-        TOML file with static token hashes, managed with `my-memory token add|list|revoke --file <it>`.
-        Read directly (not as a credential) so `systemctl reload my-memory` picks up changes; it must be
-        readable by the my-memory group.
+        TOML file with static token hashes, managed with `cli-memoria token add|list|revoke --file <it>`.
+        Read directly (not as a credential) so `systemctl reload cli-memoria` picks up changes; it must be
+        readable by the cli-memoria group.
       '';
     };
 
     webhookSecretFile = mkOption {
       type = types.nullOr types.str;
       default = null;
-    };
-
-    oauth = mkOption {
-      default = null;
-      description = "OAuth for remote MCP clients (claude.ai), signing in with Forgejo.";
-      type = types.nullOr (
-        types.submodule {
-          options = {
-            forgejoUrl = mkOption {
-              type = types.str;
-              description = "Forgejo as the user's browser reaches it.";
-            };
-            forgejoInternalUrl = mkOption {
-              type = types.str;
-              description = "Forgejo as this server reaches it.";
-            };
-            clientIdFile = mkOption { type = types.str; };
-            clientSecretFile = mkOption { type = types.str; };
-            allowedUsers = mkOption { type = types.listOf types.str; };
-            accessTtlSeconds = mkOption {
-              type = types.int;
-              default = 3600;
-            };
-            refreshTtlSeconds = mkOption {
-              type = types.int;
-              default = 2592000;
-            };
-          };
-        }
-      );
-    };
-
-    embeddings = mkOption {
-      default = null;
-      description = ''
-        Optional semantic search: an OpenAI-compatible embeddings endpoint (Ollama, llama.cpp server,
-        Hugging Face TEI, OpenAI…). Search then fuses full text with search by meaning; without it
-        search is full-text only.
-      '';
-      type = types.nullOr (
-        types.submodule {
-          options = {
-            url = mkOption {
-              type = types.str;
-              example = "http://127.0.0.1:11434/v1/embeddings";
-              description = "Full URL of the /v1/embeddings endpoint.";
-            };
-            model = mkOption {
-              type = types.str;
-              example = "nomic-embed-text";
-            };
-            apiKeyFile = mkOption {
-              type = types.nullOr types.str;
-              default = null;
-              description = "File with the API key (sent as a Bearer token), if the endpoint needs one.";
-            };
-            dimensions = mkOption {
-              type = types.nullOr types.ints.positive;
-              default = null;
-              description = "Output size to ask for, for models that support it (OpenAI text-embedding-3-*).";
-            };
-            batchSize = mkOption {
-              type = types.ints.positive;
-              default = 32;
-            };
-            timeoutSeconds = mkOption {
-              type = types.ints.positive;
-              default = 60;
-            };
-            queryPrefix = mkOption {
-              type = types.str;
-              default = "";
-              example = "search_query: ";
-              description = "Prepended to search queries (some models, like nomic-embed-text or e5, want it).";
-            };
-            documentPrefix = mkOption {
-              type = types.str;
-              default = "";
-              example = "search_document: ";
-              description = "Prepended to note sections.";
-            };
-          };
-        }
-      );
     };
 
     fetchIntervalSeconds = mkOption {
@@ -317,49 +188,39 @@ in
   config = mkIf cfg.enable {
     assertions = [
       {
-        assertion = cfg.listen.public != null || cfg.listen.private != null;
-        message = "services.my-memory: set listen.public and/or listen.private";
-      }
-      {
-        assertion = cfg.listen.public == null || (cfg.oauth != null && cfg.publicUrl != null);
-        message = "services.my-memory: the public listener needs oauth and publicUrl";
-      }
-      {
         assertion = !cfg.ocr.enable || cfg.ocr.languages != [ ];
-        message = "services.my-memory: ocr.languages must name at least one language";
+        message = "services.cli-memoria: ocr.languages must name at least one language";
       }
     ];
 
-    users.users.my-memory = {
+    users.users.cli-memoria = {
       isSystemUser = true;
-      group = "my-memory";
-      home = "/var/lib/my-memory";
+      group = "cli-memoria";
+      home = "/var/lib/cli-memoria";
     };
-    users.groups.my-memory = { };
+    users.groups.cli-memoria = { };
 
     environment.systemPackages = [ cfg.package ];
-    environment.etc."my-memory/config.toml".source = configFile;
+    environment.etc."cli-memoria/config.toml".source = configFile;
 
-    systemd.services.my-memory = {
-      description = "my-memory MCP server";
+    systemd.services.cli-memoria = {
+      description = "cli-memoria MCP server";
       wantedBy = [ "multi-user.target" ];
       wants = [ "network-online.target" ];
-      after = [
-        "network-online.target"
-      ] ++ optional config.services.forgejo.enable "forgejo.service";
+      after = [ "network-online.target" ];
       restartTriggers = [ configFile ];
       environment = {
-        HOME = "/var/lib/my-memory";
+        HOME = "/var/lib/cli-memoria";
         NODE_ENV = "production";
       };
       serviceConfig = {
-        ExecStart = "${cfg.package}/bin/my-memory serve --config ${configFile}";
+        ExecStart = "${cfg.package}/bin/cli-memoria serve --config ${configFile}";
         ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
-        User = "my-memory";
-        Group = "my-memory";
-        StateDirectory = "my-memory";
+        User = "cli-memoria";
+        Group = "cli-memoria";
+        StateDirectory = "cli-memoria";
         StateDirectoryMode = "0750";
-        WorkingDirectory = "/var/lib/my-memory";
+        WorkingDirectory = "/var/lib/cli-memoria";
         LoadCredential = credentials;
         Restart = "on-failure";
         RestartSec = 5;

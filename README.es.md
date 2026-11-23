@@ -1,60 +1,75 @@
-# cli-memoria (antes my-memory)
+# cli-memoria
 
-Una memoria autoalojada para agentes de IA, con su servidor y su CLI. Tus notas son una carpeta de Markdown en git; my-memory las sirve por [MCP](https://modelcontextprotocol.io) para que cualquier agente (Claude Code, Codex, claude.ai, tus propios bots) pueda buscarlas, leerlas y escribirlas. Cada escritura es un commit atribuido al cliente que la hizo.
+Una memoria autoalojada en git para agentes de IA: una **CLI compacta (`memoria`)** para agentes con terminal y un **servidor MCP sin estado (`cli-memoria`)** sobre notas Markdown en git. Cada escritura es un commit atribuido al agente que la hizo.
 
 *[Read in English](README.md)*
 
 > Mantén este archivo y [README.md](README.md) sincronizados: cuando edites uno, actualiza el otro.
 
-- **Git es la fuente de verdad.** La búsqueda va sobre un índice SQLite (catálogo, texto completo FTS5 por secciones, wikilinks) que se puede reconstruir desde git en cualquier momento.
-- **Un commit por escritura**, con el cliente como autor: `Claude Code (laptop)`, `Alex (Claude)`… El mensaje del commit es el motivo que dio el agente, más los trailers `Client:` / `Tool:` / `Session:`.
-- **Seguro con varios agentes a la vez.** Una sola cola de escritura, concurrencia optimista (el `hash` de `read`) y los pushes de fuera (tu PC, el editor web de Forgejo) se integran con rebase.
-- **Tus convenciones, no las nuestras.** El repo de notas declara sus carpetas, su frontmatter obligatorio y sus reglas de nombres en `memory.toml`; su `AGENTS.md` llega a todos los clientes como instrucciones MCP, junto con un índice corto.
-- **Dos puertas de entrada.** Un listener privado para tokens fijos por cliente, subida de archivos y el webhook de git. Un listener público que solo acepta tokens OAuth 2.1 (registro dinámico de clientes y PKCE, con el inicio de sesión delegado en Forgejo) para clientes remotos como claude.ai.
+- **Una CLI para agentes (`memoria`).** [cli/](cli/README.md) busca, lee y escribe las notas desde la terminal con salida compacta: lee directamente de una copia del repo de notas (`rg` + `git`) y escribe siempre a través del servidor (`MEMORIA_URL` + `MEMORIA_TOKEN`). Empaquetada en Nix como `memoria` para Linux y macOS, sin dependencias de npm.
+- **Git es la fuente de verdad.** La búsqueda en el servidor va sobre un índice SQLite (catálogo, texto completo FTS5 por secciones, wikilinks) que se puede reconstruir desde git en cualquier momento.
+- **Un commit por escritura**, con el cliente como autor: `Claude Code (laptop)`, `Codex`, etc. El mensaje del commit es el motivo que dio el agente, más los trailers `Client:` / `Tool:` / `Session:`.
+- **Seguro con varios agentes a la vez.** Una sola cola de escritura, concurrencia optimista (el `hash` de `read`), `publish` atómico de varios commits y los pushes de fuera se integran con rebase.
+- **Tus convenciones, no las nuestras.** El repo de notas declara sus carpetas, su frontmatter obligatorio, sus reglas de escritura y sus reglas de nombres en `memory.toml`; su `AGENTS.md` llega a todos los clientes como instrucciones MCP, junto con un índice corto.
+- **Tokens fijos por agente.** Un token Bearer por agente (permiso `read` o `write`), guardado solo como hash SHA-256 y recargable con `SIGHUP`. Los tokens de solo lectura solo ven herramientas de lectura.
 - **Adjuntos.** Los binarios van a git LFS con una nota al lado que contiene su texto (los PDF, con `pdftotext`; los PDF escaneados y las imágenes, con OCR local mediante `tesseract` si está instalado), así que también se encuentran al buscar.
 - **Enlaces con tipo.** `works_at:: [[acme]]` dice qué significa un enlace, y `links` puede filtrar por él.
-- **Búsqueda por significado, opcional.** Apunta `[embeddings]` a cualquier endpoint de embeddings compatible con OpenAI (Ollama o llama.cpp en la misma CPU, TEI, OpenAI…) y `search` combina el texto completo con la similitud de vectores, así que «coche» encuentra la nota que dice «vehículo». Dentro del servidor no corre ningún modelo y no hace falta GPU; sin él, la búsqueda es solo de texto completo.
-- **Una CLI para agentes.** `memoria` ([cli/](cli/README.md)) busca, lee y escribe las notas desde una terminal, con salida compacta: lee directamente de una copia del repo de notas y escribe siempre a través del servidor. Paquete de Nix `memoria`, para Linux y macOS.
 
 Cómo funciona por dentro (índice, flujo de escritura, concurrencia, autenticación): [docs/design.md](docs/design.md).
 
-## Dale a tu agente un enlace
+## La CLI `memoria`
 
-Una vez que el servidor está conectado a un agente (mira [Conectar clientes](#conectar-clientes)), mándale esto y nada más:
+`memoria` convierte la memoria en comandos de terminal para agentes: una línea por resultado con el total y cómo seguir, `--json` para filtrar con `jq` y `--simular` en todo lo que escribe. Los comandos están en español (`buscar`, `leer`, `lista`, `recientes`…) con alias en inglés (`search`, `read`, `list`, `recent`…). Sin dependencias de npm: Node 22 o más y unos `.mjs`.
 
-```text
-https://raw.githubusercontent.com/PabloPC05/my-memory/main/docs/agent-setup.md
+```sh
+nix run github:PabloPC05/cli-memoria#memoria -- --help
+memoria buscar cocina --carpeta projects --limite 5
 ```
 
-El agente lee [la guía de instalación](docs/agent-setup.md) y se instala tu memoria él solo en su plataforma: la encuentra entre sus herramientas, te propone importar lo que ya sabe de ti, instala sus instrucciones permanentes y, donde la plataforma lo permite (Claude Code, tus propios agentes), le impide guardar en cualquier otro sitio. Te pide un único permiso antes de cambiar nada. Inspirado en la página de instalación para agentes de Notion.
+- **Lee** directamente de una copia del repo de notas cuando `MEMORIA_DIR` apunta a ella (con `rg` y `git`), o contra el servidor si no.
+- **Escribe** siempre a través del servidor, así que firma con la credencial del agente y sigue `memory.toml`: una nota cada vez (`crear`, `editar`, `escribir`, `mover`, `borrar --si`), o, para cambios de varias notas a la vez, una copia de trabajo de git (`memoria copia`) cuyos commits `memoria publicar` envía en un solo `publish` atómico.
+- **Directa al servidor (recomendado):** define `MEMORIA_URL` (p. ej. `http://127.0.0.1:8782/mcp`) y `MEMORIA_TOKEN` (`mm_…`) para hablar directamente por Streamable HTTP sin pasarela intermedia. Para instalaciones detrás de una pasarela que envuelve las herramientas como `memoria_<herramienta>` bajo `buscador_usar`, también admite `BADULAQUE_URL` y `BADULAQUE_CLAVE`.
 
-En Claude Code también puede instalar, si quieres, un hook que le acerca al agente las notas relevantes sin que tenga que acordarse de buscar (como hace Supermemory): antes de cada mensaje, [`inject-memory.mjs`](docs/agent-setup/claude-code/inject-memory.mjs) busca ese mensaje en tu memoria y añade al turno las mejores coincidencias, presentadas como información que comprobar, no como instrucciones, y con un límite de tamaño pequeño. Necesita `MY_MEMORY_URL` y un `MY_MEMORY_TOKEN` de solo lectura, y no añade nada ante cualquier error o tiempo de espera agotado.
+Estructura, configuración, empaquetado y pruebas: [cli/README.md](cli/README.md).
 
-## Herramientas
+## Dale a tu agente un enlace
+
+Una vez que la CLI `memoria` o el servidor MCP están disponibles para un agente (mira [Conectar clientes](#conectar-clientes)), mándale este enlace y nada más:
+
+```text
+https://raw.githubusercontent.com/PabloPC05/cli-memoria/main/docs/agent-setup.md
+```
+
+El agente lee [la guía de instalación](docs/agent-setup.md) y se instala tu memoria él solo en su plataforma: detecta la CLI o las herramientas MCP, te propone importar lo que ya sabe de ti, instala sus instrucciones permanentes y, donde la plataforma lo permite (Claude Code, tus propios agentes), le impide guardar en cualquier otro sitio. Te pide un único permiso antes de cambiar nada. Inspirado en la página de instalación para agentes de Notion.
+
+En Claude Code también puede instalar, si quieres, un hook que le acerca al agente las notas relevantes automáticamente: antes de cada mensaje, [`inject-memory.mjs`](docs/agent-setup/claude-code/inject-memory.mjs) busca ese mensaje en tu memoria y añade al turno las mejores coincidencias, presentadas como información que comprobar, no como instrucciones, y con un límite de tamaño pequeño. Necesita `MEMORIA_URL` y un `MEMORIA_TOKEN` de solo lectura, y no añade nada ante cualquier error o tiempo de espera agotado.
+
+## Herramientas MCP
 
 | Herramienta | Qué hace |
 |---|---|
 | `list` | Índice corto, o todas las notas de una carpeta con descripción, alias y último cambio |
-| `search` | Búsqueda de texto completo por secciones (sin distinguir acentos, los prefijos coinciden) con fragmentos; híbrida con búsqueda por significado si hay `[embeddings]` |
+| `search` | Búsqueda de texto completo por secciones (SQLite FTS5: sin distinguir acentos, los prefijos coinciden) con fragmentos y `updated_at` |
 | `read` | Una nota o una sección, con su `hash`; `revision` lee una versión antigua |
 | `links` | Enlaces `[[...]]` salientes (también los rotos) y retroenlaces con contexto, opcionalmente solo una relación |
 | `history` | Commits que tocaron una nota: quién, cuándo, por qué |
 | `recent` | Últimos cambios de toda la memoria: por commit cuándo, quién (autor y cliente), herramienta, motivo y las notas que tocó; filtros `since` (`2026-05-01` o `7d`), `folder`, `client` |
-| `lint` | Lista de mantenimiento, lo más grave primero: frontmatter roto y notas sustituidas fuera del archivo, enlaces rotos, posibles duplicados, deducciones antiguas, páginas que faltan, menciones sin enlace, notas huérfanas, sin tocar hace mucho o demasiado grandes. Cuenta por tipo; filtra por `kinds`, `folder` y `limit` |
-| `clients` | Quién está conectado: cada token y app OAuth con su última conexión (hora y herramienta), escrituras en los últimos 7 y 30 días y la versión de `memory-setup` que dejó anotada en las notas. Nunca devuelve secretos |
+| `lint` | Lista de mantenimiento, lo más grave primero: frontmatter roto y notas sustituidas fuera del archivo, incumplimientos de `[rules]`, enlaces rotos, posibles duplicados, deducciones antiguas, páginas que faltan, menciones sin enlace, notas huérfanas, sin tocar hace mucho o demasiado grandes. Cuenta por tipo; filtra por `kinds`, `folder` y `limit` |
+| `clients` | Quién está conectado: cada token con su última conexión (hora y herramienta), escrituras en los últimos 7 y 30 días y la versión de `memory-setup` que dejó anotada en las notas. Nunca devuelve secretos |
 | `create` | Nota nueva; nombres únicos entre carpetas; rechaza duplicados parecidos salvo `confirm_new` |
 | `edit` | Reemplazos de texto exactos, todos o ninguno |
 | `write` | Reescribe una nota entera; necesita el `hash` que leíste |
 | `move` | Renombra o mueve; reescribe todos los `[[enlaces]]` a ella en el mismo commit |
 | `delete` | Borra una nota (queda en el historial); se rechaza mientras otras notas la enlacen |
+| `publish` | Envío atómico de varios commits (`create`, `write`, `move`, `delete`), juzgados en conjunto contra `[rules]` |
 | `revert` | Deshace un commit de `recent`/`history` con un commit nuevo, o solo lo que hizo en una nota; conserva los cambios posteriores que no se solapan y si no, se rechaza con `REVERT_CONFLICT` |
 | `attach` | Guarda un archivo en LFS con una nota al lado en la que se puede buscar |
 
 Los clientes con un token de solo lectura ven solo las herramientas de lectura: `list`, `search`, `read`, `links`, `history`, `recent`, `lint` y `clients`.
 
-`lint` es la mitad barata de mantener la memoria en orden (la «wiki para LLM» de Karpathy: ingerir, responder, revisar). Sale del índice y de las fechas de git en milisegundos, sin modelo, así que el agente recibe candidatos en vez de leerse todas las notas; juzgarlos (¿es una contradicción?, ¿sigue valiendo esa deducción?, ¿fusionar o enlazar?) es la mitad del agente. Más en [docs/design.md](docs/design.md#lint).
+`lint` es la mitad barata de mantener la memoria en orden (la «wiki para LLM» de Karpathy: ingerir, responder, revisar). Sale del índice y de las fechas de git en milisegundos, sin modelo, así que el agente recibe candidatos en vez de leerse todas las notas; juzgarlos es la mitad del agente. Más en [docs/design.md](docs/design.md#lint).
 
-El servidor también ofrece la guía de instalación para agentes a todo cliente conectado, sin conexión (va dentro del paquete): como prompt MCP `setup` («Set up this memory on your host») y como recurso `memory://agent-setup`, ambos con el Markdown de [docs/agent-setup.md](docs/agent-setup.md). Las instrucciones del servidor los mencionan, así que un agente que se encuentre en una plataforma sin configurar puede seguirlos sin que le des la URL.
+El servidor también ofrece la guía de instalación para agentes sin conexión a todo cliente conectado (va dentro del paquete): como prompt MCP `setup` («Set up this memory on your host») y como recurso `memory://agent-setup`, ambos con el Markdown de [docs/agent-setup.md](docs/agent-setup.md).
 
 ## Formato de las notas
 
@@ -115,10 +130,10 @@ Requisitos: Node.js 24, git, git-lfs y, de forma opcional, poppler-utils (`pdfto
 
 ```sh
 npm ci && npm run build
-my-memory token add laptop --name "Claude Code (laptop)" --scope write --file tokens.toml
-my-memory serve --config config.toml
-my-memory clients --config config.toml     # quién está conectado: última conexión, escrituras, versión de la guía (--json para scripts)
-my-memory lint --config config.toml        # lista de mantenimiento (--json, --kind stale,orphan, --folder, --limit)
+cli-memoria token add laptop --name "Claude Code (laptop)" --scope write --file tokens.toml
+cli-memoria serve --config config.toml
+cli-memoria clients --config config.toml     # quién está conectado: última conexión, escrituras, versión de la guía (--json para scripts)
+cli-memoria lint --config config.toml        # lista de mantenimiento (--json, --kind stale,orphan, --folder, --limit)
 ```
 
 Las horas de última conexión se guardan en `activity.sqlite`, en el directorio de datos (como mucho una vez por minuto y cliente; no está en el repo de notas), y el número de escrituras sale de los trailers `Client:` del historial de git.
@@ -126,30 +141,18 @@ Las horas de última conexión se guardan en `activity.sqlite`, en el directorio
 `config.toml`:
 
 ```toml
-data_dir = "/var/lib/my-memory"
-public_url = "https://memory.example.com"      # solo con el listener público
+data_dir = "/var/lib/cli-memoria"
 tokens_file = "tokens.toml"
-webhook_secret_file = "webhook-secret"          # rutas, o credential:NOMBRE para credenciales de systemd
+webhook_secret_file = "webhook-secret"          # opcional; rutas, o credential:NOMBRE para credenciales de systemd
 
 [remote]                                        # omítelo para dejar el repo de notas en local
-url = "http://127.0.0.1:3000/me/notes.git"
-username = "my-memory"
-token_file = "forgejo-token"
+url = "https://git.example.com/me/notes.git"
+username = "cli-memoria"
+token_file = "git-remote-token"
 
-[listen.private]
+[listen]
 address = "127.0.0.1"
 port = 8782
-
-[listen.public]                                 # detrás de tu proxy inverso con TLS
-address = "127.0.0.1"
-port = 8781
-
-[oauth]                                         # obligatorio con el listener público
-forgejo_url = "https://git.example.com"         # como lo ve tu navegador
-forgejo_internal_url = "http://127.0.0.1:3000"  # como lo ve el servidor
-client_id_file = "oauth-client-id"              # una app OAuth2 registrada en Forgejo,
-client_secret_file = "oauth-client-secret"      # URI de redirección <public_url>/oauth/callback
-allowed_users = ["me"]
 
 [ocr]                                           # todas las claves son opcionales
 enabled = true
@@ -157,105 +160,79 @@ languages = "spa+eng"                           # códigos de idioma de tesserac
 max_pages = 50                                  # páginas de un PDF escaneado que pasan por OCR
 page_timeout_seconds = 120                      # por página (render + reconocimiento) o imagen
 # dpi = 300; tesseract = "tesseract"; pdftoppm = "pdftoppm"
-
-[embeddings]                                    # opcional: búsqueda por significado; omítelo para solo texto completo
-url = "http://127.0.0.1:11434/v1/embeddings"    # cualquier endpoint compatible con OpenAI (Ollama, llama.cpp, TEI, OpenAI…)
-model = "nomic-embed-text"
-# api_key_file = "embeddings-key"               # se envía como token Bearer, si el endpoint lo pide
-# dimensions = 512                              # para modelos que pueden acortar su salida
-# batch_size = 32
-# timeout_seconds = 60
-query_prefix = "search_query: "                 # algunos modelos quieren marcadas sus entradas (nomic, e5)
-document_prefix = "search_document: "
 ```
 
 Subidas para `attach`: `curl -T file.pdf -H "Authorization: Bearer $TOKEN" http://host:8782/uploads/file.pdf` devuelve un `upload_id`. No hay límite de tamaño.
+
+Webhook de git (opcional): `POST /hooks/git` firmado con HMAC-SHA256 (`X-Hub-Signature-256: sha256=<hex>` o `X-Webhook-Signature: <hex>`).
 
 ### NixOS
 
 ```nix
 {
-  inputs.my-memory.url = "github:<owner>/my-memory";
+  inputs.cli-memoria.url = "github:PabloPC05/cli-memoria";
   # en tu configuración:
-  imports = [ inputs.my-memory.nixosModules.default ];
-  services.my-memory = {
+  imports = [ inputs.cli-memoria.nixosModules.default ];
+  services.cli-memoria = {
     enable = true;
-    remote = { url = "http://127.0.0.1:3000/me/notes.git"; tokenFile = "/run/secrets/forgejo-token"; };
-    listen.private = { address = "127.0.0.1"; port = 8782; };
-    tokensFile = "/var/lib/secrets/my-memory/tokens.toml";   # root:my-memory 0640
+    remote = { url = "https://git.example.com/me/notes.git"; tokenFile = "/run/secrets/git-remote-token"; };
+    listen = { address = "127.0.0.1"; port = 8782; };
+    tokensFile = "/var/lib/secrets/cli-memoria/tokens.toml";   # root:cli-memoria 0640
     # ocr = { enable = true; languages = [ "spa" "eng" ]; maxPages = 50; pageTimeoutSeconds = 120; dpi = 300; };
   };
 }
 ```
 
-Tras `my-memory token add … --file <tokensFile>`, ejecuta `systemctl reload my-memory`. El paquete trae pdftotext, pdftoppm y tesseract; el módulo instala los datos de los idiomas de `ocr.languages` (por defecto español e inglés), y solo compila ese tesseract con `ocr.enable` activado.
-
-Para la búsqueda por significado, añade `embeddings = { url = "http://127.0.0.1:11434/v1/embeddings"; model = "nomic-embed-text"; queryPrefix = "search_query: "; documentPrefix = "search_document: "; };` (con `apiKeyFile` si el endpoint pide clave), por ejemplo junto a `services.ollama`.
-
-### Búsqueda por significado
-
-Con `[embeddings]`, cada sección de cada nota recibe un vector del endpoint, que se guarda en `index.sqlite`. Entonces `search` acepta `mode`: `hybrid` (por defecto) combina el ranking de texto completo y el de vectores con Reciprocal Rank Fusion, `text` es la búsqueda de texto completo de siempre y `semantic` usa solo los vectores. La respuesta tiene la misma forma de siempre.
-
-- **Las escrituras nunca lo esperan.** Las secciones se procesan en segundo plano después de cada commit o sincronización; mientras tanto se encuentran por texto. Solo se vuelven a procesar las secciones cuyo texto cambió, y cambiar `model`, `dimensions` o `document_prefix` las procesa todas otra vez.
-- **Si el endpoint está caído**, las escrituras funcionan como siempre, la búsqueda vuelve al texto completo con un aviso en el log y las secciones pendientes se reintentan con espera creciente.
-- **Estado en el log:** `embeddings.status` al arrancar (modelo, vectores, secciones pendientes), `embeddings.done` tras cada pasada y `embeddings.failed` mientras el endpoint falla.
-- `my-memory reindex` también procesa las secciones que falten; `--reembed` las procesa todas otra vez. Con una clave `credential:` que no puede leer fuera de systemd, se salta los embeddings y los hace el servicio al arrancar.
-- En un servidor pequeño sin GPU, Ollama con `nomic-embed-text` (multilingües: `bge-m3` o `multilingual-e5-small`, los e5 con los prefijos `query: ` y `passage: `) procesa unos miles de secciones en minutos, una sola vez.
+Tras `cli-memoria token add … --file <tokensFile>`, ejecuta `systemctl reload cli-memoria`. El paquete trae `pdftotext`, `pdftoppm` y `tesseract`; el módulo instala los datos de los idiomas de `ocr.languages` (por defecto español e inglés), y solo compila ese tesseract con `ocr.enable` activado.
 
 ### Conectar clientes
 
+**CLI (recomendado para agentes con terminal):**
+
+```sh
+export MEMORIA_URL="http://127.0.0.1:8782/mcp"
+export MEMORIA_TOKEN="mm_..."
+export MEMORIA_DIR="/ruta/a/copia-de-notas"    # opcional: activa lecturas locales rápidas
+memoria lista
+```
+
+**MCP directamente:**
+
 ```sh
 # Claude Code
-claude mcp add --transport http memory http://host:8782/mcp --header "Authorization: Bearer $MY_MEMORY_TOKEN"
+claude mcp add --transport http memory http://host:8782/mcp --header "Authorization: Bearer $MEMORIA_TOKEN"
 ```
 
 ```toml
 # Codex (~/.codex/config.toml)
 [mcp_servers.memory]
 url = "http://host:8782/mcp"
-bearer_token_env_var = "MY_MEMORY_TOKEN"
+bearer_token_env_var = "MEMORIA_TOKEN"
 ```
-
-claude.ai: Ajustes → Conectores → Añadir conector personalizado → `https://memory.example.com/mcp`.
 
 Después dale al agente el enlace de instalación ([Dale a tu agente un enlace](#dale-a-tu-agente-un-enlace)).
 
 ### Una credencial por agente
 
-my-memory atribuye cada escritura (el autor del commit de git y su trailer `Client:`), cada línea de log y la vista `clients` a la credencial con la que llegó la petición. Por eso **cada agente debe conectarse con su propia credencial**. Si dos agentes comparten una, nadie puede saber quién escribió qué, `clients` no los distingue y una clave filtrada no se puede revocar sin cortar también al otro agente.
+`cli-memoria` atribuye cada escritura (el autor del commit de git y su trailer `Client:`), cada línea de log y la vista `clients` al token con el que llegó la petición. Por eso **cada agente debe conectarse con su propio token**. Si dos agentes comparten uno, nadie puede saber quién escribió qué, `clients` no los distingue y una clave filtrada no se puede revocar sin cortar también al otro agente.
 
-- **Tokens fijos:** crea uno por agente y no lo compartas nunca: `my-memory token add <id> --name "<Nombre del agente>" --scope write|read --file tokens.toml`. Los clientes OAuth (por ejemplo claude.ai conectando directamente) reciben su propia identidad automáticamente.
-- **Detrás de una pasarela o proxy** que une varios servidores MCP en un único endpoint, el cliente que ve my-memory es la pasarela. Dale a la pasarela una clave por agente y asocia cada clave a su propio token de my-memory (misma URL pública, una clave distinta por agente); si no, todas las escrituras aparecen con el nombre de la pasarela. Vale cualquier proxy inverso o pasarela MCP que pueda elegir la credencial hacia el servidor a partir de la clave de entrada.
-- **Compruébalo:** ejecuta `my-memory clients` o llama a la herramienta `clients`. Cada agente debe aparecer en su propia fila, con su última actividad y sus escrituras.
+- **Tokens fijos:** crea uno por agente y no lo compartas nunca: `cli-memoria token add <id> --name "<Nombre del agente>" --scope write|read --file tokens.toml`.
+- **Detrás de una pasarela o proxy** que une varios servidores MCP en un único endpoint, el cliente que ve el servidor es la pasarela. Dale a la pasarela una clave por agente y asocia cada clave a su propio token de `cli-memoria`; si no, todas las escrituras aparecen con el nombre de la pasarela.
+- **Compruébalo:** ejecuta `cli-memoria clients --config config.toml` o llama a la herramienta `clients`. Cada agente debe aparecer en su propia fila, con su última actividad y sus escrituras.
 
 ### Pasar un repo existente a wikilinks
 
-`my-memory migrate <clone>` muestra lo que cambiaría: los enlaces Markdown relativos pasan a `[[wikilinks]]`, las colisiones de nombres se renombran y el frontmatter que no es YAML válido se entrecomilla. Añade `--apply` para hacer el commit. Solo cambian esos fragmentos.
-
-## La CLI `memoria`
-
-`memoria` convierte la memoria en comandos de terminal para agentes: una línea por resultado con el total y cómo seguir, `--json` para `jq` y `--simular` en todo lo que escribe. Está en español (comandos `buscar`, `leer`, `lista`, `recientes`…, con alias en inglés como `search` y `read`). Sin dependencias de npm: Node 22 o más y unos `.mjs`.
-
-```sh
-nix run github:PabloPC05/cli-memoria#memoria -- --help
-memoria buscar cocina --carpeta projects --limite 5
-```
-
-- **Lee** directamente de una copia del repo de notas cuando `MEMORIA_DIR` apunta a ella (con `rg` y `git`), o por MCP si no.
-- **Escribe** siempre a través del servidor, así que firma con la credencial del agente y sigue `memory.toml`: una nota cada vez con la misma CLI (`crear`, `editar`, `escribir`, `mover`, `borrar --si`), o, para cambios de varias notas a la vez, una copia de trabajo de git (`memoria copia`) cuyos commits `memoria publicar` envía en un solo `publish` (todo o nada) si el servidor tiene esa herramienta, y si no, nota a nota, cada una con su hash.
-- **Directa al servidor (recomendado):** define `MEMORIA_URL` (p. ej. `http://127.0.0.1:8787/mcp`) y `MEMORIA_TOKEN` (`mm_…`) para hablar directamente por Streamable HTTP sin pasarela intermedia. Para instalaciones detrás de una pasarela que envuelve las herramientas como `memoria_<herramienta>` bajo `buscador_usar`, también admite `BADULAQUE_URL` y `BADULAQUE_CLAVE`.
-
-Estructura, configuración, empaquetado y pruebas: [cli/README.md](cli/README.md).
+`cli-memoria migrate <clone>` muestra lo que cambiaría: los enlaces Markdown relativos pasan a `[[wikilinks]]`, las colisiones de nombres se renombran y el frontmatter que no es YAML válido se entrecomilla. Añade `--apply` para hacer el commit. Solo cambian esos fragmentos.
 
 ## Desarrollo
 
 ```sh
 npm ci
-npm test          # vitest: unitarias, de integración (repos git reales) y extremo a extremo HTTP/OAuth
+npm test          # vitest: unitarias, de integración (repos git reales) y extremo a extremo HTTP/MCP
 npm run typecheck
 nix flake check   # compila el paquete y ejecuta el test de la VM de NixOS
-NODE=$(command -v node) MY_MEMORY=$(nix build --no-link --print-out-paths .#default)/bin/my-memory \
-  cli/probar.sh   # la CLI memoria de punta a punta, contra un my-memory de verdad con notas de juguete
+NODE=$(command -v node) CLI_MEMORIA=$(nix build --no-link --print-out-paths .#default)/bin/cli-memoria \
+  cli/probar.sh   # la CLI memoria de punta a punta, contra un cli-memoria de verdad con notas de juguete
 ```
 
 ## Licencia

@@ -1,25 +1,26 @@
 #!/usr/bin/env bash
-# Prueba de escribir en nativo (memoria copia, estado, actualizar y publicar) contra un servidor my-memory DE VERDAD
+# Prueba de escribir en nativo (memoria copia, estado, actualizar y publicar) contra un servidor cli-memoria DE VERDAD
 # (el binario real, con su índice, sus reglas, sus firmas por token y su cola de escritura), pero de juguete: una carpeta
 # temporal que crea y borra este script, un repositorio de notas inventado y dos agentes de juguete. No toca ninguna
 # memoria real ni ningún servicio externo.
 #
-# Entre la CLI y my-memory pone una pasarela mínima (buscador_usar con «memoria_<herramienta>»), con una clave por
-# agente que se traduce a su token de my-memory.
+# Prueba tanto el modo directo (MEMORIA_URL + MEMORIA_TOKEN contra /mcp) como una pasarela mínima
+# (buscador_usar con «memoria_<herramienta>»), con una clave por agente traducida a su token.
 #
-# Uso:  NODE=<node 22 o más> MY_MEMORY=<my-memory> [MEMORIA=<memoria>] cli/probar.sh
-#   MY_MEMORY: el servidor (bin/my-memory del paquete por defecto, o el instalado).
+# Uso:  NODE=<node 22 o más> CLI_MEMORIA=<cli-memoria> [MEMORIA=<memoria>] cli/probar.sh
+#   CLI_MEMORIA (o MY_MEMORY): el servidor (bin/cli-memoria del paquete por defecto, o el instalado).
 #   MEMORIA: la CLI que se prueba, ya empaquetada (p. ej. result/bin/memoria de `nix build .#memoria`).
 #   Sin MEMORIA, se prueba cli/memoria.mjs de este repositorio con NODE. NODE corre también la pasarela de juguete.
 # Requiere git, curl y jq. Imprime OK o FALLO por prueba y sale con 1 si alguna falla.
 #
-# Vale con un my-memory que tenga la herramienta `publish` (varios commits en un solo envío, todo o nada) y con uno que no:
+# Vale con un cli-memoria que tenga la herramienta `publish` (varios commits en un solo envío, todo o nada) y con uno que no:
 # `memoria publicar` la usa si el servidor la ofrece, y si no, publica nota a nota. Las pruebas de publicar esperan lo que
 # toca según el servidor (lo dicen al empezar).
 set -u
 
 AQUI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-: "${NODE:?falta NODE}" "${MY_MEMORY:?falta MY_MEMORY}"
+SERVIDOR="${CLI_MEMORIA:-${MY_MEMORY:-}}"
+: "${NODE:?falta NODE}" "${SERVIDOR:?falta CLI_MEMORIA}"
 # La CLI: el ejecutable de MEMORIA, o este repositorio con NODE.
 if [ -n "${MEMORIA:-}" ]; then CLI=("$MEMORIA"); else CLI=("$NODE" "$AQUI/memoria.mjs"); fi
 for h in git curl jq; do command -v "$h" >/dev/null || { echo "Falta $h" >&2; exit 2; }; done
@@ -59,7 +60,7 @@ archive = "archive"
 required_fields = ["name", "description"]
 filename_pattern = "^[a-z0-9]+(-[a-z0-9]+)*\\.md$"
 
-# Solo lo entiende un my-memory con reglas al escribir (y publish); los demás no lo leen. Ver el apartado 6c.
+# Solo lo entiende un cli-memoria con reglas al escribir (y publish); los demás no lo leen. Ver el apartado 6c.
 [rules.append_only]
 sections = ["Fuentes"]
 TOML
@@ -93,20 +94,19 @@ PUERTO_PA=$(( 30000 + RANDOM % 10000 ))
 cat > "$T/config.toml" <<TOML
 data_dir = "$DATOS"
 tokens_file = "$T/tokens.toml"
-[listen.private]
+[listen]
 address = "127.0.0.1"
 port = $PUERTO_MM
 TOML
 # Los tokens salen solo a variables; no se imprimen.
-TOK1=$("$MY_MEMORY" token add agente1 --name "Agente Uno" --scope write --file "$T/tokens.toml" | grep -o 'mm_[A-Za-z0-9_-]*' | head -1)
-TOK2=$("$MY_MEMORY" token add agente2 --name "Agente Dos" --scope write --file "$T/tokens.toml" | grep -o 'mm_[A-Za-z0-9_-]*' | head -1)
+TOK1=$("$SERVIDOR" token add agente1 --name "Agente Uno" --scope write --file "$T/tokens.toml" | grep -o 'mm_[A-Za-z0-9_-]*' | head -1)
+TOK2=$("$SERVIDOR" token add agente2 --name "Agente Dos" --scope write --file "$T/tokens.toml" | grep -o 'mm_[A-Za-z0-9_-]*' | head -1)
 [ -n "$TOK1" ] && [ -n "$TOK2" ] || { echo "no pude crear los tokens de juguete" >&2; exit 2; }
-"$MY_MEMORY" serve --config "$T/config.toml" > "$T/mm.log" 2>&1 &
+"$SERVIDOR" serve --config "$T/config.toml" > "$T/mm.log" 2>&1 &
 PIDS+=($!)
 
-# La pasarela de juguete: clave de agente -> token de my-memory; buscador_usar{nombre:"memoria_x"} -> tools/call x;
-# buscador_buscar{consulta} -> las herramientas de my-memory (su tools/list) como «memoria_x», con la de nombre exacto primero
-# (como el buscador del Badulaque).
+# La pasarela de juguete: clave de agente -> token de cli-memoria; buscador_usar{nombre:"memoria_x"} -> tools/call x;
+# buscador_buscar{consulta} -> las herramientas de cli-memoria (su tools/list) como «memoria_x», con la de nombre exacto primero.
 cat > "$T/pasarela.mjs" <<'JS'
 import { createServer } from "node:http";
 const tokens = Object.fromEntries(process.env.CLAVES.split(",").map(p => p.split("=")));
@@ -150,12 +150,12 @@ for _ in $(seq 1 60); do
   sleep 0.2
 done
 grep -q "listening\|started\|serve" "$T/mm.log" 2>/dev/null || sleep 1
-curl -s -o /dev/null "http://127.0.0.1:$PUERTO_MM/mcp" || { echo "my-memory no arrancó:"; cat "$T/mm.log"; exit 2; }
-# ¿Tiene este my-memory la herramienta publish? Según eso, memoria publicar manda un solo envío o va nota a nota.
+curl -s -o /dev/null "http://127.0.0.1:$PUERTO_MM/mcp" || { echo "cli-memoria no arrancó:"; cat "$T/mm.log"; exit 2; }
+# ¿Tiene este cli-memoria la herramienta publish? Según eso, memoria publicar manda un solo envío o va nota a nota.
 CON_PUBLISH=0
 curl -s -XPOST "http://127.0.0.1:$PUERTO_MM/mcp" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
   -H "authorization: Bearer $TOK1" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | sed 's/^data://' | grep -q '"name":"publish"' && CON_PUBLISH=1
-if [ "$CON_PUBLISH" = 1 ]; then echo "(este my-memory tiene publish: memoria publicar va en un solo envío)"; else echo "(este my-memory no tiene publish: memoria publicar va nota a nota)"; fi
+if [ "$CON_PUBLISH" = 1 ]; then echo "(este cli-memoria tiene publish: memoria publicar va en un solo envío)"; else echo "(este cli-memoria no tiene publish: memoria publicar va nota a nota)"; fi
 
 # --- cómo se llama a la CLI -------------------------------------------------------------------------------------
 
@@ -679,7 +679,7 @@ if [ "$CON_PUBLISH" = 1 ]; then
   { grep -q "fuente dos" "$REPO/projects/hija.md" && ! grep -q "fuente dos" "$REPO/projects/madre.md"; } && ok "partir: el servidor tiene la línea en la hija y no en la madre" || mal "partir: el servidor tiene la línea en la hija y no en la madre"
   [ "$(srv log -2 --format=%s | tr '\n' '|')" = "Hija: sale de madre con su fuente|Madre: quitar una fuente|" ] && ok "partir: un commit del servidor por cada uno de la copia, con su razón" || mal "partir: un commit del servidor por cada uno de la copia" "$(srv log -2 --format=%s | tr '\n' '|')"
 else
-  echo "OMITIDA partir una nota en un envío: este my-memory no tiene publish"
+  echo "OMITIDA partir una nota en un envío: este cli-memoria no tiene publish"
 fi
 
 # --- 6d. modo directo contra el servidor cli-memoria (sin pasarela: MEMORIA_URL + MEMORIA_TOKEN) -----------------------------

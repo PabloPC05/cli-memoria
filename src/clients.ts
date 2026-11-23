@@ -113,9 +113,8 @@ export interface KnownClient {
 export interface ClientReport {
 	id: string;
 	name: string;
-	kind: "static" | "oauth";
 	scope: "read" | "write" | null;
-	/** False when the client only shows up in the activity log or in git (token revoked, OAuth client gone). */
+	/** False when the client only shows up in the activity log or in git (token revoked). */
 	registered: boolean;
 	last_seen: { at: string; tool: string | null } | null;
 	writes: { last_7_days: number; last_30_days: number; last_write_at: string | null };
@@ -219,7 +218,6 @@ export interface ClientsSources {
 	repoDir: string;
 	/** Static tokens, without hashes. */
 	staticClients: () => Promise<KnownClient[]> | KnownClient[];
-	oauthClients: () => { client_id: string; client_name: string | null }[];
 	activity: () => Seen[];
 	now?: () => number;
 }
@@ -229,15 +227,11 @@ export async function buildClientsReport(src: ClientsSources): Promise<ClientsRe
 	const now = src.now ? src.now() : Date.now();
 	const writes = await writesFromGit(src.git, now);
 	const seen = new Map(src.activity().map((s) => [s.id, s]));
-	const known = new Map<string, { name: string; kind: "static" | "oauth"; scope: "read" | "write" | null; registered: boolean }>();
-	for (const t of await src.staticClients()) known.set(t.id, { name: t.name, kind: "static", scope: t.scope, registered: true });
-	for (const c of src.oauthClients()) {
-		const id = `oauth:${c.client_id}`;
-		known.set(id, { name: seen.get(id)?.name ?? c.client_name ?? id, kind: "oauth", scope: "write", registered: true });
-	}
+	const known = new Map<string, { name: string; scope: "read" | "write" | null; registered: boolean }>();
+	for (const t of await src.staticClients()) known.set(t.id, { name: t.name, scope: t.scope, registered: true });
 	for (const id of new Set([...seen.keys(), ...writes.keys()])) {
 		if (known.has(id)) continue;
-		known.set(id, { name: seen.get(id)?.name ?? writes.get(id)?.name ?? id, kind: id.startsWith("oauth:") ? "oauth" : "static", scope: seen.get(id)?.scope ?? null, registered: false });
+		known.set(id, { name: seen.get(id)?.name ?? writes.get(id)?.name ?? id, scope: seen.get(id)?.scope ?? null, registered: false });
 	}
 	const setup = await setupRecords(src.git, src.repoDir, [...known].map(([id, k]) => ({ id, name: k.name, scope: k.scope ?? "read" })));
 	const clients: ClientReport[] = [...known].map(([id, k]) => {
@@ -246,7 +240,6 @@ export async function buildClientsReport(src: ClientsSources): Promise<ClientsRe
 		return {
 			id,
 			name: k.name,
-			kind: k.kind,
 			scope: k.scope,
 			registered: k.registered,
 			last_seen: s ? { at: s.lastSeen, tool: s.lastTool } : null,
@@ -276,11 +269,10 @@ function ago(iso: string | null, now: number): string {
 /** Plain-text table for the CLI. */
 export function renderClientsTable(report: ClientsReport): string {
 	const now = Date.parse(report.generated_at);
-	const header = ["ID", "NAME", "KIND", "SCOPE", "LAST SEEN", "LAST TOOL", "W7", "W30", "LAST WRITE", "SETUP"];
+	const header = ["ID", "NAME", "SCOPE", "LAST SEEN", "LAST TOOL", "W7", "W30", "LAST WRITE", "SETUP"];
 	const rows = report.clients.map((c) => [
 		c.registered ? c.id : `${c.id} (gone)`,
 		c.name,
-		c.kind,
 		c.scope ?? "?",
 		ago(c.last_seen?.at ?? null, now),
 		c.last_seen?.tool ?? "-",

@@ -286,7 +286,7 @@ function seccionDeLinea(lineas, lista, linea) {
   return enUnaLinea(camino(mejor, lista), 70);
 }
 
-// git para leer el repositorio de las notas: safe.directory, porque es de otro usuario (my-memory) y git, si no, se niega a
+// git para leer el repositorio de las notas: safe.directory, porque es de otro usuario (cli-memoria) y git, si no, se niega a
 // leerlo; sin configuración global ni del sistema (dentro de srt, ~/.gitconfig es un /dev/null que git no puede abrir y
 // falla entero); y sin bloqueos opcionales, porque es de solo lectura.
 const ENTORNO_LECTURA = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_OPTIONAL_LOCKS: "0" };
@@ -802,7 +802,7 @@ function recientesLocal(pos, op) {
   if (pos.length > 1) throw new Fallo("uso: memoria recientes [N]", 2);
   const n = pos.length ? Number(pos[0]) : 15;
   if (!Number.isInteger(n) || n < 1 || n > 200) throw new Fallo("N tiene que ser un entero entre 1 y 200", 2);
-  // safe.directory: el repositorio es de otro usuario (my-memory) y git, si no, se niega a leerlo. Sin configuración
+  // safe.directory: el repositorio es de otro usuario (cli-memoria) y git, si no, se niega a leerlo. Sin configuración
   // global ni del sistema: dentro de srt, ~/.gitconfig es un /dev/null que git no puede abrir y falla entero.
   const r = correr("git", [
     "-c", "safe.directory=*", "-C", MEMORIA_DIR, "log", `-${n}`, "--name-status", "--date=format:%Y-%m-%d %H:%M",
@@ -1137,7 +1137,7 @@ const ENTORNO_GIT = {
 
 /**
  * Corre git en la copia de trabajo. `seguro` añade safe.directory=*, necesario para leer del repositorio de las notas
- * (es de otro usuario, my-memory). Si falla y no se pide `permitir`, es un Fallo con lo que dijo git.
+ * (es de otro usuario, cli-memoria). Si falla y no se pide `permitir`, es un Fallo con lo que dijo git.
  */
 function git(args, { cwd = COPIA, seguro = false, permitir = false } = {}) {
   const r = correr("git", [...(seguro ? ["-c", "safe.directory=*"] : []), ...args], { cwd, env: ENTORNO_GIT });

@@ -24,7 +24,7 @@ const queries = [
 for (const [prompt, ok] of queries) check(ok(searchQuery(prompt)), `searchQuery(${JSON.stringify(prompt)}) = ${JSON.stringify(searchQuery(prompt))}`);
 
 // --- Formatting ---
-const cfg = configFrom({ MY_MEMORY_URL: "http://127.0.0.1:1/mcp", MEMORY_SEARCH_TOOL: "memoria_search" });
+const cfg = configFrom({ MEMORIA_URL: "http://127.0.0.1:1/mcp", MEMORY_SEARCH_TOOL: "memoria_search" });
 check(cfg.readTool === "memoria_read", "read tool follows the search tool's prefix");
 for (const [url, ok] of [
   ["https://memory.example.org/mcp", true],
@@ -35,7 +35,8 @@ for (const [url, ok] of [
   ["http://[::1]:8080/mcp", true],
   ["ftp://localhost/mcp", false],
   ["not a url", false],
-]) check((configFrom({ MY_MEMORY_URL: url }).url !== null) === ok, `MY_MEMORY_URL ${url} ${ok ? "accepted" : "refused"}`);
+]) check((configFrom({ MEMORIA_URL: url }).url !== null) === ok, `MEMORIA_URL ${url} ${ok ? "accepted" : "refused"}`);
+check(configFrom({ MY_MEMORY_URL: "https://memory.example.org/mcp", MY_MEMORY_TOKEN: "tok" }).token === "tok", "legacy MY_MEMORY_* fallback works");
 const hits = Array.from({ length: 10 }, (_, i) => ({ name: `nota-${i}`, section: { heading: `Sección ${i}` }, snippet: `«seguro» del «coche» ${"x".repeat(400)}` }));
 const text = formatHits({ mode: "all", hits }, cfg);
 check(text.length <= cfg.budget, `budget respected (${text.length})`);
@@ -70,10 +71,10 @@ const answer = (msg) =>
 const prompt = (p) => ({ hook_event_name: "UserPromptSubmit", prompt: p });
 const context = (out) => (out ? JSON.parse(out).hookSpecificOutput.additionalContext : "");
 
-// Stateless server (like my-memory): answers a bare tools/call with JSON, in one round trip.
+// Stateless server (like cli-memoria): answers a bare tools/call with JSON, in one round trip.
 {
   const s = await serve((req, res, msg) => json(res, answer(msg)));
-  const env = { MY_MEMORY_URL: s.url, MY_MEMORY_TOKEN: "tok-1" };
+  const env = { MEMORIA_URL: s.url, MEMORIA_TOKEN: "tok-1" };
   const out = await run(prompt("cuándo vence el seguro del coche"), env);
   check(JSON.parse(out || "{}").hookSpecificOutput?.hookEventName === "UserPromptSubmit", "stateless: UserPromptSubmit output");
   check(context(out).includes("[[coche]] › Seguro: El seguro del coche vence en abril"), "stateless: hit injected");

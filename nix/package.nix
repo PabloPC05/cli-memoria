@@ -20,7 +20,7 @@ let
 in
 
 buildNpmPackage {
-  pname = "my-memory";
+  pname = "cli-memoria";
   version = "0.1.0";
 
   src = lib.fileset.toSource {
@@ -45,7 +45,7 @@ buildNpmPackage {
   # git, git-lfs, poppler (pdftotext, pdftoppm) and tesseract are called as programs; the wrapper
   # puts the pinned ones first. OCR stays optional at runtime: without them it is just unavailable.
   postInstall = ''
-    wrapProgram $out/bin/my-memory \
+    wrapProgram $out/bin/cli-memoria \
       --prefix PATH : ${
         lib.makeBinPath [
           git
@@ -57,9 +57,9 @@ buildNpmPackage {
   '';
 
   meta = {
-    description = "Self-hosted, git-backed memory server for AI agents over MCP";
+    description = "Self-hosted, git-backed memory server for AI agents (MCP)";
     license = lib.licenses.asl20;
-    mainProgram = "my-memory";
+    mainProgram = "cli-memoria";
     platforms = lib.platforms.linux;
   };
 }

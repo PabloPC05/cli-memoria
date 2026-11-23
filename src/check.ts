@@ -4,7 +4,7 @@ import { checkBatch, formatViolation, type NoteText, noteViolations, type Rules,
 import { type FileChange, parseNameStatus } from "./util.js";
 
 /**
- * `my-memory check`: the write rules over a git repo, without the server. On a tree it lists what every note breaks
+ * `cli-memoria check`: the write rules over a git repo, without the server. On a tree it lists what every note breaks
  * (like `lint`); on a range it judges the change the way the server judges a submission (only new problems block,
  * and a line may move between the Fuentes of two notes), so it can run as a pre-receive or pre-push hook; with
  * `each` it judges every commit of the range on its own.

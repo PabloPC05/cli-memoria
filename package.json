@@ -1,11 +1,11 @@
 {
-  "name": "my-memory",
+  "name": "cli-memoria",
   "version": "0.1.0",
-  "description": "Self-hosted, git-backed memory server for AI agents over MCP",
+  "description": "Self-hosted, git-backed memory for AI agents: server (MCP) and CLI (memoria)",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
-    "my-memory": "bin/my-memory.mjs"
+    "cli-memoria": "bin/cli-memoria.mjs"
   },
   "engines": {
     "node": ">=24"

@@ -2,11 +2,10 @@ import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { ForgejoOAuthProvider } from "./auth/oauth.js";
 import { addToken, listTokens, revokeToken } from "./auth/tokens.js";
 import { checkCommits, checkRange, checkTree, commitsReport, rangeReport, renderCommits, renderRange, renderTree, treeReport } from "./check.js";
 import { buildClientsReport, ClientActivity, renderClientsTable } from "./clients.js";
-import { loadConfig, readSecretFile } from "./config.js";
+import { loadConfig } from "./config.js";
 import { Git } from "./git.js";
 import { CONVENTIONS_FILE, defaultConventions, parseConventions } from "./conventions.js";
 import { lint, renderLint } from "./lint.js";
@@ -16,25 +15,23 @@ import { applyMigration, planMigration, renderPlan } from "./migrate.js";
 import { SearchIndex } from "./search-index.js";
 import { startServer } from "./server.js";
 
-const USAGE = `my-memory — git-backed memory server for AI agents (MCP)
+const USAGE = `cli-memoria — git-backed memory server for AI agents (MCP)
 
 Usage:
-  my-memory serve --config <file>
-  my-memory token add <id> --name <name> --scope read|write (--config <file> | --file <tokens.toml>)
-  my-memory token list   (--config <file> | --file <tokens.toml>)
-  my-memory token revoke <id> (--config <file> | --file <tokens.toml>)
-  my-memory oauth list --config <file>
-  my-memory oauth revoke <client_id|all> --config <file>
-  my-memory clients [--json] --config <file>   who is connected: last seen, writes, setup version
-  my-memory lint [--json] [--kind <k>[,<k>]] [--folder <f>] [--limit <n>] --config <file>
-                                             maintenance worklist (broken links, orphans, stale notes…)
-  my-memory check <repo-dir> [<rev> | <from>..<to> [--each]] [--conventions <memory.toml>] [--json]
-                                             the write rules ([rules] in memory.toml) over a git repo:
-                                             a tree lists every note's problems; a range is judged like a write
-                                             (exit 1 if it adds a problem that blocks: usable as a git hook);
-                                             --each judges every commit of the range on its own
-  my-memory reindex [--reembed] --config <file>   full rebuild of the index and missing embeddings (stop the service first)
-  my-memory migrate <repo-dir> [--apply] [--conventions <memory.toml>]
+  cli-memoria serve --config <file>
+  cli-memoria token add <id> --name <name> --scope read|write (--config <file> | --file <tokens.toml>)
+  cli-memoria token list   (--config <file> | --file <tokens.toml>)
+  cli-memoria token revoke <id> (--config <file> | --file <tokens.toml>)
+  cli-memoria clients [--json] --config <file>   who is connected: last seen, writes, setup version
+  cli-memoria lint [--json] [--kind <k>[,<k>]] [--folder <f>] [--limit <n>] --config <file>
+                                                 maintenance worklist (broken links, orphans, stale notes…)
+  cli-memoria check <repo-dir> [<rev> | <from>..<to> [--each]] [--conventions <memory.toml>] [--json]
+                                                 the write rules ([rules] in memory.toml) over a git repo:
+                                                 a tree lists every note's problems; a range is judged like a write
+                                                 (exit 1 if it adds a problem that blocks: usable as a git hook);
+                                                 --each judges every commit of the range on its own
+  cli-memoria reindex --config <file>            full rebuild of the FTS5 index (stop the service first)
+  cli-memoria migrate <repo-dir> [--apply] [--conventions <memory.toml>]
 
 The config file is TOML; see the README for every key.
 `;
@@ -59,7 +56,6 @@ export async function main(argv: string[]): Promise<number> {
 			apply: { type: "boolean" },
 			conventions: { type: "string" },
 			json: { type: "boolean" },
-			reembed: { type: "boolean" },
 			each: { type: "boolean" },
 			kind: { type: "string" },
 			folder: { type: "string" },
@@ -116,45 +112,18 @@ export async function main(argv: string[]): Promise<number> {
 			}
 			throw new Error("token: add, list or revoke");
 		}
-		if (command === "oauth") {
-			if (!values.config) throw new Error("oauth needs --config");
-			const config = loadConfig(values.config, { secrets: false });
-			if (!config.oauth || !config.publicUrl) throw new Error("the config has no [oauth]");
-			const provider = new ForgejoOAuthProvider(join(config.dataDir, "state.sqlite"), { ...config.oauth, publicUrl: config.publicUrl });
-			try {
-				if (sub === "list") {
-					for (const c of provider.listClients()) process.stdout.write(`${c.client_id}\t${c.client_name ?? "-"}\t${c.created_at}\tactive=${c.active_sessions}\n`);
-					return 0;
-				}
-				if (sub === "revoke") {
-					if (!arg) throw new Error("oauth revoke needs a client id or «all»");
-					process.stderr.write(`Revoked ${provider.revokeClient(arg)} session(s).\n`);
-					return 0;
-				}
-				throw new Error("oauth: list or revoke");
-			} finally {
-				provider.close();
-			}
-		}
 		if (command === "clients") {
 			if (!values.config) throw new Error("clients needs --config");
 			const config = loadConfig(values.config, { secrets: false });
 			const repoDir = join(config.dataDir, "repo");
-			const provider = config.oauth && config.publicUrl ? new ForgejoOAuthProvider(join(config.dataDir, "state.sqlite"), { ...config.oauth, publicUrl: config.publicUrl }) : null;
-			try {
-				const report = await buildClientsReport({
-					git: new Git(repoDir),
-					repoDir,
-					staticClients: () => (config.tokensFile ? listTokens(config.tokensFile) : []),
-					oauthClients: () => provider?.listClients() ?? [],
-					activity: () => ClientActivity.snapshot(join(config.dataDir, "activity.sqlite")),
-				});
-				process.stdout.write(`${values.json ? JSON.stringify(report, null, 2) : renderClientsTable(report)}
-`);
-				return 0;
-			} finally {
-				provider?.close();
-			}
+			const report = await buildClientsReport({
+				git: new Git(repoDir),
+				repoDir,
+				staticClients: () => (config.tokensFile ? listTokens(config.tokensFile) : []),
+				activity: () => ClientActivity.snapshot(join(config.dataDir, "activity.sqlite")),
+			});
+			process.stdout.write(`${values.json ? JSON.stringify(report, null, 2) : renderClientsTable(report)}\n`);
+			return 0;
 		}
 		if (command === "lint") {
 			if (!values.config) throw new Error("lint needs --config");
@@ -168,7 +137,7 @@ export async function main(argv: string[]): Promise<number> {
 			// another schema version is refused, never reset under a running server.
 			const index = new SearchIndex(join(config.dataDir, "index.sqlite"), { readOnly: true });
 			try {
-				if (!index.getMeta("indexed_commit")) throw new Error("the index is empty: start the server once or run «my-memory reindex»");
+				if (!index.getMeta("indexed_commit")) throw new Error("the index is empty: start the server once or run «cli-memoria reindex»");
 				const readNote = (path: string) => {
 					try {
 						return readFileSync(join(repoDir, ...path.split("/")), "utf8");
@@ -177,8 +146,7 @@ export async function main(argv: string[]): Promise<number> {
 					}
 				};
 				const report = lint(index, conventions, { kinds: values.kind?.split(",").map((k) => k.trim()).filter(Boolean), folder: values.folder, limit }, Date.now(), readNote);
-				process.stdout.write(`${values.json ? JSON.stringify(report, null, 2) : renderLint(report)}
-`);
+				process.stdout.write(`${values.json ? JSON.stringify(report, null, 2) : renderLint(report)}\n`);
 				return 0;
 			} finally {
 				index.close();
@@ -222,34 +190,16 @@ export async function main(argv: string[]): Promise<number> {
 		if (command === "reindex") {
 			if (!values.config) throw new Error("reindex needs --config");
 			const config = loadConfig(values.config, { secrets: false });
-			let embeddings = config.embeddings;
-			if (embeddings?.apiKeyFile) {
-				try {
-					embeddings = { ...embeddings, apiKey: readSecretFile(embeddings.apiKeyFile) };
-				} catch (error) {
-					process.stderr.write(`Embeddings skipped: ${(error as Error).message}. The service embeds the missing sections when it starts.\n`);
-					embeddings = null;
-				}
-			}
 			const memory = new MemoryService({
 				repoDir: join(config.dataDir, "repo"),
 				indexPath: join(config.dataDir, "index.sqlite"),
 				branch: config.branch,
 				remote: null,
 				log: jsonLogger(),
-				embeddings,
 			});
 			await memory.start();
 			try {
-				await memory.rebuildIndex({ reembed: values.reembed });
-				if (memory.embedder) {
-					try {
-						const r = await memory.embedder.flush();
-						process.stderr.write(`Embedded ${r.embedded} section(s); ${r.pending} pending.\n`);
-					} catch (error) {
-						process.stderr.write(`Embeddings failed: ${(error as Error).message}. The index is rebuilt; the service embeds the missing sections when it starts.\n`);
-					}
-				}
+				await memory.rebuildIndex();
 			} finally {
 				await memory.stop();
 			}
@@ -270,7 +220,7 @@ export async function main(argv: string[]): Promise<number> {
 		}
 		throw new Error(`unknown command «${command}»`);
 	} catch (error) {
-		process.stderr.write(`my-memory: ${(error as Error).message}\n`);
+		process.stderr.write(`cli-memoria: ${(error as Error).message}\n`);
 		return 1;
 	}
 }

@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { addToken, TokenStore } from "../src/auth/tokens.js";
 import { buildClientsReport, ClientActivity, type ClientsService, renderClientsTable, setupRecords, writesFromGit } from "../src/clients.js";
-import { toolCalls, privateApp } from "../src/http.js";
+import { toolCalls, createApp } from "../src/http.js";
 import { silentLogger } from "../src/log.js";
 import type { ClientIdentity } from "../src/memory.js";
 import { UploadStore } from "../src/uploads.js";
@@ -95,7 +95,7 @@ describe("clients report", () => {
 		expect(records.get("alex-phone")).toEqual({ version: "0.1.5", note: "temas/setup.md" });
 	});
 
-	it("joins static tokens, OAuth clients, activity and git-only ids, without secrets", async () => {
+	it("joins static tokens, activity and git-only ids, without secrets", async () => {
 		const report = await buildClientsReport({
 			git: env.memory.git,
 			repoDir: env.memory.opts.repoDir,
@@ -103,22 +103,20 @@ describe("clients report", () => {
 				{ id: "sam-laptop", name: "Sam (laptop)", scope: "write" },
 				{ id: "quiet-reader", name: "Quiet Reader", scope: "read" },
 			],
-			oauthClients: () => [{ client_id: "abc123", client_name: "Chat app" }],
 			activity: () => [
 				{ id: "sam-laptop", name: "Sam (laptop)", scope: "write", lastSeen: "2026-10-01T10:00:00.000Z", lastTool: "edit" },
-				{ id: "oauth:abc123", name: "Alex (Chat app)", scope: "write", lastSeen: "2026-10-02T10:00:00.000Z", lastTool: "search" },
+				{ id: "alex-phone", name: "Alex (phone)", scope: "write", lastSeen: "2026-10-02T10:00:00.000Z", lastTool: "search" },
 			],
 		});
 		const by = Object.fromEntries(report.clients.map((c) => [c.id, c]));
-		expect(Object.keys(by).sort()).toEqual(["alex-phone", "oauth:abc123", "old-bot", "quiet-reader", "sam-laptop"]);
-		expect(by["sam-laptop"]).toMatchObject({ kind: "static", scope: "write", registered: true, last_seen: { tool: "edit" }, writes: { last_7_days: 2, last_30_days: 2 }, setup: { version: "0.2.0" } });
+		expect(Object.keys(by).sort()).toEqual(["alex-phone", "old-bot", "quiet-reader", "sam-laptop"]);
+		expect(by["sam-laptop"]).toMatchObject({ scope: "write", registered: true, last_seen: { tool: "edit" }, writes: { last_7_days: 2, last_30_days: 2 }, setup: { version: "0.2.0" } });
 		expect(by["quiet-reader"]).toMatchObject({ scope: "read", last_seen: null, writes: { last_7_days: 0, last_write_at: null }, setup: null });
-		expect(by["oauth:abc123"]).toMatchObject({ kind: "oauth", name: "Alex (Chat app)", registered: true, last_seen: { tool: "search" } });
-		expect(by["old-bot"]).toMatchObject({ kind: "static", name: "Old Bot", registered: false, scope: null });
-		expect(report.clients[0]?.id).toBe("oauth:abc123"); // most recently seen first
+		expect(by["old-bot"]).toMatchObject({ name: "Old Bot", registered: false, scope: null });
+		expect(report.clients[0]?.id).toBe("alex-phone"); // most recently seen first
 		expect(JSON.stringify(report)).not.toMatch(/hash|sha256|secret/i);
 		const table = renderClientsTable(report);
-		expect(table.split("\n")[0]).toMatch(/^ID\s+NAME\s+KIND\s+SCOPE\s+LAST SEEN/);
+		expect(table.split("\n")[0]).toMatch(/^ID\s+NAME\s+SCOPE\s+LAST SEEN/);
 		expect(table).toContain("old-bot (gone)");
 		expect(table).toContain("0.2.0");
 	});
@@ -126,7 +124,7 @@ describe("clients report", () => {
 	it("copes with an empty repo", async () => {
 		const empty = await makeMemory({}, { noRemote: true });
 		try {
-			const report = await buildClientsReport({ git: empty.memory.git, repoDir: empty.memory.opts.repoDir, staticClients: () => [], oauthClients: () => [], activity: () => [] });
+			const report = await buildClientsReport({ git: empty.memory.git, repoDir: empty.memory.opts.repoDir, staticClients: () => [], activity: () => [] });
 			expect(report.clients).toEqual([]);
 		} finally {
 			await empty.cleanup();
@@ -154,9 +152,9 @@ describe("clients over MCP", () => {
 		const clients: ClientsService = {
 			record: (c, t) => activity.record(c, t),
 			report: () =>
-				buildClientsReport({ git: env.memory.git, repoDir: env.memory.opts.repoDir, staticClients: () => tokens.list(), oauthClients: () => [], activity: () => activity.all() }),
+				buildClientsReport({ git: env.memory.git, repoDir: env.memory.opts.repoDir, staticClients: () => tokens.list(), activity: () => activity.all() }),
 		};
-		const app = privateApp({ memory: env.memory, tokens, uploads, log: silentLogger, clients });
+		const app = createApp({ memory: env.memory, tokens, uploads, log: silentLogger, clients });
 		server = await new Promise((resolve) => {
 			const s = app.listen(0, "127.0.0.1", () => resolve(s));
 		});
