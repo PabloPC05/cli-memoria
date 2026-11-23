@@ -1,6 +1,7 @@
 import type { Conventions } from "./conventions.js";
 import { MemoryError } from "./errors.js";
 import { maskCode } from "./markdown.js";
+import { formatViolation, noteViolations, rulesApply } from "./rules.js";
 import type { NoteRow, SearchIndex } from "./search-index.js";
 import { dirOf, joinPath, lookAlikePairs, noteLabels, normalizeWords, topFolder } from "./util.js";
 
@@ -13,6 +14,7 @@ import { dirOf, joinPath, lookAlikePairs, noteLabels, normalizeWords, topFolder 
 /** Kinds in priority order: problems that break things first, housekeeping last. */
 export const LINT_KINDS = [
 	"problems",
+	"rules",
 	"broken_link",
 	"duplicate_candidates",
 	"old_inference",
@@ -93,12 +95,16 @@ function escapeRegExp(s: string): string {
 	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Builds the worklist. Pure over the index and the conventions, so the CLI can run it straight on the data dir. */
-export function lint(index: SearchIndex, conventions: Conventions, args: LintArgs = {}, nowMs: number = Date.now()): LintReport {
+/**
+ * Builds the worklist. Pure over the index and the conventions, so the CLI can run it straight on the data dir;
+ * the `rules` kind also reads the notes, through `readNote` (without it, that kind finds nothing).
+ */
+export function lint(index: SearchIndex, conventions: Conventions, args: LintArgs = {}, nowMs: number = Date.now(), readNote?: (path: string) => string | null): LintReport {
 	const settings = conventions.lint;
 	const unknown = (args.kinds ?? []).filter((k) => !(LINT_KINDS as readonly string[]).includes(k));
 	if (unknown.length) throw new MemoryError("INVALID_ARGUMENT", `Unknown lint kinds: ${unknown.join(", ")}. Use: ${LINT_KINDS.join(", ")}.`, { kinds: LINT_KINDS });
-	const wanted = new Set<LintKind>(args.kinds?.length ? (args.kinds as LintKind[]) : LINT_KINDS);
+	// Without [rules] the `rules` kind is left out unless asked for, so the report stays as it was.
+	const wanted = new Set<LintKind>(args.kinds?.length ? (args.kinds as LintKind[]) : LINT_KINDS.filter((k) => k !== "rules" || conventions.rules));
 	const folder = args.folder ? args.folder.replace(/\/+$/, "") : null;
 	const limit = Math.min(Math.max(args.limit ?? 50, 1), 500);
 
@@ -121,6 +127,21 @@ export function lint(index: SearchIndex, conventions: Conventions, args: LintArg
 			if (n.supersededBy) problems.push(`superseded by [[${n.supersededBy}]] but not in the archive${conventions.folders.archive ? ` (${conventions.folders.archive}/)` : ""}`);
 			for (const other of byName.get(n.name.toLowerCase()) ?? []) if (other !== n.path) problems.push(`duplicate name: also at ${other}`);
 			if (problems.length) items.push({ kind: "problems", notes: [n.path], detail: { problems } });
+		}
+	}
+
+	if (wanted.has("rules") && conventions.rules && readNote) {
+		// The same rules the server enforces on writes, over every note as it stands (append-only sections compare
+		// two versions, so they only show up on writes).
+		for (const n of notes) {
+			if (!rulesApply(conventions, n.path)) continue;
+			const text = readNote(n.path);
+			if (text === null) continue;
+			const found = noteViolations(conventions.rules, n.path, text);
+			if (!found.length) continue;
+			const byRule: Record<string, number> = {};
+			for (const v of found) byRule[v.rule] = (byRule[v.rule] ?? 0) + 1;
+			items.push({ kind: "rules", notes: [n.path], detail: { by_rule: byRule, violations: found.map(formatViolation) } });
 		}
 	}
 
@@ -293,7 +314,7 @@ export function renderLint(report: LintReport): string {
 	for (const it of report.items) {
 		const d = Object.entries(it.detail)
 			.filter(([, v]) => v !== null && v !== undefined)
-			.map(([k, v]) => `${k}=${Array.isArray(v) ? v.join(" | ") : String(v)}`)
+			.map(([k, v]) => `${k}=${Array.isArray(v) ? v.join(" | ") : typeof v === "object" ? Object.entries(v as Record<string, unknown>).map(([a, b]) => `${a}:${String(b)}`).join(",") : String(v)}`)
 			.join("  ");
 		lines.push(`${it.kind.padEnd(20)} ${it.notes.join(it.kind === "missing_page" ? ", " : " ↔ ")}  ${d}`);
 	}

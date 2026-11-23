@@ -5,7 +5,7 @@ import { MemoryError } from "./errors.js";
 import { LINT_KINDS } from "./lint.js";
 import type { ClientsService } from "./clients.js";
 import type { Logger } from "./log.js";
-import type { ClientIdentity, MemoryService, SearchMode } from "./memory.js";
+import type { ClientIdentity, MemoryService, PublishChange, SearchMode } from "./memory.js";
 import { SETUP_GUIDE_URI, setupGuide } from "./setup-guide.js";
 
 export const SERVER_NAME = "my-memory";
@@ -151,7 +151,7 @@ export async function createMcpServer(memory: MemoryService, client: ClientIdent
 		{
 			title: "Maintenance worklist",
 			description:
-				"Structural candidates for maintaining the memory, computed from the index without reading every note, worst first: problems (bad frontmatter, superseded notes outside the archive), broken_link, duplicate_candidates, old_inference (statements marked as inferred long ago), missing_page (a missing target linked from several notes), unlinked_mention (a note's name in plain text without a [[link]]), orphan (nothing links to it), stale (unchanged for long), oversized. Each item has the notes, a kind and a short detail; `counts` has the totals. It only finds candidates: read the notes and decide (merge, link, update, archive, split) before writing.",
+				"Structural candidates for maintaining the memory, computed by code (no model), worst first: problems (bad frontmatter, superseded notes outside the archive), rules (what breaks this memory's write rules, with line and fix per problem), broken_link, duplicate_candidates, old_inference (statements marked as inferred long ago), missing_page (a missing target linked from several notes), unlinked_mention (a note's name in plain text without a [[link]]), orphan (nothing links to it), stale (unchanged for long), oversized. Each item has the notes, a kind and a short detail; `counts` has the totals. It only finds candidates: read the notes and decide (merge, link, update, archive, split) before writing.",
 			inputSchema: {
 				kinds: z.array(z.enum(LINT_KINDS)).optional().describe("Only these kinds (default all)."),
 				folder: z.string().optional().describe("Only items that involve a note in this top-level folder."),
@@ -269,6 +269,39 @@ export async function createMcpServer(memory: MemoryService, client: ClientIdent
 	);
 
 	server.registerTool(
+		"publish",
+		{
+			title: "Publish several commits",
+			description:
+				"Sends several commits of changes as one submission, as `memoria publicar` sends the commits of a working copy: each commit becomes one commit with its reason, and if any change fails nothing is saved. The rules are judged over the whole submission, so a line may leave the «## Fuentes» of a note if it enters, unchanged, the «## Fuentes» of another note of the same submission (to split a note, send both in one publish). Changes: create {path, content}, write {path, content, hash}, move {from, to, hash}, delete {path, hash}; each hash is that of the version the change starts from. Returns the commits and the new hash of every note it touched.",
+			inputSchema: {
+				commits: z
+					.array(
+						z.object({
+							reason,
+							changes: z
+								.array(
+									z.object({
+										op: z.enum(["create", "write", "move", "delete"]),
+										path: z.string().optional().describe("The note, for create, write and delete."),
+										from: z.string().optional().describe("For move: the current path."),
+										to: z.string().optional().describe("For move: the new path."),
+										content: z.string().optional().describe("For create and write: the full note."),
+										hash: z.string().optional().describe("For write, move and delete: the hash of the version this change starts from."),
+									}),
+								)
+								.min(1),
+						}),
+					)
+					.min(1),
+				confirm_new: z.boolean().optional().describe("Create notes even if existing ones look alike (see create)."),
+			},
+			annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+		},
+		wrap("publish", (a: { commits: { reason: string; changes: PublishChange[] }[]; confirm_new?: boolean }) => memory.publish(client, a)),
+	);
+
+	server.registerTool(
 		"revert",
 		{
 			title: "Undo a change",
@@ -299,6 +332,7 @@ export async function createMcpServer(memory: MemoryService, client: ClientIdent
 				title: z.string().optional().describe("Human title of the companion note."),
 				description: z.string().describe("One line describing the file."),
 				aliases: z.array(z.string()).optional(),
+				type: z.string().optional().describe("The companion note's type, when this memory's rules ask for one (see the instructions)."),
 				reason,
 				confirm_new: z.boolean().optional(),
 			},
@@ -306,7 +340,7 @@ export async function createMcpServer(memory: MemoryService, client: ClientIdent
 		},
 		wrap(
 			"attach",
-			(a: { path: string; upload_id?: string; base64?: string; name?: string; title?: string; description: string; aliases?: string[]; reason: string; confirm_new?: boolean }) =>
+			(a: { path: string; upload_id?: string; base64?: string; name?: string; title?: string; description: string; aliases?: string[]; type?: string; reason: string; confirm_new?: boolean }) =>
 				memory.attach(client, { ...a, source: { upload_id: a.upload_id, base64: a.base64 } }),
 		),
 	);

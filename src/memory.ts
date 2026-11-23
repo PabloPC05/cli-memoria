@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { copyFile, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -15,6 +15,20 @@ import { type Logger, silentLogger } from "./log.js";
 import { firstH1, rewriteWikiLinks, splitSections, targetNameOf } from "./markdown.js";
 import type { OcrRunner } from "./ocr.js";
 import { parseTypedLinks } from "./relations.js";
+import {
+	appendOnlyAdded,
+	batchBlockingMessage,
+	blockingMessage,
+	type CheckOptions,
+	checkBatch,
+	checkWrite,
+	describeRules,
+	type NoteText,
+	rulesApply,
+	violationJson,
+	type WriteCheck,
+	warningTexts,
+} from "./rules.js";
 import { SETUP_GUIDE_URI, SETUP_GUIDE_URL } from "./setup-guide.js";
 import { buildFtsQuery, type NoteRow, type SearchHit, SearchIndex } from "./search-index.js";
 import type { UploadStore } from "./uploads.js";
@@ -79,7 +93,16 @@ export type SearchMode = "hybrid" | "text" | "semantic";
 type SearchArgs = { query: string; folder?: string; include_archive?: boolean; limit?: number };
 
 export interface Warning {
-	code: "BROKEN_LINKS" | "UNKNOWN_RELATIONS" | "PUSH_PENDING" | "EXTRACTION_EMPTY" | "EXTRACTION_PARTIAL" | "NO_CHANGES" | "FRONTMATTER_PROBLEMS";
+	code:
+		| "BROKEN_LINKS"
+		| "UNKNOWN_RELATIONS"
+		| "PUSH_PENDING"
+		| "EXTRACTION_EMPTY"
+		| "EXTRACTION_PARTIAL"
+		| "NO_CHANGES"
+		| "FRONTMATTER_PROBLEMS"
+		| "RULES_WARNINGS"
+		| "RULES_EXISTING";
 	message: string;
 	[key: string]: unknown;
 }
@@ -93,6 +116,25 @@ export interface WriteResult {
 }
 
 type NoteRef = { path?: string; name?: string };
+
+/** A note of a `publish` for the rules; `after` null for a note it deletes (it only gives what leaves it). */
+type BatchEntry = { after: NoteText | null; before: NoteText | null; opts: CheckOptions & { quiet?: boolean } };
+
+/** One change of a `publish`: create {path, content}, write {path, content, hash}, move {from, to, hash}, delete {path, hash}. */
+export interface PublishChange {
+	op: "create" | "write" | "move" | "delete";
+	path?: string;
+	from?: string;
+	to?: string;
+	content?: string;
+	hash?: string;
+}
+
+/** Most changes one `publish` may carry. */
+const MAX_PUBLISH_CHANGES = 500;
+
+/** What one write did to the worktree, before its commit. */
+type Applied = { paths: string[]; result: { path: string; [k: string]: unknown }; warnings?: Warning[]; contentPath?: string; trailers?: Record<string, string> };
 
 const READ_ONLY = new MemoryError("FORBIDDEN", "This client has read-only access.");
 
@@ -133,6 +175,8 @@ export class MemoryService {
 	private fetchTimer: NodeJS.Timeout | null = null;
 	private syncTimer: NodeJS.Timeout | null = null;
 	private syncRequested = false;
+	/** While a `publish` runs: the notes it writes, judged together at the end instead of one by one. */
+	private rulesBatch: BatchEntry[] | null = null;
 	/** Background embedding of sections; null when `[embeddings]` is not configured. */
 	readonly embedder: Embedder | null = null;
 
@@ -437,12 +481,15 @@ export class MemoryService {
 			await this.git.run(["merge", "-q", "--ff-only", remote]);
 			await this.reconcileAfterMove(local);
 			this.log("info", "git.fast_forward", { from: local, to: remote });
+			await this.logRemoteViolations(local, remote);
 			return { status: "ok" };
 		}
 		const rebased = await this.git.run(["rebase", "-q", remote], { allowFail: true });
 		if (rebased.code === 0) {
 			await this.reconcileAfterMove(local);
 			this.log("info", "git.rebased", { onto: remote });
+			const base = (await this.git.run(["merge-base", local, remote], { allowFail: true })).stdout.trim();
+			if (base) await this.logRemoteViolations(base, remote);
 			return { status: "ok" };
 		}
 		await this.git.run(["rebase", "--abort"], { allowFail: true });
@@ -603,6 +650,108 @@ export class MemoryService {
 		throw new MemoryError("INVALID_FRONTMATTER", `Invalid frontmatter: ${parsed.problems.join("; ")}.`, { problems: parsed.problems, path });
 	}
 
+	/**
+	 * The memory's `[rules]` for one note of a write: `after` is what will be saved, `before` what is there now (null for
+	 * a new note). A new violation of a blocking rule refuses the whole write with RULES_VIOLATED, saying per problem
+	 * the line and the fix; what the note already had comes back as a warning. `quiet` drops the warnings (notes a write
+	 * only touches on the side, like the links a move rewrites).
+	 */
+	private checkRules(after: NoteText, before: NoteText | null, opts: CheckOptions & { quiet?: boolean } = {}): Warning[] {
+		const rules = this.conventions.rules;
+		if (!rules || !rulesApply(this.conventions, after.path)) return [];
+		// A version outside the rules (the archive, an excluded folder) is no baseline: coming in, everything counts as new.
+		const previous = before && rulesApply(this.conventions, before.path) ? before : null;
+		if (this.rulesBatch) {
+			this.rulesBatch.push({ after, before: previous, opts });
+			return [];
+		}
+		const check = checkWrite(rules, after, previous, opts);
+		if (check.blocking.length) {
+			throw new MemoryError("RULES_VIOLATED", blockingMessage(after.path, check), {
+				path: after.path,
+				violations: check.blocking.map(violationJson),
+				...(check.existing.length ? { existing: check.existing.length } : {}),
+			});
+		}
+		return opts.quiet ? [] : warningTexts(check).map((w) => ({ ...w, path: after.path }));
+	}
+
+	/** The notes of a `publish`, judged together (see `checkBatch`): RULES_VIOLATED for all its problems at once. */
+	private judgeBatch(entries: BatchEntry[]): Warning[] {
+		const rules = this.conventions.rules;
+		if (!rules || entries.length === 0) return [];
+		const checks = checkBatch(rules, entries);
+		const results = entries.flatMap((e, i) => (e.after ? [{ path: e.after.path, check: checks[i] as WriteCheck, quiet: e.opts.quiet ?? false }] : []));
+		if (results.some((r) => r.check.blocking.length)) {
+			throw new MemoryError("RULES_VIOLATED", batchBlockingMessage(results), { violations: results.flatMap((r) => r.check.blocking.map((v) => ({ path: r.path, ...violationJson(v) }))) });
+		}
+		return results.filter((r) => !r.quiet).flatMap((r) => warningTexts(r.check).map((w) => ({ ...w, path: r.path })));
+	}
+
+	/**
+	 * Brings the index entries of some paths in line with the worktree without a commit, so the next change of a
+	 * `publish` sees what the previous ones did; `datesAt` also restores their git dates (after a rollback).
+	 */
+	private async refreshIndex(paths: string[], datesAt: string | null = null): Promise<void> {
+		const prepared: (() => void)[] = [];
+		const gone: string[] = [];
+		const present: string[] = [];
+		for (const p of new Set(paths)) {
+			if (await this.exists(p)) {
+				prepared.push(await this.prepareFile(p));
+				present.push(p);
+			} else gone.push(p);
+		}
+		const dates = datesAt && present.length ? await this.commitDates([datesAt], present) : new Map();
+		this.index.db.exec("BEGIN IMMEDIATE");
+		try {
+			for (const p of gone) {
+				this.index.removeNote(p);
+				this.index.removeAsset(p);
+			}
+			for (const apply of prepared) apply();
+			for (const [p, d] of dates) if (p.toLowerCase().endsWith(".md")) this.index.setDates(p, d);
+			this.index.resolveLinks();
+			this.index.db.exec("COMMIT");
+		} catch (error) {
+			this.index.db.exec("ROLLBACK");
+			throw error;
+		}
+	}
+
+	/**
+	 * Commits that reached the branch from the remote (a push to it, not a tool) cannot be refused any more: the
+	 * problems they added are logged, and `lint` lists them like any other.
+	 */
+	private async logRemoteViolations(from: string, to: string): Promise<void> {
+		const rules = this.conventions.rules;
+		if (!rules) return;
+		try {
+			const changes = parseNameStatus(await this.git.out(["diff", "-M", "--name-status", from, to]));
+			// What arrived is one submission: a line may leave the Fuentes of one note for those of another.
+			const entries: { after: NoteText | null; before: NoteText | null }[] = [];
+			for (const c of changes) {
+				if (c.status === "D") {
+					const gone = rulesApply(this.conventions, c.path) ? await this.git.run(["show", `${from}:${c.path}`], { allowFail: true }) : null;
+					if (gone?.code === 0) entries.push({ after: null, before: { path: c.path, text: gone.stdout } });
+					continue;
+				}
+				if (!rulesApply(this.conventions, c.path)) continue;
+				const after = await this.git.run(["show", `${to}:${c.path}`], { allowFail: true });
+				if (after.code !== 0) continue;
+				const beforePath = c.status === "R" && c.from ? c.from : c.path;
+				const before = c.status === "A" || c.status === "C" ? null : await this.git.run(["show", `${from}:${beforePath}`], { allowFail: true });
+				const previous = before && before.code === 0 && rulesApply(this.conventions, beforePath) ? { path: beforePath, text: before.stdout } : null;
+				entries.push({ after: { path: c.path, text: after.stdout }, before: previous });
+			}
+			checkBatch(rules, entries).forEach((check, i) => {
+				if (check.blocking.length) this.log("warn", "rules.remote_violations", { path: entries[i]?.after?.path, from, to, violations: check.blocking.map(violationJson) });
+			});
+		} catch (error) {
+			this.log("warn", "rules.remote_check_failed", { error: String(error) });
+		}
+	}
+
 	/** Relation keys used in the links that `memory.toml` does not allow, in order of appearance. */
 	private unknownRelations(links: { relation: string | null }[]): string[] {
 		const allowed = this.conventions.relations.allowed;
@@ -680,7 +829,7 @@ export class MemoryService {
 		client: ClientIdentity,
 		tool: string,
 		rawReason: unknown,
-		apply: () => Promise<{ paths: string[]; result: { path: string; [k: string]: unknown }; warnings?: Warning[]; contentPath?: string; trailers?: Record<string, string> }>,
+		apply: () => Promise<Applied>,
 	): Promise<WriteResult> {
 		if (client.scope !== "write") return Promise.reject(READ_ONLY);
 		let reason: string;
@@ -777,6 +926,8 @@ export class MemoryService {
 		const inUse = this.index.relations().map((r) => r.relation);
 		if (allowed) parts.push(`Relation keys of this memory: ${allowed.join(", ")}.`);
 		else if (inUse.length) parts.push(`Relation keys already in use (reuse them rather than inventing synonyms): ${inUse.join(", ")}.`);
+		const rules = describeRules(this.conventions.rules);
+		if (rules) parts.push(rules);
 		const file = this.conventions.instructions.file;
 		if (file) {
 			const text = await readFile(this.abs(file), "utf8").catch(() => null);
@@ -1051,160 +1202,292 @@ export class MemoryService {
 
 	/** Maintenance worklist from the index (see lint.ts). `nowMs` is for tests. */
 	lint(args: LintArgs = {}, nowMs: number = Date.now()) {
-		return lint(this.index, this.conventions, args, nowMs);
+		return lint(this.index, this.conventions, args, nowMs, (path) => {
+			try {
+				return readFileSync(this.abs(path), "utf8");
+			} catch {
+				return null;
+			}
+		});
 	}
 
 	// ── write tools ──────────────────────────────────────────────────────────
 
 	create(client: ClientIdentity, args: { path: string; content: string; reason: string; confirm_new?: boolean }): Promise<WriteResult> {
-		return this.mutate(client, "create", args.reason, async () => {
-			const path = checkPath(args.path, this.conventions, "note");
-			if (!this.isRootFile(path)) checkNewFilename(path, this.conventions);
-			await this.assertNoSymlink(path);
-			if (typeof args.content !== "string") throw new MemoryError("INVALID_ARGUMENT", "«content» is required.");
-			if (await this.exists(path)) throw new MemoryError("ALREADY_EXISTS", `«${path}» already exists; use edit or write.`, { path });
-			const name = noteName(path);
-			const taken = this.index.notesByName(name);
-			if (taken.length) throw new MemoryError("NAME_TAKEN", `A note named «${name}» already exists at ${taken[0]?.path}; names must be unique across folders.`, { existing: taken.map((t) => t.path) });
-			this.validateNote(path, args.content);
-			if (!args.confirm_new) {
-				const meta = parseNote(args.content, this.conventions).meta;
-				const candidates = this.duplicateCandidates([name.replace(/-/g, " "), meta.title ?? "", ...meta.aliases]);
-				if (candidates.length) {
-					throw new MemoryError("DUPLICATE_CANDIDATES", "Some existing notes look like the same thing. Read them; if this really is new, call create again with confirm_new: true.", { candidates });
-				}
+		return this.mutate(client, "create", args.reason, () => this.applyCreate(args));
+	}
+
+	private async applyCreate(args: { path: string; content: string; confirm_new?: boolean }): Promise<Applied> {
+		const path = checkPath(args.path, this.conventions, "note");
+		if (!this.isRootFile(path)) checkNewFilename(path, this.conventions);
+		await this.assertNoSymlink(path);
+		if (typeof args.content !== "string") throw new MemoryError("INVALID_ARGUMENT", "«content» is required.");
+		if (await this.exists(path)) throw new MemoryError("ALREADY_EXISTS", `«${path}» already exists; use edit or write.`, { path });
+		const name = noteName(path);
+		const taken = this.index.notesByName(name);
+		if (taken.length) throw new MemoryError("NAME_TAKEN", `A note named «${name}» already exists at ${taken[0]?.path}; names must be unique across folders.`, { existing: taken.map((t) => t.path) });
+		this.validateNote(path, args.content);
+		const ruleWarnings = this.checkRules({ path, text: args.content }, null);
+		if (!args.confirm_new) {
+			const meta = parseNote(args.content, this.conventions).meta;
+			const candidates = this.duplicateCandidates([name.replace(/-/g, " "), meta.title ?? "", ...meta.aliases]);
+			if (candidates.length) {
+				throw new MemoryError("DUPLICATE_CANDIDATES", "Some existing notes look like the same thing. Read them; if this really is new, call create again with confirm_new: true.", { candidates });
 			}
-			await this.writeText(path, args.content);
-			return { paths: [path], result: { path }, warnings: this.linkWarnings(args.content, path) };
-		});
+		}
+		await this.writeText(path, args.content);
+		return { paths: [path], result: { path }, warnings: [...ruleWarnings, ...this.linkWarnings(args.content, path)] };
 	}
 
 	edit(client: ClientIdentity, args: NoteRef & { edits: { old_string: string; new_string: string; replace_all?: boolean }[]; reason: string; hash?: string }): Promise<WriteResult> {
-		return this.mutate(client, "edit", args.reason, async () => {
-			const row = this.resolveNote(args);
-			await this.assertNoSymlink(row.path);
-			const current = await this.readText(row.path);
-			this.checkHash(row.path, current, args.hash, false);
-			if (!Array.isArray(args.edits) || args.edits.length === 0) throw new MemoryError("INVALID_ARGUMENT", "«edits» must be a non-empty list.");
-			const crlf = current.includes("\r\n");
-			let text = current;
-			args.edits.forEach((e, i) => {
-				if (typeof e.old_string !== "string" || e.old_string === "" || typeof e.new_string !== "string") throw new MemoryError("INVALID_ARGUMENT", `Edit ${i}: old_string must be non-empty and new_string a string.`, { edit: i });
-				let oldS = e.old_string;
-				let newS = e.new_string;
-				let count = text.split(oldS).length - 1;
-				if (count === 0 && crlf && oldS.includes("\n") && !oldS.includes("\r\n")) {
-					oldS = oldS.replace(/\n/g, "\r\n");
-					newS = newS.replace(/\r?\n/g, "\r\n");
-					count = text.split(oldS).length - 1;
-				}
-				if (count === 0) throw new MemoryError("EDIT_NO_MATCH", `Edit ${i}: old_string was not found${i > 0 ? " (after applying the previous edits)" : ""}.`, { edit: i });
-				if (count > 1 && !e.replace_all) throw new MemoryError("EDIT_AMBIGUOUS", `Edit ${i}: old_string appears ${count} times; add context or set replace_all.`, { edit: i, occurrences: count });
-				if (e.replace_all) text = text.split(oldS).join(newS);
-				else {
-					const at = text.indexOf(oldS);
-					text = text.slice(0, at) + newS + text.slice(at + oldS.length);
-				}
-			});
-			const fmWarnings = this.validateNote(row.path, text, current);
-			await this.writeText(row.path, text);
-			return { paths: [row.path], result: { path: row.path }, warnings: [...fmWarnings, ...this.linkWarnings(text, row.path)] };
+		return this.mutate(client, "edit", args.reason, () => this.applyEdit(args));
+	}
+
+	private async applyEdit(args: NoteRef & { edits: { old_string: string; new_string: string; replace_all?: boolean }[]; hash?: string }): Promise<Applied> {
+		const row = this.resolveNote(args);
+		await this.assertNoSymlink(row.path);
+		const current = await this.readText(row.path);
+		this.checkHash(row.path, current, args.hash, false);
+		if (!Array.isArray(args.edits) || args.edits.length === 0) throw new MemoryError("INVALID_ARGUMENT", "«edits» must be a non-empty list.");
+		const crlf = current.includes("\r\n");
+		let text = current;
+		args.edits.forEach((e, i) => {
+			if (typeof e.old_string !== "string" || e.old_string === "" || typeof e.new_string !== "string") throw new MemoryError("INVALID_ARGUMENT", `Edit ${i}: old_string must be non-empty and new_string a string.`, { edit: i });
+			let oldS = e.old_string;
+			let newS = e.new_string;
+			let count = text.split(oldS).length - 1;
+			if (count === 0 && crlf && oldS.includes("\n") && !oldS.includes("\r\n")) {
+				oldS = oldS.replace(/\n/g, "\r\n");
+				newS = newS.replace(/\r?\n/g, "\r\n");
+				count = text.split(oldS).length - 1;
+			}
+			if (count === 0) throw new MemoryError("EDIT_NO_MATCH", `Edit ${i}: old_string was not found${i > 0 ? " (after applying the previous edits)" : ""}.`, { edit: i });
+			if (count > 1 && !e.replace_all) throw new MemoryError("EDIT_AMBIGUOUS", `Edit ${i}: old_string appears ${count} times; add context or set replace_all.`, { edit: i, occurrences: count });
+			if (e.replace_all) text = text.split(oldS).join(newS);
+			else {
+				const at = text.indexOf(oldS);
+				text = text.slice(0, at) + newS + text.slice(at + oldS.length);
+			}
 		});
+		const fmWarnings = this.validateNote(row.path, text, current);
+		const ruleWarnings = this.checkRules({ path: row.path, text }, { path: row.path, text: current });
+		await this.writeText(row.path, text);
+		return { paths: [row.path], result: { path: row.path }, warnings: [...fmWarnings, ...ruleWarnings, ...this.linkWarnings(text, row.path)] };
 	}
 
 	write(client: ClientIdentity, args: NoteRef & { content: string; hash: string; reason: string }): Promise<WriteResult> {
-		return this.mutate(client, "write", args.reason, async () => {
-			const row = this.resolveNote(args);
-			await this.assertNoSymlink(row.path);
-			const current = await this.readText(row.path);
-			this.checkHash(row.path, current, args.hash, true);
-			if (typeof args.content !== "string") throw new MemoryError("INVALID_ARGUMENT", "«content» is required.");
-			const fmWarnings = this.validateNote(row.path, args.content, current);
-			await this.writeText(row.path, args.content);
-			return { paths: [row.path], result: { path: row.path }, warnings: [...fmWarnings, ...this.linkWarnings(args.content, row.path)] };
-		});
+		return this.mutate(client, "write", args.reason, () => this.applyWrite(args));
+	}
+
+	private async applyWrite(args: NoteRef & { content: string; hash: string }): Promise<Applied> {
+		const row = this.resolveNote(args);
+		await this.assertNoSymlink(row.path);
+		const current = await this.readText(row.path);
+		this.checkHash(row.path, current, args.hash, true);
+		if (typeof args.content !== "string") throw new MemoryError("INVALID_ARGUMENT", "«content» is required.");
+		const fmWarnings = this.validateNote(row.path, args.content, current);
+		const ruleWarnings = this.checkRules({ path: row.path, text: args.content }, { path: row.path, text: current });
+		await this.writeText(row.path, args.content);
+		return { paths: [row.path], result: { path: row.path }, warnings: [...fmWarnings, ...ruleWarnings, ...this.linkWarnings(args.content, row.path)] };
 	}
 
 	move(client: ClientIdentity, args: { from: string; to: string; hash: string; reason: string }): Promise<WriteResult> {
-		return this.mutate(client, "move", args.reason, async () => {
-			if (typeof args.from !== "string" || !args.from.trim()) throw new MemoryError("INVALID_ARGUMENT", "«from» is required: a path or a name.");
-			const row = this.resolveNote(args.from.includes("/") || /\.md$/i.test(args.from.trim()) ? { path: args.from } : { name: args.from });
-			if (this.isRootFile(row.path)) throw new MemoryError("INVALID_PATH", `«${row.path}» is a root file and cannot be moved.`);
-			const to = checkPath(args.to, this.conventions, "note");
-			if (this.isRootFile(to)) throw new MemoryError("INVALID_PATH", "Notes cannot be moved to the repo root.");
-			checkNewFilename(to, this.conventions);
-			if (to === row.path) throw new MemoryError("INVALID_ARGUMENT", "«to» is the same as the current path.");
-			await this.assertNoSymlink(row.path);
-			await this.assertNoSymlink(to);
-			const current = await this.readText(row.path);
-			this.checkHash(row.path, current, args.hash, true);
-			const caseOnly = to.toLowerCase() === row.path.toLowerCase();
-			if (!caseOnly && (await this.exists(to))) throw new MemoryError("ALREADY_EXISTS", `«${to}» already exists.`, { path: to });
-			const oldName = row.name;
-			const newName = noteName(to);
-			const renamed = oldName.toLowerCase() !== newName.toLowerCase() || oldName !== newName;
-			if (oldName.toLowerCase() !== newName.toLowerCase()) {
-				const taken = this.index.notesByName(newName).filter((n) => n.path !== row.path);
-				if (taken.length) throw new MemoryError("NAME_TAKEN", `A note named «${newName}» already exists at ${taken[0]?.path}.`, { existing: taken.map((t) => t.path) });
+		return this.mutate(client, "move", args.reason, () => this.applyMove(args));
+	}
+
+	private async applyMove(args: { from: string; to: string; hash: string }): Promise<Applied> {
+		if (typeof args.from !== "string" || !args.from.trim()) throw new MemoryError("INVALID_ARGUMENT", "«from» is required: a path or a name.");
+		const row = this.resolveNote(args.from.includes("/") || /\.md$/i.test(args.from.trim()) ? { path: args.from } : { name: args.from });
+		if (this.isRootFile(row.path)) throw new MemoryError("INVALID_PATH", `«${row.path}» is a root file and cannot be moved.`);
+		const to = checkPath(args.to, this.conventions, "note");
+		if (this.isRootFile(to)) throw new MemoryError("INVALID_PATH", "Notes cannot be moved to the repo root.");
+		checkNewFilename(to, this.conventions);
+		if (to === row.path) throw new MemoryError("INVALID_ARGUMENT", "«to» is the same as the current path.");
+		await this.assertNoSymlink(row.path);
+		await this.assertNoSymlink(to);
+		const current = await this.readText(row.path);
+		this.checkHash(row.path, current, args.hash, true);
+		const caseOnly = to.toLowerCase() === row.path.toLowerCase();
+		if (!caseOnly && (await this.exists(to))) throw new MemoryError("ALREADY_EXISTS", `«${to}» already exists.`, { path: to });
+		const oldName = row.name;
+		const newName = noteName(to);
+		const renamed = oldName.toLowerCase() !== newName.toLowerCase() || oldName !== newName;
+		if (oldName.toLowerCase() !== newName.toLowerCase()) {
+			const taken = this.index.notesByName(newName).filter((n) => n.path !== row.path);
+			if (taken.length) throw new MemoryError("NAME_TAKEN", `A note named «${newName}» already exists at ${taken[0]?.path}.`, { existing: taken.map((t) => t.path) });
+		}
+		const paths = [row.path, to];
+		// Binary of an attachment companion follows its note to the new folder.
+		if (row.attachment && dirOf(row.path) !== dirOf(to)) {
+			const fromBin = joinPath(dirOf(row.path), row.attachment);
+			const toBin = joinPath(dirOf(to), row.attachment);
+			if (await this.exists(toBin)) throw new MemoryError("ALREADY_EXISTS", `«${toBin}» already exists.`, { path: toBin });
+			if (await this.exists(fromBin)) {
+				await mkdir(dirname(this.abs(toBin)), { recursive: true });
+				await rename(this.abs(fromBin), this.abs(toBin));
+				paths.push(fromBin, toBin);
 			}
-			const paths = [row.path, to];
-			// Binary of an attachment companion follows its note to the new folder.
-			if (row.attachment && dirOf(row.path) !== dirOf(to)) {
-				const fromBin = joinPath(dirOf(row.path), row.attachment);
-				const toBin = joinPath(dirOf(to), row.attachment);
-				if (await this.exists(toBin)) throw new MemoryError("ALREADY_EXISTS", `«${toBin}» already exists.`, { path: toBin });
-				if (await this.exists(fromBin)) {
-					await mkdir(dirname(this.abs(toBin)), { recursive: true });
-					await rename(this.abs(fromBin), this.abs(toBin));
-					paths.push(fromBin, toBin);
+		}
+		await mkdir(dirname(this.abs(to)), { recursive: true });
+		if (caseOnly) {
+			const tmp = `${this.abs(row.path)}.${randomBytes(4).toString("hex")}.mv`;
+			await rename(this.abs(row.path), tmp);
+			await rename(tmp, this.abs(to));
+		} else await rename(this.abs(row.path), this.abs(to));
+		let rewritten = 0;
+		let movedText = current;
+		if (renamed) {
+			const oldKey = oldName.toLowerCase();
+			const referrers = new Set(this.index.linksIn(row.path).map((l) => l.srcPath));
+			referrers.add(row.path);
+			for (const src of referrers) {
+				const file = src === row.path ? to : src;
+				const text = await this.readText(file);
+				const out = rewriteWikiLinks(text, (l) => (l.targetName === oldKey ? newName : null));
+				if (out.count > 0) {
+					if (src === row.path) movedText = out.text;
+					else this.checkRules({ path: file, text: out.text }, { path: file, text }, { quiet: true });
+					await this.writeText(file, out.text);
+					paths.push(file);
+					rewritten += out.count;
 				}
 			}
-			await mkdir(dirname(this.abs(to)), { recursive: true });
-			if (caseOnly) {
-				const tmp = `${this.abs(row.path)}.${randomBytes(4).toString("hex")}.mv`;
-				await rename(this.abs(row.path), tmp);
-				await rename(tmp, this.abs(to));
-			} else await rename(this.abs(row.path), this.abs(to));
-			let rewritten = 0;
-			if (renamed) {
-				const oldKey = oldName.toLowerCase();
-				const referrers = new Set(this.index.linksIn(row.path).map((l) => l.srcPath));
-				referrers.add(row.path);
-				for (const src of referrers) {
-					const file = src === row.path ? to : src;
-					const text = await this.readText(file);
-					const out = rewriteWikiLinks(text, (l) => (l.targetName === oldKey ? newName : null));
-					if (out.count > 0) {
-						await this.writeText(file, out.text);
-						paths.push(file);
-						rewritten += out.count;
-					}
-				}
-			}
-			return { paths, result: { path: to, from: row.path, links_rewritten: rewritten } };
-		});
+		}
+		// The note is judged where it goes against what it was where it was: out of the archive, or out of a folder
+		// without types, its problems count as new.
+		const warnings = this.checkRules({ path: to, text: movedText }, { path: row.path, text: current });
+		return { paths, result: { path: to, from: row.path, links_rewritten: rewritten }, warnings };
 	}
 
 	delete(client: ClientIdentity, args: NoteRef & { hash: string; reason: string }): Promise<WriteResult> {
-		return this.mutate(client, "delete", args.reason, async () => {
-			const row = this.resolveNote(args);
-			if (this.isRootFile(row.path)) throw new MemoryError("INVALID_PATH", `«${row.path}» is a root file and cannot be deleted.`);
-			await this.assertNoSymlink(row.path);
-			const current = await this.readText(row.path);
-			this.checkHash(row.path, current, args.hash, true);
-			const binary = row.attachment ? joinPath(dirOf(row.path), row.attachment) : null;
-			const backlinks = [...this.index.linksIn(row.path), ...(binary ? this.index.linksIn(binary) : [])].filter((l) => l.srcPath !== row.path);
-			if (backlinks.length) {
-				throw new MemoryError("HAS_BACKLINKS", `Other notes link to «${row.name}»; fix or remove those links first.`, { backlinks: backlinks.map((l) => ({ src_path: l.srcPath, line: l.line })) });
+		return this.mutate(client, "delete", args.reason, () => this.applyDelete(args));
+	}
+
+	private async applyDelete(args: NoteRef & { hash: string }): Promise<Applied> {
+		const row = this.resolveNote(args);
+		if (this.isRootFile(row.path)) throw new MemoryError("INVALID_PATH", `«${row.path}» is a root file and cannot be deleted.`);
+		await this.assertNoSymlink(row.path);
+		const current = await this.readText(row.path);
+		this.checkHash(row.path, current, args.hash, true);
+		// In a publish, what this note had may go to another note of it (merging notes).
+		if (this.rulesBatch && rulesApply(this.conventions, row.path)) this.rulesBatch.push({ after: null, before: { path: row.path, text: current }, opts: {} });
+		const binary = row.attachment ? joinPath(dirOf(row.path), row.attachment) : null;
+		const backlinks = [...this.index.linksIn(row.path), ...(binary ? this.index.linksIn(binary) : [])].filter((l) => l.srcPath !== row.path);
+		if (backlinks.length) {
+			throw new MemoryError("HAS_BACKLINKS", `Other notes link to «${row.name}»; fix or remove those links first.`, { backlinks: backlinks.map((l) => ({ src_path: l.srcPath, line: l.line })) });
+		}
+		await rm(this.abs(row.path));
+		const paths = [row.path];
+		if (binary && (await this.exists(binary))) {
+			await rm(this.abs(binary));
+			paths.push(binary);
+		}
+		return { paths, result: { path: row.path } };
+	}
+
+	/**
+	 * Several commits of changes as one submission, the way `memoria publicar` sends the commits of a working copy:
+	 * each commit becomes one commit here with its reason, the changes run in order (each sees what the previous ones
+	 * did), and the rules are judged over the whole submission at the end, so a line may leave the «Fuentes» of one
+	 * note if it enters, unchanged, those of another (splitting a note). All or nothing: if any change or rule fails,
+	 * the worktree, the branch and the index go back to where they were and nothing is pushed.
+	 */
+	publish(
+		client: ClientIdentity,
+		args: { commits: { reason: string; changes: PublishChange[] }[]; confirm_new?: boolean },
+	): Promise<{ commit: string | null; commits: { commit: string; reason: string; changes: Record<string, unknown>[] }[]; hashes: Record<string, string | null>; warnings: Warning[] }> {
+		if (client.scope !== "write") return Promise.reject(READ_ONLY);
+		let reasons: string[];
+		try {
+			if (!Array.isArray(args.commits) || args.commits.length === 0) throw new MemoryError("INVALID_ARGUMENT", "«commits» must be a non-empty list.");
+			reasons = args.commits.map((c, i) => {
+				if (!c || !Array.isArray(c.changes) || c.changes.length === 0) throw new MemoryError("INVALID_ARGUMENT", `Commit ${i + 1}: «changes» must be a non-empty list.`, { commit: i });
+				return this.checkReason(c.reason);
+			});
+			const total = args.commits.reduce((n, c) => n + c.changes.length, 0);
+			if (total > MAX_PUBLISH_CHANGES) throw new MemoryError("INVALID_ARGUMENT", `At most ${MAX_PUBLISH_CHANGES} changes per submission (got ${total}); split it.`);
+		} catch (error) {
+			return Promise.reject(error);
+		}
+		return this.lock.run(async () => {
+			if (this.syncRequested) await this.syncLocked("before-write");
+			const before = await this.git.head();
+			const touched = new Set<string>();
+			const made: { commit: string; reason: string; changes: Record<string, unknown>[] }[] = [];
+			const warnings: Warning[] = [];
+			this.rulesBatch = [];
+			try {
+				for (const [ci, c] of args.commits.entries()) {
+					const reason = reasons[ci] as string;
+					const paths: string[] = [];
+					const done: Record<string, unknown>[] = [];
+					for (const [i, change] of c.changes.entries()) {
+						let applied: Applied;
+						try {
+							applied = await this.applyChange(change, args.confirm_new);
+						} catch (error) {
+							if (!(error instanceof MemoryError)) throw error;
+							const what = change?.op === "move" ? `move ${change.from} → ${change.to}` : `${change?.op} ${change?.path}`;
+							throw new MemoryError(error.code, `Nothing was saved. Commit ${ci + 1}, change ${i + 1} (${what}): ${error.message}`, { ...error.details, commit: ci, change: i });
+						}
+						paths.push(...applied.paths);
+						for (const p of applied.paths) touched.add(p);
+						await this.refreshIndex(applied.paths);
+						done.push({ op: change.op, ...applied.result });
+						for (const w of applied.warnings ?? []) warnings.push({ ...w, commit: ci, change: i });
+					}
+					await this.git.run(["add", "-A", "--", ...new Set(paths)]);
+					if ((await this.git.run(["diff", "--cached", "--quiet"], { allowFail: true })).code === 0) {
+						warnings.push({ code: "NO_CHANGES", message: `Commit ${ci + 1} («${reason}») changed nothing; no commit was made for it.`, commit: ci });
+						continue;
+					}
+					await this.git.run(["commit", "-q", "--no-verify", "-F", "-"], { input: this.commitMessage(client, "publish", reason), env: this.authorEnv(client) });
+					made.push({ commit: (await this.git.head()) as string, reason, changes: done });
+				}
+				warnings.push(...this.judgeBatch(this.rulesBatch));
+			} catch (error) {
+				await this.restoreWorktree(before).catch((e) => this.log("error", "worktree.restore_failed", { error: String(e) }));
+				await this.refreshIndex([...touched], before).catch((e) => this.log("error", "index.restore_failed", { error: String(e) }));
+				throw error;
+			} finally {
+				this.rulesBatch = null;
 			}
-			await rm(this.abs(row.path));
-			const paths = [row.path];
-			if (binary && (await this.exists(binary))) {
-				await rm(this.abs(binary));
-				paths.push(binary);
+			if (made.length === 0) return { commit: before, commits: [], hashes: {}, warnings };
+			const head = (await this.git.head()) as string;
+			if (before) await this.incrementalReindex(before, head);
+			else await this.fullReindex(head);
+			const pushed = await this.pushLocked();
+			if (pushed.status === "conflict") {
+				throw new MemoryError("REMOTE_CONFLICT", "Someone changed the memory at the same time and the changes collided; nothing of this submission was kept. Bring your copy up to date and send it again.", {
+					paths: [...touched],
+				});
 			}
-			return { paths, result: { path: row.path } };
+			if (pushed.status === "pending") warnings.push({ code: "PUSH_PENDING", message: "Saved and committed here, but the remote is unreachable; it will be pushed automatically." });
+			// A push that had to rebase rewrites the hashes: ours are the last ones on the branch.
+			const final = (await this.git.out(["rev-list", "--reverse", `-n${made.length}`, "HEAD"])).trim().split("\n");
+			made.forEach((m, i) => {
+				m.commit = final[i] ?? m.commit;
+			});
+			const hashes: Record<string, string | null> = {};
+			for (const p of touched) if (/\.md$/i.test(p)) hashes[p] = (await this.exists(p)) ? blobHash(await this.readText(p)) : null;
+			this.log("info", "memory.write", { client: client.id, tool: "publish", commits: made.length, paths: touched.size, warnings: warnings.map((w) => w.code) });
+			return { commit: final.at(-1) ?? head, commits: made, hashes, warnings };
 		});
+	}
+
+	private applyChange(change: PublishChange, confirmNew?: boolean): Promise<Applied> {
+		switch (change?.op) {
+			case "create":
+				return this.applyCreate({ path: change.path as string, content: change.content as string, confirm_new: confirmNew });
+			case "write":
+				return this.applyWrite({ path: change.path, content: change.content as string, hash: change.hash as string });
+			case "move":
+				return this.applyMove({ from: change.from as string, to: change.to as string, hash: change.hash as string });
+			case "delete":
+				return this.applyDelete({ path: change.path, hash: change.hash as string });
+			default:
+				return Promise.reject(new MemoryError("INVALID_ARGUMENT", `Unknown op «${String(change?.op)}»: use create, write, move or delete.`));
+		}
 	}
 
 	/** Full hash of a commit given by a client, which must be on the current branch. */
@@ -1379,10 +1662,31 @@ export class MemoryService {
 					throw new MemoryError("HAS_BACKLINKS", `Reverting ${short} would remove notes that other notes link to; fix or remove those links first${only ? "" : ", or revert only one note with «path»"}.`, { backlinks });
 				}
 				const warnings: Warning[] = [];
+				const moveSources = new Map(changes.filter((c) => c.status === "R" && c.from).map((c) => [c.from as string, c.path]));
 				for (const [p, text] of writes) {
 					if (!/\.md$/i.test(p)) continue;
-					const previous = (await this.exists(p)) ? await this.readText(p) : text;
+					const exists = await this.exists(p);
+					const previous = exists ? await this.readText(p) : text;
 					warnings.push(...this.validateNote(p, text, previous));
+					// Rules against the note as it is now (a note moved back, where it is now); a deleted note brought back is
+					// compared with its own last version. Undoing a commit may take back the lines it added to an
+					// append-only section, and no others.
+					const rules = this.conventions.rules;
+					if (rules) {
+						const change = changes.find((c) => c.path === p || c.from === p);
+						const movedTo = moveSources.get(p);
+						let now: NoteText | null = null;
+						if (exists) now = { path: p, text: previous };
+						else if (movedTo && (await this.exists(movedTo))) now = { path: movedTo, text: await this.readText(movedTo) };
+						else {
+							const last = await this.blobAt(base, p);
+							if (last) now = { path: p, text: await this.blobText(last) };
+						}
+						const was = change ? await this.blobAt(target, change.path) : null;
+						const old = await this.blobAt(base, change?.from ?? p);
+						const allowRemoved = was ? appendOnlyAdded(rules, old ? await this.blobText(old) : null, await this.blobText(was)) : [];
+						warnings.push(...this.checkRules({ path: p, text }, now, { allowRemoved }));
+					}
 					for (const w of this.linkWarnings(text, p)) {
 						if (w.code !== "BROKEN_LINKS") warnings.push({ ...w, path: p });
 						else {
@@ -1408,7 +1712,18 @@ export class MemoryService {
 
 	async attach(
 		client: ClientIdentity,
-		args: { path: string; source: { upload_id?: string; base64?: string }; name?: string; title?: string; description: string; aliases?: string[]; reason: string; confirm_new?: boolean },
+		args: {
+			path: string;
+			source: { upload_id?: string; base64?: string };
+			name?: string;
+			title?: string;
+			description: string;
+			aliases?: string[];
+			/** The companion note's type; defaults to the rules' `attachment_type`. */
+			type?: string;
+			reason: string;
+			confirm_new?: boolean;
+		},
 	): Promise<WriteResult> {
 		if (client.scope !== "write") throw READ_ONLY;
 		const uploads = this.opts.uploads;
@@ -1457,15 +1772,21 @@ export class MemoryService {
 			} catch {
 				await copyFile(upload.file, this.abs(binPath));
 			}
-			const fm: Record<string, unknown> = { name: title, description: args.description.replace(/\s+/g, " ").trim(), aliases, attachment: fileName, extracted_with: extraction.method };
+			const fm: Record<string, unknown> = { name: title, description: args.description.replace(/\s+/g, " ").trim(), aliases };
+			const typeRule = this.conventions.rules?.type;
+			const type = (typeof args.type === "string" && args.type.trim()) || typeRule?.attachmentType || null;
+			if (type) fm[typeRule?.field ?? "type"] = type;
+			fm.attachment = fileName;
+			fm.extracted_with = extraction.method;
 			let body = `# ${title}\n\n![[${fileName}]]\n`;
 			if (extraction.ocr) body += `\n> ${this.conventions.attachments.ocrNotice.replace("{languages}", extraction.ocr.languages)}\n`;
 			if (extraction.image && extraction.pages.length === 1) body += `\n${extraction.pages[0]?.text}\n`;
 			else for (const page of extraction.pages) body += `\n## ${this.conventions.attachments.pageHeading.replace("{n}", String(page.number))}\n\n${page.text}\n`;
 			const content = `---\n${stringifyYaml(fm, { lineWidth: 0 }).trimEnd()}\n---\n${body}`;
 			this.validateNote(companion, content);
+			// The text comes from the file as it is: only the frontmatter the server writes is held to the rules here.
+			const warnings: Warning[] = this.checkRules({ path: companion, text: content }, null, { only: ["frontmatter", "type"] });
 			await this.writeText(companion, content);
-			const warnings: Warning[] = [];
 			if (extraction.method === "none") warnings.push({ code: "EXTRACTION_EMPTY", message: `No text was extracted: ${extraction.reason ?? "unknown reason"}.` });
 			const { skippedPages = 0, failedPages = [] } = extraction.ocr ?? {};
 			if (skippedPages || failedPages.length) {

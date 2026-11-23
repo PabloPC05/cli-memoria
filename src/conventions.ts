@@ -1,5 +1,6 @@
 import { parse as parseToml } from "smol-toml";
 import { RELATION_KEY } from "./relations.js";
+import { parseRules, type Rules } from "./rules.js";
 
 /** The rules a notes repo declares in its `memory.toml`. The server only ships defaults. */
 export interface Conventions {
@@ -52,6 +53,8 @@ export interface Conventions {
 		/** Shortest label (normalized characters) looked for as an `unlinked_mention`. */
 		mentionMinLength: number;
 	};
+	/** Write rules (`[rules]`), enforced on every write and reported by lint; `null` means none. */
+	rules: Rules | null;
 }
 
 export const CONVENTIONS_FILE = "memory.toml";
@@ -69,6 +72,7 @@ export function defaultConventions(): Conventions {
 		attachments: { pageHeading: "Page {n}", ocrNotice: "Text recognised with OCR ({languages}); it may contain errors." },
 		relations: { allowed: null },
 		lint: { exclude: [], orphanExclude: [], staleDays: 180, inferenceDays: 90, inferredMarkers: ["deducido"], maxBytes: 16_384, missingPageMin: 2, mentionMinLength: 4 },
+		rules: null,
 	};
 }
 
@@ -152,5 +156,7 @@ export function parseConventions(text: string): Conventions {
 	if (lint.max_bytes !== undefined) c.lint.maxBytes = positive("max_bytes", lint.max_bytes);
 	if (lint.missing_page_min !== undefined) c.lint.missingPageMin = positive("missing_page_min", lint.missing_page_min);
 	if (lint.mention_min_length !== undefined) c.lint.mentionMinLength = positive("mention_min_length", lint.mention_min_length);
+
+	c.rules = parseRules(doc.rules);
 	return c;
 }

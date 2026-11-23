@@ -76,15 +76,37 @@ export class Git {
 	}
 
 	/** Stdout as raw bytes (blobs), failing like `run` does. */
-	bytes(args: string[]): Promise<Buffer> {
+	bytes(args: string[], opts: { input?: string } = {}): Promise<Buffer> {
 		return new Promise((resolve, reject) => {
-			execFile(this.options.gitBinary ?? "git", args, { cwd: this.cwd, env: this.env(), maxBuffer: 256 * 1024 * 1024, encoding: "buffer", windowsHide: true }, (error, stdout, stderr) => {
+			const child = execFile(this.options.gitBinary ?? "git", args, { cwd: this.cwd, env: this.env(), maxBuffer: 1024 * 1024 * 1024, encoding: "buffer", windowsHide: true }, (error, stdout, stderr) => {
 				if (!error) return resolve(stdout);
 				const errCode = (error as { code?: unknown }).code;
 				if (errCode === "ENOENT") return reject(new Error(`git binary not found (${this.options.gitBinary ?? "git"})`));
 				reject(new GitError(args, { stdout: "", stderr: stderr.toString("utf8"), code: typeof errCode === "number" ? errCode : 1 }));
 			});
+			if (opts.input !== undefined) child.stdin?.end(opts.input);
 		});
+	}
+
+	/** Many blobs (`rev:path`) in one `git cat-file --batch`, as text; null for those that do not exist. */
+	async blobs(specs: string[]): Promise<(string | null)[]> {
+		if (specs.length === 0) return [];
+		const out = await this.bytes(["cat-file", "--batch"], { input: specs.map((s) => `${s}\n`).join("") });
+		const result: (string | null)[] = [];
+		let at = 0;
+		for (let i = 0; i < specs.length; i++) {
+			const nl = out.indexOf(10, at);
+			const header = /^[0-9a-f]{40,64} (\w+) (\d+)$/.exec(out.subarray(at, nl).toString("utf8"));
+			at = nl + 1;
+			if (!header) {
+				result.push(null); // «<spec> missing» or «ambiguous»
+				continue;
+			}
+			const size = Number(header[2]);
+			result.push(header[1] === "blob" ? out.subarray(at, at + size).toString("utf8") : null);
+			at += size + 1;
+		}
+		return result;
 	}
 
 	async head(): Promise<string | null> {
