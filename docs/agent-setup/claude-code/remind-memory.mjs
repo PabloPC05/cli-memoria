@@ -7,7 +7,7 @@
 //   "hooks": { "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "node",
 //     "args": ["<home>/.claude/hooks/remind-memory.mjs"] } ] } ] }
 //
-// MEMORY_MCP_HINT (optional) names the server and tools, e.g. "the MCP server lisa (memoria_search, memoria_create,
+// MEMORY_MCP_HINT (optional) names the server and tools, e.g. "the MCP server memoria (memoria_search, memoria_create,
 // memoria_edit)". The trigger covers English and Spanish; extend it for other languages.
 const hint =
   process.env.MEMORY_MCP_HINT ||

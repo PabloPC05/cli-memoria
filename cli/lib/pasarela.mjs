@@ -1,10 +1,6 @@
 // El cliente de la pasarela MCP de la CLI memoria: una sesión MCP por HTTP (Streamable HTTP, JSON o SSE) con la clave de
 // un agente, para llamar a herramientas (`tools/call`) y atender los formularios que pida el servidor (`elicitation/create`).
-// La pasarela es configuración, no parte de este repositorio: BADULAQUE_URL (por defecto, la del Badulaque de Pablo) y
-// BADULAQUE_CLAVE. Ver cli/README.md, «La pasarela».
-//
-// Es un trozo de kit/badulaque/badulaque.mjs de PabloPC05/lisa (la CLI `badulaque`): Fallo, sanear, configurar y la clase
-// Pasarela, tal cual, sin lo que memoria no usa (el buscador, la caché de esquemas, la interfaz, --verbose).
+// La pasarela se configura por entorno: BADULAQUE_URL y BADULAQUE_CLAVE. Ver cli/README.md, «La pasarela».
 // Sin dependencias.
 
 import { request as pedirHttp } from "node:http";
@@ -13,10 +9,9 @@ import { createInterface } from "node:readline/promises";
 
 const VERSION = "1.0.0";
 const PROTOCOLO = "2025-06-18";
-const URL_POR_DEFECTO = "https://badulaque.ppardocotos.com/buscador/mcp";
 /** Sin noticias de la pasarela durante tanto, una llamada sencilla se da por perdida. */
 const TIEMPO_SIMPLE_MS = 60_000;
-/** Un «usar» puede esperar a Pablo (un formulario): se da por perdido solo tras tanto silencio. */
+/** Un «usar» puede esperar confirmación del usuario (un formulario): se da por perdido solo tras tanto silencio. */
 const SILENCIO_USAR_MS = 30 * 60_000;
 
 /** Un error con su código de salida: 1 herramienta, 2 uso o configuración, 3 red o protocolo. */
@@ -144,8 +139,8 @@ function pedir(url, { metodo = "POST", cabeceras = {}, cuerpo, alMensaje, silenc
 async function elicitar(params) {
   const mensaje = String(params.message ?? "Badulaque pide una confirmación.");
   if (!process.stdin.isTTY || !process.stderr.isTTY) {
-    log(`badulaque: Badulaque pide una confirmación («${mensaje}») que esta terminal no puede dar. ` +
-      "Se rechaza: ese paso necesita la confirmación de Pablo en un cliente con formularios (Claude, Lisa web).");
+    log(`badulaque: la pasarela pide una confirmación («${mensaje}») que esta terminal no puede dar. ` +
+      "Se rechaza: ese paso necesita confirmación interactiva en un cliente con formularios.");
     return { action: "decline" };
   }
   const rl = createInterface({ input: process.stdin, output: process.stderr });
@@ -351,15 +346,17 @@ export class Pasarela {
 // --- la configuración -------------------------------------------------------
 
 /**
- * La sesión de una invocación, de BADULAQUE_URL (por defecto, la del Badulaque) y BADULAQUE_CLAVE: { pasarela }.
- * Los mensajes de error son los de la CLI `badulaque` de lisa, tal cual.
+ * La sesión de una invocación, a partir de BADULAQUE_URL y BADULAQUE_CLAVE: { pasarela }.
  */
 export function configurar() {
   const clave = (process.env.BADULAQUE_CLAVE ?? "").trim();
   if (!clave) {
-    throw new Fallo("falta BADULAQUE_CLAVE: la clave de tu agente en el Badulaque. Ponla como dice kit/README.md (sección Badulaque).", 2);
+    throw new Fallo("falta BADULAQUE_CLAVE: indica la clave del agente en la variable de entorno BADULAQUE_CLAVE.", 2);
   }
-  const url = (process.env.BADULAQUE_URL ?? "").trim() || URL_POR_DEFECTO;
+  const url = (process.env.BADULAQUE_URL ?? "").trim();
+  if (!url) {
+    throw new Fallo("falta BADULAQUE_URL: indica la dirección MCP de la pasarela en la variable de entorno BADULAQUE_URL.", 2);
+  }
   try {
     new URL(url);
   } catch {

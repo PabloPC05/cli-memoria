@@ -1,13 +1,8 @@
 # `memoria`, la CLI de cli-memoria
 
-cli-memoria (antes my-memory) es la memoria de Pablo como CLI con su servidor: el servidor MCP `my-memory` y la CLI
-`memoria`. El nombre sigue el patrón de las CLIs del Badulaque: cada una en su repositorio `cli-<servicio>`, como su comando.
+cli-memoria (antes my-memory) es una memoria compartida en git con su servidor y su CLI `memoria`.
 
-`memoria` es la memoria (las notas Markdown en git que sirve `my-memory`) como comandos de terminal, pensada para
-agentes: salida compacta (una línea por resultado, con el total y cómo seguir), `--json` para filtrar con `jq`,
-`--simular` en todo lo que escribe y códigos de salida estables. Sin dependencias de npm: Node 22 o más y unos `.mjs`.
-
-Viene de `kit/memoria` de [PabloPC05/lisa](https://github.com/PabloPC05/lisa), con su historial (`git log -- cli/memoria.mjs`).
+`memoria` expone las notas Markdown en git como comandos de terminal pensados para agentes: salida compacta (una línea por resultado, con el total y cómo seguir), `--json` para filtrar con `jq`, `--simular` en todo lo que escribe y códigos de salida estables. Sin dependencias de npm: Node 22 o más y unos `.mjs`.
 
 ```sh
 memoria buscar badulaque --carpeta projects --limite 5
@@ -28,14 +23,10 @@ cli/
 │  ├─ nativa.mjs     opciones, errores y códigos de salida, alias en inglés, llamadas a la pasarela, --json, --simular
 │  ├─ paginas.mjs    salida por páginas: ventanas de texto (~150 líneas u 8.000 caracteres) y listados con total
 │  └─ pasarela.mjs   el cliente MCP de la pasarela (Streamable HTTP, JSON o SSE, con formularios)
-├─ probar.sh         prueba de punta a punta contra un my-memory de verdad, con notas y agentes de juguete
+├─ probar.sh         prueba de punta a punta contra un servidor real, con notas y agentes de juguete
 └─ README.md         esto
 nix/memoria.nix      el paquete `memoria` del flake
 ```
-
-`lib/` son copias de `kit/badulaque/nativa.mjs`, `kit/badulaque/paginas.mjs` y un trozo de `kit/badulaque/badulaque.mjs`
-de lisa, que las comparte con sus otras CLIs (correo, archivos…). Lo que se arregle aquí y les sirva a ellas, se lleva
-allí a mano (y al revés).
 
 ## Cómo lee y cómo escribe
 
@@ -66,7 +57,7 @@ allí a mano (y al revés).
 |---|---|---|
 | `MEMORIA_DIR` | La carpeta del repositorio de notas para leer en local (y para la copia de trabajo) | Todo va por la pasarela |
 | `MEMORIA_COPIA` | Dónde vive la copia de trabajo de `memoria copia` | `~/memoria` |
-| `BADULAQUE_URL` | La dirección MCP de la pasarela | `https://badulaque.ppardocotos.com/buscador/mcp` (la de Pablo) |
+| `BADULAQUE_URL` | La dirección MCP de la pasarela | Obligatoria para escribir o leer sin `MEMORIA_DIR` (falla con código 2) |
 | `BADULAQUE_CLAVE` | La clave del agente en la pasarela (`Authorization: Bearer`) | Lo que necesite la pasarela falla con código 2 |
 
 `rg` y `git` tienen que estar en el `PATH` para leer en local y para la copia de trabajo (el paquete de Nix los añade
@@ -85,13 +76,12 @@ Y, para saber si el servidor tiene `publish`, una herramienta `buscador_buscar` 
 devuelva `{ encontradas: [{ nombre }] }` con la de nombre exacto primero, como el buscador del Badulaque. Una pasarela
 sin ella también sirve: `memoria publicar` va entonces nota a nota.
 
-La pasarela llama a my-memory con el token de ese agente (una credencial por agente: README, «One credential per
+La pasarela llama al servidor con el token de ese agente (una credencial por agente: README, «One credential per
 agent») y devuelve su resultado. Si el servidor pide confirmación (`elicitation/create`), la CLI la pregunta en una
 terminal y la rechaza fuera de ella.
 
-En la instalación de Pablo esa pasarela es **el Badulaque** de lisa (Caddy, agentgateway y su buscador), y de ahí
-vienen los nombres `BADULAQUE_*` y los mensajes que lo nombran: es configuración, no una dependencia de este
-repositorio. Cualquier otra sirve si cumple lo de arriba; la de juguete de `probar.sh` son unas 30 líneas de Node.
+Los nombres de entorno `BADULAQUE_*` son configuración de esa pasarela, no una dependencia de este repositorio:
+cualquier pasarela que implemente el contrato anterior sirve; la de juguete de `probar.sh` son unas 30 líneas de Node.
 
 ## Instalar
 
@@ -103,15 +93,6 @@ nix profile install github:PabloPC05/cli-memoria#memoria
 El paquete va en `x86_64-linux`, `aarch64-linux`, `x86_64-darwin` y `aarch64-darwin`: `$out/bin/memoria` corre
 `$out/lib/memoria/memoria.mjs` con Node 22. Sin Nix: copia `cli/memoria.mjs` y `cli/lib/` juntos y lánzalo con
 `node memoria.mjs`.
-
-### En lisa
-
-`kit-clis` (el kit de CLIs de lisa y del Mac) toma este paquete de la entrada `my-memory` de su flake y lo envuelve
-con su `kit/envoltorio.nix`, igual que a sus otras CLIs nativas: la CA de srt en `NODE_EXTRA_CA_CERTS` y
-`NODE_USE_ENV_PROXY=1` para salir por su proxy. Lo demás de lisa sigue allí: la entrada de `kit/clis.json` (dominios,
-credenciales, la ruta que se monta en solo lectura como `MEMORIA_DIR`) y la guía de los agentes (`kit/AGENTS.md`).
-La disposición del paquete (`lib/memoria/memoria.mjs` y `lib/memoria/lib/`) es lo que lisa usa: no la cambies sin
-cambiar allí `kit/paquetes.nix`.
 
 ## Probar
 

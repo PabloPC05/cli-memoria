@@ -1,7 +1,6 @@
 // Salida acotada pero navegable, para la CLI memoria: ventanas de texto y listados con tope, y un aviso de una línea que
 // dice siempre qué falta y cómo seguir. Nunca se corta en silencio: quien lee sabe cuántas páginas o resultados hay y con
-// qué opción ver los demás. Es una copia de kit/badulaque/paginas.mjs de PabloPC05/lisa (allí la usa también `archivos`).
-// Sin dependencias. Ver cli/README.md.
+// qué opción ver los demás. Sin dependencias. Ver cli/README.md.
 //
 // - Texto: ventanas de unas 150 líneas o 8.000 caracteres (lo que llegue antes), con `--pagina N`.
 // - Listados: `--limite N` (resultados por página) y `--pagina N`, con el total.

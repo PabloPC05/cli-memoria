@@ -1,7 +1,7 @@
 # El paquete `memoria`: la CLI de cli-memoria (cli/memoria.mjs con sus módulos de cli/lib/) y un ejecutable que la
 # corre con Node 22. Sin dependencias de npm ni compilación: los .mjs se copian tal cual. Va en Linux y en macOS.
 #
-# Disposición, que lisa usa tal cual (kit/paquetes.nix la envuelve con su kit/envoltorio.nix): no la cambies sin avisar allí.
+# Disposición del paquete:
 #   $out/lib/memoria/memoria.mjs   el programa
 #   $out/lib/memoria/lib/          sus módulos (nativa.mjs, paginas.mjs, pasarela.mjs)
 #   $out/bin/memoria               node + el programa; git y rg al final del PATH (los del usuario van antes)

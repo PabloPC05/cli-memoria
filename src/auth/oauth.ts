@@ -12,7 +12,7 @@ import { sha256 } from "../util.js";
 export interface OAuthConfig {
 	/** Public base URL of this server, e.g. https://memoria.example.com. */
 	publicUrl: string;
-	/** Forgejo as the browser sees it (it may be reachable only on the tailnet). */
+	/** Forgejo as the browser sees it (it may be reachable only on a private network). */
 	forgejoUrl: string;
 	/** Forgejo as this server reaches it (usually localhost). */
 	forgejoInternalUrl: string;

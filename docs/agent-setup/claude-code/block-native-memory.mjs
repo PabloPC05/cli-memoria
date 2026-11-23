@@ -5,7 +5,7 @@
 //   "hooks": { "PreToolUse": [ { "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell",
 //     "hooks": [ { "type": "command", "command": "node", "args": ["<home>/.claude/hooks/block-native-memory.mjs"] } ] } ] }
 //
-// MEMORY_MCP_HINT (optional) replaces the tool hint in the message, e.g. "the MCP server lisa (memoria_search,
+// MEMORY_MCP_HINT (optional) replaces the tool hint in the message, e.g. "the MCP server memoria (memoria_search,
 // memoria_create, memoria_edit)". Reading the folder, or merely mentioning it, is allowed; only writes are refused.
 const hint =
   process.env.MEMORY_MCP_HINT ||

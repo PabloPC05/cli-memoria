@@ -1,7 +1,5 @@
 // Lo común de la CLI memoria: leer opciones, hablar con la pasarela MCP (pasarela.mjs) y salir con los códigos de
-// siempre. Es una copia de kit/badulaque/nativa.mjs de PabloPC05/lisa, que lo comparte con sus otras CLIs nativas
-// (correo, archivos, legalitas…): si se cambia algo de aquí que también les sirva a ellas, llévalo allí a mano.
-// Sin dependencias. Ver cli/README.md.
+// siempre. Sin dependencias. Ver cli/README.md.
 
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";

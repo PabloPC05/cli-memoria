@@ -3,10 +3,10 @@ process.env.NODE_TEST = "1";
 const { shellWritesMemory, fileIsMemory } = await import("./block-native-memory.mjs");
 
 const shell = [
-  ["echo hola >> ~/.claude/projects/C--Users-pablo/memory/MEMORY.md", true],
-  ["cat > /c/Users/pablo/.claude/projects/x/memory/a.md <<EOF", true],
+  ["echo hola >> ~/.claude/projects/C--Users-alice/memory/MEMORY.md", true],
+  ["cat > /c/Users/alice/.claude/projects/x/memory/a.md <<EOF", true],
   ["rm -f ~/.claude/projects/x/memory/a.md", true],
-  ["Set-Content C:\\Users\\pablo\\.claude\\projects\\x\\memory\\a.md hola", true],
+  ["Set-Content C:\\Users\\alice\\.claude\\projects\\x\\memory\\a.md hola", true],
   ["cp nota.md ~/.claude/projects/x/memory/", true],
   ["echo x | tee ~/.claude/projects/x/memory/a.md", true],
   ["cat ~/.claude/projects/x/memory/MEMORY.md", false],
@@ -15,9 +15,9 @@ const shell = [
   ['git commit -m "block ~/.claude/projects/*/memory/" && git push 2>&1 | tail -1', false],
 ];
 const files = [
-  ["C:\\Users\\pablo\\.claude\\projects\\C--Users-pablo\\memory\\nota.md", true],
+  ["C:\\Users\\alice\\.claude\\projects\\C--Users-alice\\memory\\nota.md", true],
   ["/home/x/.claude/projects/p/memory/MEMORY.md", true],
-  ["C:/Users/pablo/lisa/notas.md", false],
+  ["C:/Users/alice/notes/notas.md", false],
 ];
 let fail = 0;
 for (const [c, want] of shell) if (shellWritesMemory(c) !== want) (fail++, console.log("FAIL shell:", c));

@@ -2,15 +2,15 @@
 # Prueba de escribir en nativo (memoria copia, estado, actualizar y publicar) contra un servidor my-memory DE VERDAD
 # (el binario real, con su índice, sus reglas, sus firmas por token y su cola de escritura), pero de juguete: una carpeta
 # temporal que crea y borra este script, un repositorio de notas inventado y dos agentes de juguete. No toca ninguna
-# memoria real ni ningún servicio de lisa.
+# memoria real ni ningún servicio externo.
 #
-# Entre la CLI y my-memory pone una pasarela mínima (la misma que el Badulaque para estas llamadas: buscador_usar con
-# «memoria_<herramienta>»), con una clave por agente que se traduce a su token de my-memory.
+# Entre la CLI y my-memory pone una pasarela mínima (buscador_usar con «memoria_<herramienta>»), con una clave por
+# agente que se traduce a su token de my-memory.
 #
 # Uso:  NODE=<node 22 o más> MY_MEMORY=<my-memory> [MEMORIA=<memoria>] cli/probar.sh
 #   MY_MEMORY: el servidor (bin/my-memory del paquete por defecto, o el instalado).
-#   MEMORIA: la CLI que se prueba, ya empaquetada (p. ej. result/bin/memoria de `nix build .#memoria`, o la del kit de
-#   lisa). Sin MEMORIA, se prueba cli/memoria.mjs de este repositorio con NODE. NODE corre también la pasarela de juguete.
+#   MEMORIA: la CLI que se prueba, ya empaquetada (p. ej. result/bin/memoria de `nix build .#memoria`).
+#   Sin MEMORIA, se prueba cli/memoria.mjs de este repositorio con NODE. NODE corre también la pasarela de juguete.
 # Requiere git, curl y jq. Imprime OK o FALLO por prueba y sale con 1 si alguna falla.
 #
 # Vale con un my-memory que tenga la herramienta `publish` (varios commits en un solo envío, todo o nada) y con uno que no:
@@ -160,7 +160,7 @@ if [ "$CON_PUBLISH" = 1 ]; then echo "(este my-memory tiene publish: memoria pub
 # m1 y m2: los agentes uno y dos, cada uno con su copia de trabajo y su clave.
 m1() { MEMORIA_DIR="$REPO" MEMORIA_COPIA="$T/copia1" HOME="$T/h1" BADULAQUE_CLAVE=clave-uno BADULAQUE_URL="http://127.0.0.1:$PUERTO_PA/" "${CLI[@]}" "$@"; }
 m2() { MEMORIA_DIR="$REPO" MEMORIA_COPIA="$T/copia2" HOME="$T/h2" BADULAQUE_CLAVE=clave-dos BADULAQUE_URL="http://127.0.0.1:$PUERTO_PA/" "${CLI[@]}" "$@"; }
-# mr1: lo mismo que m1 pero sin MEMORIA_DIR (como en el Mac): la lectura va por la pasarela, no por el disco.
+# mr1: lo mismo que m1 pero sin MEMORIA_DIR (modo remoto): la lectura va por la pasarela, no por el disco.
 mr1() { MEMORIA_DIR="" MEMORIA_COPIA="$T/copiar" HOME="$T/h1" BADULAQUE_CLAVE=clave-uno BADULAQUE_URL="http://127.0.0.1:$PUERTO_PA/" "${CLI[@]}" "$@"; }
 mkdir -p "$T/h1" "$T/h2"
 c1() { git -C "$T/copia1" "$@"; }
@@ -353,7 +353,7 @@ espera "no existe la nota topics/nohaytal.md" "…y lo dice"
 corre m1 lista projects --limite 1
 espera "(2 notas; mostrando 1: --pagina 2 (o --limite N))" "lista: total y paginación"
 
-# lo mismo por el Badulaque (sin MEMORIA_DIR, como en el Mac)
+# lo mismo por la pasarela (sin MEMORIA_DIR, modo remoto)
 corre mr1 leer largo
 espera "nota larga: lee una sección con --seccion" "remoto leer larga: el índice"
 espera "hash: " "remoto leer larga: con su hash"

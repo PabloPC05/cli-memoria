@@ -104,7 +104,7 @@ export function publicApp(opts: { memory: MemoryService; oauth: ForgejoOAuthProv
 }
 
 /**
- * Private listener (tailnet only): MCP with static tokens (or OAuth ones), uploads and the Forgejo webhook.
+ * Private listener (private network only): MCP with static tokens (or OAuth ones), uploads and the Forgejo webhook.
  */
 export function privateApp(opts: { memory: MemoryService; tokens: TokenStore; oauth?: ForgejoOAuthProvider | null; uploads: UploadStore; webhookSecret?: string | null; log: Logger; clients?: ClientsService | null }): express.Express {
 	const app = express();

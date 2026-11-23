@@ -225,7 +225,7 @@ Then give the agent the setup link ([Give your agent one link](#give-your-agent-
 my-memory attributes every write (the git commit author and its `Client:` trailer), every log line and the `clients` view to the credential the request used. So **each agent must connect with its own credential**. If two agents share one, nobody can tell who wrote what, `clients` cannot tell them apart, and a leaked key cannot be revoked without cutting off the other agent too.
 
 - **Static tokens:** create one per agent and never share it: `my-memory token add <id> --name "<Agent name>" --scope write|read --file tokens.toml`. OAuth clients (for example claude.ai connecting directly) get their own identity automatically.
-- **Behind a gateway or proxy** that joins several MCP servers into one endpoint, the gateway is the client my-memory sees. Give the gateway one key per agent and map each key to its own my-memory token (same public URL, a different key per agent); otherwise every write shows the gateway's name. This pattern has been done with Caddy plus agentgateway, but any gateway that can pick the upstream credential from the incoming key works.
+- **Behind a gateway or proxy** that joins several MCP servers into one endpoint, the gateway is the client my-memory sees. Give the gateway one key per agent and map each key to its own my-memory token (same public URL, a different key per agent); otherwise every write shows the gateway's name. Any reverse proxy or MCP gateway that can pick the upstream credential from the incoming key works.
 - **Check it:** run `my-memory clients` or call the `clients` tool. Each agent must appear on its own row, with its last activity and its writes.
 
 ### Moving an existing repo to wikilinks

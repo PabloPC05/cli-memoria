@@ -1,15 +1,13 @@
 #!/usr/bin/env node
-// memoria: la memoria de Pablo (notas Markdown en un repositorio git) como comandos.
+// memoria: notas Markdown en un repositorio git como comandos de terminal.
 //
-// - Leer (buscar, leer, lista, recientes): directamente en el repositorio, que en lisa la terminal monta en solo
-//   lectura y dice en MEMORIA_DIR. Con rg y git, sin pasar por el MCP: filtra con rg, jq o head. `buscar --en <nota>`
-//   busca dentro de una sola nota; cada nota de los resultados lleva su description y la fecha de su último cambio
-//   (del historial de git, en una sola pasada de git log).
-// - Sin MEMORIA_DIR (el Mac): las mismas lecturas por el Badulaque (memoria_search, read, list, recent).
-//   En el Mac no se lee la copia de Google Drive.
+// - Leer (buscar, leer, lista, recientes): directamente en una copia local de solo lectura del repositorio (MEMORIA_DIR).
+//   Con rg y git, sin pasar por MCP: filtra con rg, jq o head. `buscar --en <nota>` busca dentro de una sola nota;
+//   cada nota de los resultados lleva su description y la fecha de su último cambio (del historial de git, en una sola
+//   pasada de git log).
+// - Sin MEMORIA_DIR (acceso remoto): las mismas lecturas por la pasarela (memoria_search, read, list, recent).
 // - Escribir una nota: `crear`, `editar`, `escribir`, `mover` y `borrar --si`, cada uno una herramienta del servidor por
-//   el Badulaque (también en el Mac). El servidor es el único que escribe en el repositorio real: firma con la clave del
-//   agente y aplica sus reglas.
+//   la pasarela. El servidor es el único que escribe en el repositorio real: firma con la clave del agente y aplica sus reglas.
 // - Cambios de varias notas a la vez, en nativo (fase 4): una copia de trabajo (`memoria copia`, un git clone del
 //   repositorio de solo lectura) que se edita con las herramientas de siempre y se commitea con git; `memoria publicar`
 //   lleva esos commits al servidor nota a nota (create, write, move, delete), con el hash de cada nota para no pisar
@@ -34,9 +32,9 @@ const LOCAL = MEMORIA_DIR !== "" && existsSync(MEMORIA_DIR);
 const COPIA = (process.env.MEMORIA_COPIA ?? "").trim() || join(process.env.HOME ?? "", "memoria");
 const SERVIDOR = "refs/memoria/servidor";
 
-const AYUDA = `memoria: la memoria de Pablo como comandos (versión ${VERSION}).
+const AYUDA = `memoria: notas Markdown en git como comandos (versión ${VERSION}).
 
-Lectura (${LOCAL ? `local, en ${MEMORIA_DIR}` : "por el Badulaque: no hay MEMORIA_DIR"}):
+Lectura (${LOCAL ? `local, en ${MEMORIA_DIR}` : "por la pasarela: no hay MEMORIA_DIR"}):
   memoria buscar <texto…> [--carpeta X | --en <nota>] [--limite N] [--pagina N] [--archivo] [--regex] [--json]
       Una línea por resultado: ruta:línea · sección · fragmento (la sección sirve para ir luego con leer --seccion) y,
       bajo el primer resultado de cada nota, «↳ (cambiada el AAAA-MM-DD) su description». Varias palabras: todas en la
@@ -61,7 +59,7 @@ Lectura (${LOCAL ? `local, en ${MEMORIA_DIR}` : "por el Badulaque: no hay MEMORI
       Los últimos N cambios (15 por defecto): cuándo, quién, para qué y las notas que tocó.
 ${LOCAL ? `  Las notas en bruto están en $MEMORIA_DIR (${MEMORIA_DIR}, solo lectura), para rg -n <texto> "$MEMORIA_DIR" si hace falta.\n` : ""}
 Escribir una nota, con esta misma CLI (la escribe el servidor, firmada por tu agente y con las reglas de la memoria;
-también en el Mac). --razon es el mensaje del cambio; --simular enseña la llamada sin hacerla:
+también sin MEMORIA_DIR). --razon es el mensaje del cambio; --simular enseña la llamada sin hacerla:
   memoria crear <ruta> --razon <texto> (--archivo <f> | -) [--confirmar-nueva]
       Nota nueva con su frontmatter (name, description), desde un archivo o stdin. Si se parece a otra, falla y te la enseña.
   memoria editar <nota> --razon <texto> --viejo <texto> --nuevo <texto> [--todas] [--hash H]
@@ -70,12 +68,12 @@ también en el Mac). --razon es el mensaje del cambio; --simular enseña la llam
   memoria escribir <nota> --razon <texto> (--archivo <f> | -) [--hash H]    La nota existente entera, reemplazada (sin --hash, el de ahora).
   memoria mover <nota> <destino> --razon <texto> [--hash H]                Mueve o renombra (los [[enlaces]] se reescriben); a archive/ la retira.
   memoria borrar <nota> --razon <texto> --si [--hash H]                    Borra (queda en el historial; falla mientras otras notas la enlacen).
-      Sin --si no borra: solo si Pablo lo pidió.
+      Sin --si no borra: solo si el usuario lo pidió.
   memoria adjuntar <ruta> --archivo <f> --descripcion <texto> --razon <texto> [--titulo T] [--nombre N] [--alias A] [--confirmar-nueva]
       Guarda un binario (PDF, imagen…) y crea al lado su nota con el texto. Hasta 6 MB.
   memoria revertir <commit> --razon <texto> [--nota X]                     Deshace un cambio de historial o recientes con otro.
 
-Cambios de varias notas a la vez (copia de trabajo + git; hace falta MEMORIA_DIR, o sea, en lisa):
+Cambios de varias notas a la vez (copia de trabajo + git; requiere MEMORIA_DIR):
   memoria copia
       Crea tu copia de trabajo (un git clone de las notas) en ${COPIA} (cámbialo con MEMORIA_COPIA) y dice dónde está.
       Edítala con tus herramientas y haz git add / git commit (el asunto del commit es la razón del cambio).
@@ -828,7 +826,7 @@ function recientesLocal(pos, op) {
   return 0;
 }
 
-// --- lectura por el Badulaque (sin MEMORIA_DIR: el Mac) -------------------------
+// --- lectura remota por pasarela (sin MEMORIA_DIR) ------------------------------
 
 /** La fecha (AAAA-MM-DD) de un `updated_at` del servidor, o null si no la da. */
 const fechaDelServidor = valor => (typeof valor === "string" && /^\d{4}-\d{2}-\d{2}/.test(valor) ? valor.slice(0, 10) : null);
@@ -1082,7 +1080,7 @@ async function borrarNota(pos, op) {
   const donde = dondeDe(pos[0]);
   if (simular(op, "memoria_delete", { ...donde, hash: op.hash ?? "(el de ahora)", reason: op.razon })) return 0;
   // Borrar es destructivo: como en las demás CLIs, solo con --si (queda en el historial y memoria revertir lo deshace).
-  if (!op.si) throw new Fallo(`esto borra la nota «${pos[0]}» (queda en el historial: memoria revertir lo deshace). Si Pablo lo pidió, repite con --si`, 2);
+  if (!op.si) throw new Fallo(`esto borra la nota «${pos[0]}» (queda en el historial: memoria revertir lo deshace). Si el usuario lo pidió, repite con --si`, 2);
   const r = await conBadulaque(async ctx => usarOFallar(ctx, "memoria_delete", { ...donde, hash: op.hash ?? await hashActual(ctx, donde), reason: op.razon }));
   console.log(r.texto);
   return 0;
@@ -1152,7 +1150,7 @@ const blobEn = (rev, ruta) => {
 
 function requerirLocal() {
   if (!LOCAL) {
-    throw new Fallo("esto trabaja sobre el repositorio de las notas (MEMORIA_DIR), que aquí no está. Sin él (el Mac), una nota cada vez: memoria crear, editar, escribir, mover o borrar", 2);
+    throw new Fallo("esto trabaja sobre el repositorio local de notas (MEMORIA_DIR), que aquí no está. Sin él, edita una nota cada vez: memoria crear, editar, escribir, mover o borrar", 2);
   }
 }
 
@@ -1689,7 +1687,7 @@ const OPCIONES = {
   actualizar: {}
 };
 
-// Sin alias para borrar (lo comparten todas las CLIs nativas: kit/badulaque/nativa.mjs de lisa), pero el error dice cómo se hace.
+// Sin alias destructivos para borrar, pero el error dice cómo se hace.
 const BORRAR_EN_INGLES = ["delete", "remove", "rm", "del", "erase"];
 
 async function principal(argv) {
@@ -1703,7 +1701,7 @@ async function principal(argv) {
     return 0;
   }
   if (BORRAR_EN_INGLES.includes(String(dado).toLowerCase())) {
-    throw new Fallo(`no existe «${dado}»: para borrar una nota, memoria borrar <nota> --razon <texto> --si (solo si Pablo lo pidió)`, 2);
+    throw new Fallo(`no existe «${dado}»: para borrar una nota, memoria borrar <nota> --razon <texto> --si (solo si el usuario lo pidió)`, 2);
   }
   const orden = resolverOrden("memoria", dado, OPCIONES);
   const def = OPCIONES[orden];
