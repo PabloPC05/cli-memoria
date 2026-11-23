@@ -341,6 +341,15 @@ rc_es 2 "--en con una nota que no existe: error de uso"
 espera "no hay ninguna nota llamada «nohaytal»" "--en con una nota que no existe: lo dice"
 corre m1 search zorro-azul --en largo
 espera "(1 resultado en projects/largo.md)" "alias: search … --en también vale"
+# Una ruta con la carpeta equivocada: si el nombre es el de una sola nota, es esa, y se dice dónde está.
+corre m1 leer topics/largo.md
+espera "nota larga: lee una sección" "leer con la carpeta equivocada: lee la nota de ese nombre"
+espera "topics/largo.md no existe; la nota «largo» está en projects/largo.md" "leer con la carpeta equivocada: …y dice dónde está"
+corre m1 buscar zorro-azul --en topics/largo
+espera "(1 resultado en projects/largo.md)" "--en con la carpeta equivocada: también"
+corre m1 leer topics/nohaytal.md
+rc_es 2 "leer una ruta que no existe y que no es el nombre de ninguna nota: rc 2"
+espera "no existe la nota topics/nohaytal.md" "…y lo dice"
 corre m1 lista projects --limite 1
 espera "(2 notas; mostrando 1: --pagina 2 (o --limite N))" "lista: total y paginación"
 

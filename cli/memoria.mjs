@@ -50,7 +50,8 @@ Lectura (${LOCAL ? `local, en ${MEMORIA_DIR}` : "por el Badulaque: no hay MEMORI
       descripción, hash), el índice de sus secciones (línea de inicio y caracteres de cada una) y cómo seguir.
       --seccion X: esa sección con sus subsecciones, por el texto de su encabezado sin mayúsculas ni acentos y con
       un prefijo basta si es único (si no, lista las que encajan; «A > B» baja por subsecciones).
-      --lineas A-B: esas líneas (de 1, las del índice). --todo: la nota entera, sin ventanas.
+      --lineas A-B: esas líneas (de 1, las del índice). --todo: la nota entera, sin ventanas. Una ruta que no existe vale
+      si su nombre es el de una sola nota: se lee esa y se dice dónde está (también en buscar --en).
       Lo que pasa de ~${VENTANA_LINEAS} líneas o ~${miles(VENTANA_CARACTERES)} caracteres sale por páginas: la primera, y el aviso
       «(página 1 de 3: --pagina 2)»; repite la misma orden con --pagina N. Sin --seccion ni --lineas, --pagina lee la nota
       seguida, de página en página.
@@ -166,22 +167,35 @@ function frontmatter(texto) {
   return datos;
 }
 
+/** Las notas que se llaman `ref` (sin acentos ni mayúsculas): { una (la única, prefiriendo las de fuera de archive/), iguales, notas }. */
+function notasLlamadas(ref) {
+  const buscado = plano(ref);
+  const notas = todasLasNotas();
+  const nombre = r => plano(r.split("/").pop().replace(/\.md$/, ""));
+  const iguales = notas.filter(r => nombre(r) === buscado);
+  const candidatas = iguales.filter(r => !r.startsWith("archive/"));
+  const una = candidatas.length === 1 ? candidatas[0] : iguales.length === 1 ? iguales[0] : null;
+  return { una, iguales, notas, nombre, buscado };
+}
+
 /** Resuelve «nombre», «[[nombre]]» o una ruta a la ruta relativa de una nota. */
 function resolverNota(referencia) {
   let ref = referencia.trim().replace(/^\[\[|\]\]$/g, "").split("|")[0].trim();
   if (ref === "") throw new Fallo("dime qué nota: un nombre o una ruta", 2);
   if (ref.includes("/") || ref.endsWith(".md")) {
     const { absoluta, relativa } = dentro(ref.endsWith(".md") ? ref : `${ref}.md`);
-    if (!existsSync(absoluta) || !statSync(absoluta).isFile()) throw new Fallo(`no existe la nota ${relativa}`, 2);
-    return relativa;
+    if (existsSync(absoluta) && statSync(absoluta).isFile()) return relativa;
+    // Una ruta que no existe, pero cuyo nombre es el de una sola nota: es esa (los agentes adivinan la carpeta). Se dice dónde está.
+    const nombre = relativa.split(sep).pop().replace(/\.md$/, "");
+    const { una } = nombre ? notasLlamadas(nombre) : { una: null };
+    if (una) {
+      process.stderr.write(`memoria: ${relativa} no existe; la nota «${nombre}» está en ${una}\n`);
+      return una;
+    }
+    throw new Fallo(`no existe la nota ${relativa}`, 2);
   }
-  const buscado = plano(ref);
-  const notas = todasLasNotas();
-  const nombre = r => plano(r.split("/").pop().replace(/\.md$/, ""));
-  const iguales = notas.filter(r => nombre(r) === buscado);
-  const candidatas = iguales.filter(r => !r.startsWith("archive/"));
-  if (candidatas.length === 1) return candidatas[0];
-  if (iguales.length === 1) return iguales[0];
+  const { una, iguales, notas, nombre, buscado } = notasLlamadas(ref);
+  if (una) return una;
   if (iguales.length > 1) {
     throw new Fallo(`«${ref}» es ambigua; usa la ruta:\n${iguales.map(r => `  ${r}`).join("\n")}`, 2);
   }
