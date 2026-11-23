@@ -242,7 +242,7 @@ memoria buscar kitchen --carpeta projects --limite 5
 ```
 
 - **Reads** go straight to a checkout of the notes repo when `MEMORIA_DIR` points at one (with `rg` and `git`), or through MCP otherwise.
-- **Writes** always go through the server, so they are signed by the agent's credential and follow `memory.toml`: one note at a time, or a git working copy (`memoria copia`) whose commits `memoria publicar` sends note by note, each with its hash.
+- **Writes** always go through the server, so they are signed by the agent's credential and follow `memory.toml`: one note at a time with the same CLI (`crear`, `editar`, `escribir`, `mover`, `borrar --si`), or, for changes to several notes at once, a git working copy (`memoria copia`) whose commits `memoria publicar` sends in one `publish` submission (all or nothing) when the server has that tool, and otherwise note by note, each with its hash.
 - It talks MCP to a **gateway** (`BADULAQUE_URL`, `BADULAQUE_CLAVE`) that exposes my-memory's tools as `memoria_<tool>` behind one `buscador_usar` tool, with one key per agent ([One credential per agent](#one-credential-per-agent)). The names come from the author's own gateway; they are configuration, not a dependency.
 
 Layout, configuration, packaging and tests: [cli/README.md](cli/README.md) (in Spanish).
