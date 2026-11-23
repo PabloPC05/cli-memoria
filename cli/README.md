@@ -55,33 +55,24 @@ nix/memoria.nix      el paquete `memoria` del flake
 
 | Variable | Para qué | Si falta |
 |---|---|---|
-| `MEMORIA_DIR` | La carpeta del repositorio de notas para leer en local (y para la copia de trabajo) | Todo va por la pasarela |
+| `MEMORIA_DIR` | La carpeta del repositorio de notas para leer en local (y para la copia de trabajo) | Todo va al servidor |
 | `MEMORIA_COPIA` | Dónde vive la copia de trabajo de `memoria copia` | `~/memoria` |
-| `BADULAQUE_URL` | La dirección MCP de la pasarela | Obligatoria para escribir o leer sin `MEMORIA_DIR` (falla con código 2) |
-| `BADULAQUE_CLAVE` | La clave del agente en la pasarela (`Authorization: Bearer`) | Lo que necesite la pasarela falla con código 2 |
+| `MEMORIA_URL` | Dirección `/mcp` directa del servidor `cli-memoria` (recomendado) | Usa modo pasarela si está configurado; si no, código 2 |
+| `MEMORIA_TOKEN` | Token del agente (`mm_…`) para hablar directo con el servidor | Obligatoria con `MEMORIA_URL` |
+| `BADULAQUE_URL` | Alternativa: dirección MCP de una pasarela que envuelve `memoria_*` | Solo necesaria en modo pasarela |
+| `BADULAQUE_CLAVE` | Clave del agente en la pasarela (`Authorization: Bearer`) | Solo necesaria en modo pasarela |
 
 `rg` y `git` tienen que estar en el `PATH` para leer en local y para la copia de trabajo (el paquete de Nix los añade
 al final del `PATH`).
 
-### La pasarela
+### Conexión al servidor
 
-La CLI no habla con `my-memory` directamente: habla MCP con una **pasarela**, un punto MCP por HTTP que la autentica
-con una clave por agente y que tiene una herramienta `buscador_usar` con dos argumentos:
-
-- `nombre`: `memoria_<herramienta>`, donde `<herramienta>` es una de my-memory (`search`, `read`, `list`, `recent`,
-  `create`, `edit`, `write`, `move`, `delete`, `publish`, `revert`, `attach`, `history`, `links`, `lint`);
-- `argumentos`: los de esa herramienta, tal cual.
-
-Y, para saber si el servidor tiene `publish`, una herramienta `buscador_buscar` con `consulta` (y `limite`) que
-devuelva `{ encontradas: [{ nombre }] }` con la de nombre exacto primero, como el buscador del Badulaque. Una pasarela
-sin ella también sirve: `memoria publicar` va entonces nota a nota.
-
-La pasarela llama al servidor con el token de ese agente (una credencial por agente: README, «One credential per
-agent») y devuelve su resultado. Si el servidor pide confirmación (`elicitation/create`), la CLI la pregunta en una
-terminal y la rechaza fuera de ella.
-
-Los nombres de entorno `BADULAQUE_*` son configuración de esa pasarela, no una dependencia de este repositorio:
-cualquier pasarela que implemente el contrato anterior sirve; la de juguete de `probar.sh` son unas 30 líneas de Node.
+- **Modo directo (recomendado):** define `MEMORIA_URL` (p. ej. `http://127.0.0.1:8787/mcp`) y `MEMORIA_TOKEN`. La CLI
+  habla directamente con el servidor `cli-memoria` por Streamable HTTP (sin sesión), llamando a `search`, `read`,
+  `create`, `edit`, `publish`, etc. por su nombre real.
+- **Modo pasarela (compatibilidad):** si no defines `MEMORIA_URL`/`MEMORIA_TOKEN` y defines `BADULAQUE_URL` y
+  `BADULAQUE_CLAVE`, la CLI habla MCP con una pasarela que exponga `buscador_usar` (`memoria_<herramienta>`) y,
+  opcionalmente, `buscador_buscar` para detectar `memoria_publish`.
 
 ## Instalar
 

@@ -243,7 +243,7 @@ memoria buscar cocina --carpeta projects --limite 5
 
 - **Lee** directamente de una copia del repo de notas cuando `MEMORIA_DIR` apunta a ella (con `rg` y `git`), o por MCP si no.
 - **Escribe** siempre a través del servidor, así que firma con la credencial del agente y sigue `memory.toml`: una nota cada vez con la misma CLI (`crear`, `editar`, `escribir`, `mover`, `borrar --si`), o, para cambios de varias notas a la vez, una copia de trabajo de git (`memoria copia`) cuyos commits `memoria publicar` envía en un solo `publish` (todo o nada) si el servidor tiene esa herramienta, y si no, nota a nota, cada una con su hash.
-- Habla MCP con una **pasarela** (`BADULAQUE_URL`, `BADULAQUE_CLAVE`) que ofrece las herramientas de my-memory como `memoria_<herramienta>` detrás de una sola herramienta `buscador_usar`, con una clave por agente ([Una credencial por agente](#una-credencial-por-agente)). Los nombres vienen de la pasarela del autor; son configuración, no una dependencia.
+- **Directa al servidor (recomendado):** define `MEMORIA_URL` (p. ej. `http://127.0.0.1:8787/mcp`) y `MEMORIA_TOKEN` (`mm_…`) para hablar directamente por Streamable HTTP sin pasarela intermedia. Para instalaciones detrás de una pasarela que envuelve las herramientas como `memoria_<herramienta>` bajo `buscador_usar`, también admite `BADULAQUE_URL` y `BADULAQUE_CLAVE`.
 
 Estructura, configuración, empaquetado y pruebas: [cli/README.md](cli/README.md).
 

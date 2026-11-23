@@ -990,7 +990,15 @@ export class MemoryService {
 	private static hitsOut(hits: (SearchHit | null)[]) {
 		return hits
 			.filter((h): h is SearchHit => h !== null)
-			.map((h) => ({ path: h.path, name: h.name, description: h.description, section: { heading: h.section.heading, level: h.section.level, line_start: h.section.lineStart, line_end: h.section.lineEnd }, snippet: h.snippet, score: h.score }));
+			.map((h) => ({
+				path: h.path,
+				name: h.name,
+				description: h.description,
+				...(h.updatedAt ? { updated_at: h.updatedAt } : {}),
+				section: { heading: h.section.heading, level: h.section.level, line_start: h.section.lineStart, line_end: h.section.lineEnd },
+				snippet: h.snippet,
+				score: h.score,
+			}));
 	}
 
 	/** Full-text search only (bm25). */

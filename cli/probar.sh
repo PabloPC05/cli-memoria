@@ -39,6 +39,8 @@ SAL=""
 RC=0
 ok() { echo "OK     $1"; }
 mal() { echo "FALLO  $1"; [ -n "${2:-}" ] && echo "       $2"; fallos=$((fallos + 1)); }
+sed_en_sitio() { sed "$1" "$2" > "$2.tmp" && mv "$2.tmp" "$2"; }
+lineas() { wc -l | tr -d ' '; }
 
 # --- el servidor de juguete -------------------------------------------------------------------------------
 
@@ -252,7 +254,7 @@ corre m1 buscar juguete --carpeta projects
 espera "projects/alfa.md:3 · cabecera · description: Proyecto alfa" "buscar: un acierto en el frontmatter dice «cabecera»"
 corre m1 buscar tarea --limite 5
 espera "(200 resultados; mostrando 1-5: --pagina 2 (o --limite N))" "buscar: total, lo que muestra y cómo seguir"
-[ "$(m1 buscar tarea --limite 5 | wc -l)" = 7 ] && ok "buscar: cinco líneas, la description de la nota (una vez) y el aviso" || mal "buscar: cinco líneas, la description de la nota y el aviso"
+[ "$(m1 buscar tarea --limite 5 | lineas)" = 7 ] && ok "buscar: cinco líneas, la description de la nota (una vez) y el aviso" || mal "buscar: cinco líneas, la description de la nota y el aviso"
 corre m1 buscar tarea --limite 5 --pagina 2
 espera "tarea 1.5:" "buscar: la página 2 sigue por donde iba"
 no_espera "tarea 1.4:" "buscar: …sin repetir"
@@ -425,7 +427,7 @@ espera "no hay nada que publicar" "publicar sin nada: lo dice"
 
 # --- 2. publicar: cambio, nota nueva, mover y borrar -------------------------------------------------------------
 
-sed -i 's/Comprar pan\./Comprar pan y leche./' "$T/copia1/projects/alfa.md"
+sed_en_sitio 's/Comprar pan\./Comprar pan y leche./' "$T/copia1/projects/alfa.md"
 printf -- '---\nname: Beta\ndescription: Otro proyecto de juguete\n---\n# Beta\nNota nueva, ligada a [[alfa]].\n' > "$T/copia1/projects/beta.md"
 corre m1 publicar
 espera "tienes cambios sin commitear" "publicar: con cambios sin commitear, no hace nada"
@@ -434,13 +436,13 @@ c1 add projects/alfa.md && c1 commit -q -m "Alfa: comprar también leche"
 corre m1 publicar --simular
 espera "memoria_write projects/alfa.md" "simular: enseña el cambio"
 espera "todo en orden" "simular: dice que todo va bien"
-[ "$(srv_head)" = "$(srv rev-parse main)" ] && [ "$(srv log --oneline | wc -l)" = 1 ] && ok "simular: no escribió nada en el servidor" || mal "simular: no escribió nada en el servidor"
+[ "$(srv_head)" = "$(srv rev-parse main)" ] && [ "$(srv log --oneline | lineas)" = 1 ] && ok "simular: no escribió nada en el servidor" || mal "simular: no escribió nada en el servidor"
 corre m1 publicar --razon "Beta: nota nueva de juguete"
 espera "publicado: 2 commits" "publicar: dos commits publicados"
 if [ "$CON_PUBLISH" = 1 ]; then espera "(en un solo envío)" "publicar: con publish en el servidor, va en un solo envío"
 else no_espera "en un solo envío" "publicar: sin publish en el servidor, nota a nota"; fi
 espera "tu copia queda igual que el servidor" "publicar: la copia queda como el servidor"
-[ "$(srv log --oneline | wc -l)" = 3 ] && ok "servidor: tiene 2 commits nuevos" || mal "servidor: tiene 2 commits nuevos" "$(srv log --oneline | wc -l)"
+[ "$(srv log --oneline | lineas)" = 3 ] && ok "servidor: tiene 2 commits nuevos" || mal "servidor: tiene 2 commits nuevos" "$(srv log --oneline | lineas)"
 ult=$(srv log -2 --format='%an|%s|%(trailers:key=Client,valueonly,unfold)|%(trailers:key=Tool,valueonly,unfold)' | tr '\n' ' ' | sed 's/ |/|/g')
 # Con publish, la herramienta de los dos commits es publish; nota a nota, create y write.
 if [ "$CON_PUBLISH" = 1 ]; then H_CREAR=publish H_ESCRIBIR=publish; else H_CREAR=create H_ESCRIBIR=write; fi
@@ -471,9 +473,9 @@ espera "borrar topics/vieja.md" "publicar: borra una nota"
 # --- 3. los cambios de otro no se pisan ----------------------------------------------------------------------------
 
 corre m2 copia
-sed -i 's/Todo va bien\./Todo va muy bien./' "$T/copia1/projects/alfa.md"
+sed_en_sitio 's/Todo va bien\./Todo va muy bien./' "$T/copia1/projects/alfa.md"
 c1 commit -q -am "Alfa: el estado, mejor"
-sed -i 's/Todo va bien\./Todo va fatal./' "$T/copia2/projects/alfa.md"
+sed_en_sitio 's/Todo va bien\./Todo va fatal./' "$T/copia2/projects/alfa.md"
 c2 commit -q -am "Alfa: el estado, peor"
 corre m2 publicar
 espera "publicado: 1 commits" "agente dos publica su cambio"
@@ -496,7 +498,7 @@ espera "por publicar: nada" "tras descartar su commit, la copia está al día"
 printf '\nAna también toma té.\n' >> "$T/copia1/people/ana.md"
 c1 commit -q -am "Ana: toma té"
 corre m2 actualizar
-sed -i 's/Espresso, filtrado y moka\./Espresso, filtrado, moka y cold brew./' "$T/copia2/topics/espresso.md"
+sed_en_sitio 's/Espresso, filtrado y moka\./Espresso, filtrado, moka y cold brew./' "$T/copia2/topics/espresso.md"
 c2 commit -q -am "Espresso: cold brew"
 corre m2 publicar
 corre m1 estado
@@ -663,7 +665,7 @@ if [ "$CON_PUBLISH" = 1 ]; then
   corre m1 publicar
   rc_es 0 "partir: la nota madre, publicada"
   antes=$(srv_head)
-  sed -i '/- fuente dos/d' "$T/copia1/projects/madre.md"
+  sed_en_sitio '/- fuente dos/d' "$T/copia1/projects/madre.md"
   c1 commit -q -am "Madre: quitar una fuente"
   corre m1 publicar
   rc_es 1 "partir: quitar una línea de Fuentes sin llevarla a otra nota, rechazado"
@@ -679,6 +681,50 @@ if [ "$CON_PUBLISH" = 1 ]; then
 else
   echo "OMITIDA partir una nota en un envío: este my-memory no tiene publish"
 fi
+
+# --- 6d. modo directo contra el servidor cli-memoria (sin pasarela: MEMORIA_URL + MEMORIA_TOKEN) -----------------------------
+md1() { MEMORIA_DIR="" MEMORIA_COPIA="$T/copiad" HOME="$T/hd" BADULAQUE_URL="" BADULAQUE_CLAVE="" MEMORIA_URL="http://127.0.0.1:$PUERTO_MM/mcp" MEMORIA_TOKEN="$TOK1" "${CLI[@]}" "$@"; }
+mdl() { MEMORIA_DIR="$REPO" MEMORIA_COPIA="$T/copiad" HOME="$T/hd" BADULAQUE_URL="" BADULAQUE_CLAVE="" MEMORIA_URL="http://127.0.0.1:$PUERTO_MM/mcp" MEMORIA_TOKEN="$TOK1" "${CLI[@]}" "$@"; }
+
+corre md1 buscar alfa
+rc_es 0 "directo: buscar funciona sin pasarela"
+espera "projects/alfa.md" "directo: buscar encuentra alfa"
+espera "cambiada el " "directo: buscar devuelve fecha de cambio del servidor"
+
+corre md1 buscar "fuente-guion" --en projects/madre.md
+rc_es 0 "directo: buscar --en con guion no rompe la regex"
+
+corre md1 leer alfa
+rc_es 0 "directo: leer funciona sin pasarela"
+espera "Alfa" "directo: leer devuelve la nota"
+
+printf -- '---\nname: Directa\ndescription: Nota creada en modo directo\n---\n# Directa\nCreada sin pasarela.\n' > "$T/directa.md"
+corre md1 crear topics/directa --razon "Prueba directa" --archivo "$T/directa.md" --simular
+rc_es 0 "directo: --simular muestra herramienta sin prefijo"
+espera '"herramienta": "create"' "directo: --simular usa create"
+
+corre md1 crear topics/directa --razon "Prueba directa" --archivo "$T/directa.md"
+rc_es 0 "directo: crear escribe directo al servidor"
+[ -f "$REPO/topics/directa.md" ] && ok "directo: la nota está en el repositorio del servidor" || mal "directo: la nota no se creó"
+
+corre md1 editar topics/directa --razon "Editar directo" --viejo "Creada sin pasarela." --nuevo "Editada sin pasarela."
+rc_es 0 "directo: editar funciona sin pasarela"
+grep -q "Editada sin pasarela." "$REPO/topics/directa.md" && ok "directo: edición guardada en el servidor" || mal "directo: edición no guardada"
+
+corre md1 historial topics/directa
+rc_es 0 "directo: historial funciona sin pasarela"
+espera "Editar directo" "directo: historial ve el commit"
+
+corre md1 revisar
+rc_es 0 "directo: revisar funciona sin pasarela"
+
+corre mdl copia
+rc_es 0 "directo: copia creada"
+printf -- '---\nname: Lote Directo\ndescription: Publicada en directo\n---\n# Lote Directo\nTexto.\n' > "$T/copiad/topics/lote-directo.md"
+git -C "$T/copiad" add -A && git -C "$T/copiad" commit -q -m "Lote directo: prueba publish sin pasarela"
+corre mdl publicar
+rc_es 0 "directo: publicar funciona directo al servidor"
+[ -f "$REPO/topics/lote-directo.md" ] && ok "directo: publish atómico guardó la nota" || mal "directo: publish no guardó la nota"
 
 # --- 7. el repositorio de las notas no se toca a mano -----------------------------------------------------------------------
 

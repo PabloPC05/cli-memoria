@@ -19,9 +19,8 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
-  Fallo, analizar, conBadulaque, correr, ejecutarCli, enUnaLinea, fechaCorta, imprimirJson, plano, simular, textoDe, usar, usarOFallar
+  Fallo, analizar, conServidor, correr, ejecutarCli, enUnaLinea, esAyuda, fechaCorta, imprimirJson, nombreHerramienta, plano, resolverOrden, simular, textoDe, usar, usarOFallar
 } from "./lib/nativa.mjs";
-import { esAyuda, resolverOrden } from "./lib/nativa.mjs";
 import { VENTANA_CARACTERES, VENTANA_LINEAS, miles, paginaDe, rangoDe, trozoDeListado } from "./lib/paginas.mjs";
 
 const VERSION = "2.3.0";
@@ -90,7 +89,7 @@ Cambios de varias notas a la vez (copia de trabajo + git; requiere MEMORIA_DIR):
   memoria actualizar
       Trae los cambios nuevos del servidor a tu copia (rebase de tus commits sin publicar; si choca, lo deja como estaba).
 
-Lo demás del servidor de la memoria, por el Badulaque con la clave de tu agente (cada comando es una herramienta suya):
+Lo demás del servidor de la memoria (cada comando llama a la herramienta correspondiente):
   memoria historial <nota> [--limite N] [--json]
       Los commits que tocaron la nota, del más nuevo al más viejo: cuándo, quién, con qué herramienta y para qué.
   memoria enlaces <nota> [--entrantes | --salientes] [--relacion R] [--json]
@@ -98,7 +97,11 @@ Lo demás del servidor de la memoria, por el Badulaque con la clave de tu agente
   memoria revisar [--tipos a,b] [--carpeta X] [--limite N] [--json]
       Candidatos de mantenimiento (huérfanas, enlaces rotos, duplicadas, viejas…), de peor a menos malo. Solo candidatos: lee antes de escribir.
 
-Variables: MEMORIA_DIR (la ruta de solo lectura; si falta, todo va por el Badulaque), MEMORIA_COPIA, BADULAQUE_CLAVE.
+Variables:
+  MEMORIA_DIR                  Carpeta local del repositorio (solo lectura; si falta, también las lecturas van al servidor).
+  MEMORIA_COPIA                Carpeta de la copia de trabajo de memoria copia (por defecto ~/memoria).
+  MEMORIA_URL / MEMORIA_TOKEN  Conexión directa al endpoint /mcp del servidor cli-memoria (recomendado).
+  BADULAQUE_URL / BADULAQUE_CLAVE  Alternativa a través de una pasarela MCP compatible.
 Códigos de salida: 0 bien, 1 error de la herramienta, 2 uso, 3 red o protocolo.
 `;
 
@@ -778,10 +781,11 @@ function listaLocal(pos, op) {
   const carpeta = pos[0].replace(/\/+$/, "");
   const { absoluta } = dentro(carpeta);
   if (!existsSync(absoluta) || !statSync(absoluta).isDirectory()) throw new Fallo(`no existe la carpeta ${carpeta}`, 2);
+  const fechasNotas = fechasDeNotas();
   const filas = todasLasNotas(carpeta).map(ruta => {
     const texto = readFileSync(resolve(MEMORIA_DIR, ruta), "utf8");
     const f = frontmatter(texto);
-    return { ruta, nombre: ruta.split("/").pop().replace(/\.md$/, ""), description: f.description ?? "", actualizada: statSync(resolve(MEMORIA_DIR, ruta)).mtime.toISOString() };
+    return { ruta, nombre: ruta.split("/").pop().replace(/\.md$/, ""), description: f.description ?? "", actualizada: fechasNotas.get(ruta) ?? statSync(resolve(MEMORIA_DIR, ruta)).mtime.toISOString().slice(0, 10) };
   });
   const { desde, hasta, pie } = trozoDeListado(filas.length, op.limite ?? 50, op.pagina ?? 1);
   if (op.json) {
@@ -838,7 +842,7 @@ async function buscarEnNotaRemota(pos, op) {
   if (op.carpeta) throw new Fallo("--en y --carpeta no se combinan: --en busca dentro de una nota; --carpeta, en una carpeta", 2);
   // Una carpeta («projects/») vale como --carpeta, como en local.
   if (/\/$/.test(op.en.trim())) return buscarRemoto(pos, { ...op, en: undefined, carpeta: op.en.trim() });
-  const r = await conBadulaque(ctx => usarOFallar(ctx, "memoria_read", dondeDe(op.en)));
+  const r = await conServidor(ctx => usarOFallar(ctx, "read", dondeDe(op.en)));
   const contenido = typeof r.json?.content === "string" ? r.json.content : r.texto;
   const descripcion = frontmatter(contenido).description ?? r.json?.frontmatter?.description;
   return buscarEnNota({ ruta: r.json?.path ?? op.en, contenido, descripcion, cambiada: () => fechaDelServidor(r.json?.updated_at) }, terminos, op);
@@ -851,7 +855,7 @@ async function buscarRemoto(pos, op) {
   const limite = op.limite ?? 20;
   const pagina = op.pagina ?? 1;
   // El servidor no pagina: se piden los de las páginas anteriores y la actual, y se corta aquí.
-  const r = await conBadulaque(ctx => usarOFallar(ctx, "memoria_search", {
+  const r = await conServidor(ctx => usarOFallar(ctx, "search", {
     query: consulta, limit: limite * pagina,
     ...(op.carpeta ? { folder: op.carpeta.replace(/\/+$/, "") } : {}), ...(op.archivo ? { include_archive: true } : {})
   }));
@@ -895,14 +899,14 @@ async function leerRemoto(pos, op) {
   const ref = pos[0].replace(/^\[\[|\]\]$/g, "");
   const argumentos = ref.includes("/") || ref.endsWith(".md") ? { path: ref.endsWith(".md") ? ref : `${ref}.md` } : { name: ref };
   // Se pide la nota entera y el recorte (índice, sección, rango, página) se hace aquí, igual que en local.
-  const r = await conBadulaque(ctx => usarOFallar(ctx, "memoria_read", argumentos));
+  const r = await conServidor(ctx => usarOFallar(ctx, "read", argumentos));
   const contenido = typeof r.json?.content === "string" ? r.json.content : r.texto;
   return mostrarNota({ ruta: r.json?.path ?? argumentos.path ?? ref, contenido, hash: typeof r.json?.hash === "string" ? r.json.hash : undefined, cambiada: () => fechaDelServidor(r.json?.updated_at) }, op);
 }
 
 async function listaRemota(pos, op) {
   if (pos.length > 1) throw new Fallo("uso: memoria lista [carpeta] [--limite N] [--pagina N]", 2);
-  const r = await conBadulaque(ctx => usarOFallar(ctx, "memoria_list", pos.length ? { folder: pos[0].replace(/\/+$/, ""), limit: 200 } : {}));
+  const r = await conServidor(ctx => usarOFallar(ctx, "list", pos.length ? { folder: pos[0].replace(/\/+$/, ""), limit: 200 } : {}));
   if (!pos.length) {
     // Sin carpeta, el servidor da su índice corto: igual que en local, una línea por carpeta con su número de notas.
     const filas = (r.json?.index?.folders ?? []).map(f => ({ carpeta: f.folder, notas: f.count }));
@@ -929,7 +933,7 @@ async function recientesRemoto(pos, op) {
   if (pos.length > 1) throw new Fallo("uso: memoria recientes [N]", 2);
   const n = pos.length ? Number(pos[0]) : 15;
   if (!Number.isInteger(n) || n < 1 || n > 200) throw new Fallo("N tiene que ser un entero entre 1 y 200", 2);
-  const r = await conBadulaque(ctx => usarOFallar(ctx, "memoria_recent", { limit: n }));
+  const r = await conServidor(ctx => usarOFallar(ctx, "recent", { limit: n }));
   const commits = r.json?.commits ?? [];
   if (op.json) {
     imprimirJson(commits);
@@ -942,7 +946,7 @@ async function recientesRemoto(pos, op) {
   return 0;
 }
 
-// --- escritura: siempre por el Badulaque ----------------------------------------
+// --- escritura: siempre por el servidor ----------------------------------------
 
 async function crear(pos, op) {
   if (pos.length < 1 || pos.length > 2 || (pos[1] !== undefined && pos[1] !== "-")) {
@@ -954,8 +958,8 @@ async function crear(pos, op) {
   const content = textoDe(pos[1], op.archivo);
   if (!content.trim()) throw new Fallo("el contenido está vacío", 2);
   const argumentos = { path: ruta, content, reason: op.razon, ...(op.confirmar_nueva ? { confirm_new: true } : {}) };
-  if (simular(op, "memoria_create", argumentos)) return 0;
-  const r = await conBadulaque(ctx => usarOFallar(ctx, "memoria_create", argumentos));
+  if (simular(op, "create", argumentos)) return 0;
+  const r = await conServidor(ctx => usarOFallar(ctx, "create", argumentos));
   console.log(r.texto);
   return 0;
 }
@@ -978,13 +982,13 @@ async function editar(pos, op) {
   const ref = pos[0].replace(/^\[\[|\]\]$/g, "");
   const donde = ref.includes("/") || ref.endsWith(".md") ? { path: ref.endsWith(".md") ? ref : `${ref}.md` } : { name: ref };
   const argumentos = { ...donde, edits: ediciones, reason: op.razon, ...(op.hash ? { hash: op.hash } : {}) };
-  if (simular(op, "memoria_edit", argumentos)) return 0;
-  const r = await conBadulaque(ctx => usarOFallar(ctx, "memoria_edit", argumentos));
+  if (simular(op, "edit", argumentos)) return 0;
+  const r = await conServidor(ctx => usarOFallar(ctx, "edit", argumentos));
   console.log(r.texto);
   return 0;
 }
 
-// --- el resto de las herramientas de la memoria, por el Badulaque -------------------------------------------------------
+// --- el resto de las herramientas del servidor -------------------------------------------------------
 
 function dondeDe(texto) {
   const ref = String(texto).replace(/^\[\[|\]\]$/g, "");
@@ -995,16 +999,16 @@ function exigirRazon(op) {
   if (!op.razon) throw new Fallo("falta --razon: una línea que diga por qué (será el mensaje del commit)", 2);
 }
 
-/** El hash actual de una nota (el de `memoria_read`), para quien no lo da. */
+/** El hash actual de una nota (el de `read`), para quien no lo da. */
 async function hashActual(ctx, donde) {
-  const r = await usarOFallar(ctx, "memoria_read", donde);
+  const r = await usarOFallar(ctx, "read", donde);
   if (typeof r.json?.hash !== "string") throw new Fallo("el servidor no dio el hash de la nota", 3);
   return r.json.hash;
 }
 
 async function historial(pos, op) {
   if (pos.length !== 1) throw new Fallo("uso: memoria historial <nota> [--limite N]", 2);
-  const r = await conBadulaque(ctx => usarOFallar(ctx, "memoria_history", { ...dondeDe(pos[0]), limit: op.limite ?? 20 }));
+  const r = await conServidor(ctx => usarOFallar(ctx, "history", { ...dondeDe(pos[0]), limit: op.limite ?? 20 }));
   const commits = r.json?.commits ?? [];
   if (op.json) return imprimirJson(commits);
   for (const c of commits) {
@@ -1018,7 +1022,7 @@ async function enlaces(pos, op) {
   if (pos.length !== 1) throw new Fallo("uso: memoria enlaces <nota> [--entrantes | --salientes] [--relacion R]", 2);
   if (op.entrantes && op.salientes) throw new Fallo("--entrantes y --salientes juntos son los dos: quita ambos", 2);
   const direction = op.entrantes ? "in" : op.salientes ? "out" : "both";
-  const r = await conBadulaque(ctx => usarOFallar(ctx, "memoria_links", { ...dondeDe(pos[0]), direction, ...(op.relacion ? { relation: op.relacion } : {}) }));
+  const r = await conServidor(ctx => usarOFallar(ctx, "links", { ...dondeDe(pos[0]), direction, ...(op.relacion ? { relation: op.relacion } : {}) }));
   if (op.json) return imprimirJson(r.json ?? r.texto);
   const sale = r.json?.out ?? [];
   const entra = r.json?.in ?? [];
@@ -1037,7 +1041,7 @@ async function enlaces(pos, op) {
 
 async function revisar(pos, op) {
   if (pos.length) throw new Fallo("uso: memoria revisar [--tipos a,b] [--carpeta X] [--limite N]", 2);
-  const r = await conBadulaque(ctx => usarOFallar(ctx, "memoria_lint", {
+  const r = await conServidor(ctx => usarOFallar(ctx, "lint", {
     ...(op.tipos?.length ? { kinds: op.tipos } : {}), ...(op.carpeta ? { folder: op.carpeta.replace(/\/+$/, "") } : {}), limit: op.limite ?? 30
   }));
   if (op.json) return imprimirJson(r.json ?? r.texto);
@@ -1056,8 +1060,8 @@ async function escribirNota(pos, op) {
   const content = textoDe(pos[1], op.archivo);
   if (!content.trim()) throw new Fallo("el contenido está vacío", 2);
   const donde = dondeDe(pos[0]);
-  if (simular(op, "memoria_write", { ...donde, content, hash: op.hash ?? "(el de ahora)", reason: op.razon })) return 0;
-  const r = await conBadulaque(async ctx => usarOFallar(ctx, "memoria_write", { ...donde, content, hash: op.hash ?? await hashActual(ctx, donde), reason: op.razon }));
+  if (simular(op, "write", { ...donde, content, hash: op.hash ?? "(el de ahora)", reason: op.razon })) return 0;
+  const r = await conServidor(async ctx => usarOFallar(ctx, "write", { ...donde, content, hash: op.hash ?? await hashActual(ctx, donde), reason: op.razon }));
   console.log(r.texto);
   return 0;
 }
@@ -1068,8 +1072,8 @@ async function moverNota(pos, op) {
   const donde = dondeDe(pos[0]);
   const de = donde.path ?? donde.name;
   const a = pos[1].endsWith(".md") ? pos[1] : `${pos[1]}.md`;
-  if (simular(op, "memoria_move", { from: de, to: a, hash: op.hash ?? "(el de ahora)", reason: op.razon })) return 0;
-  const r = await conBadulaque(async ctx => usarOFallar(ctx, "memoria_move", { from: de, to: a, hash: op.hash ?? await hashActual(ctx, donde), reason: op.razon }));
+  if (simular(op, "move", { from: de, to: a, hash: op.hash ?? "(el de ahora)", reason: op.razon })) return 0;
+  const r = await conServidor(async ctx => usarOFallar(ctx, "move", { from: de, to: a, hash: op.hash ?? await hashActual(ctx, donde), reason: op.razon }));
   console.log(r.texto);
   return 0;
 }
@@ -1078,10 +1082,10 @@ async function borrarNota(pos, op) {
   if (pos.length !== 1) throw new Fallo("uso: memoria borrar <nota> --razon <texto> --si [--hash H]", 2);
   exigirRazon(op);
   const donde = dondeDe(pos[0]);
-  if (simular(op, "memoria_delete", { ...donde, hash: op.hash ?? "(el de ahora)", reason: op.razon })) return 0;
-  // Borrar es destructivo: como en las demás CLIs, solo con --si (queda en el historial y memoria revertir lo deshace).
+  if (simular(op, "delete", { ...donde, hash: op.hash ?? "(el de ahora)", reason: op.razon })) return 0;
+  // Borrar es destructivo: solo con --si (queda en el historial y memoria revertir lo deshace).
   if (!op.si) throw new Fallo(`esto borra la nota «${pos[0]}» (queda en el historial: memoria revertir lo deshace). Si el usuario lo pidió, repite con --si`, 2);
-  const r = await conBadulaque(async ctx => usarOFallar(ctx, "memoria_delete", { ...donde, hash: op.hash ?? await hashActual(ctx, donde), reason: op.razon }));
+  const r = await conServidor(async ctx => usarOFallar(ctx, "delete", { ...donde, hash: op.hash ?? await hashActual(ctx, donde), reason: op.razon }));
   console.log(r.texto);
   return 0;
 }
@@ -1090,8 +1094,8 @@ async function revertir(pos, op) {
   if (pos.length !== 1) throw new Fallo("uso: memoria revertir <commit> --razon <texto> [--nota X]", 2);
   exigirRazon(op);
   const argumentos = { commit: pos[0], reason: op.razon, ...(op.nota ? dondeDe(op.nota) : {}) };
-  if (simular(op, "memoria_revert", argumentos)) return 0;
-  const r = await conBadulaque(ctx => usarOFallar(ctx, "memoria_revert", argumentos));
+  if (simular(op, "revert", argumentos)) return 0;
+  const r = await conServidor(ctx => usarOFallar(ctx, "revert", argumentos));
   console.log(r.texto);
   return 0;
 }
@@ -1116,8 +1120,8 @@ async function adjuntar(pos, op) {
     ...(op.titulo ? { title: op.titulo } : {}), ...(op.nombre ? { name: op.nombre } : {}), ...(op.alias?.length ? { aliases: op.alias } : {}),
     ...(op.confirmar_nueva ? { confirm_new: true } : {})
   };
-  if (simular(op, "memoria_attach", argumentos)) return 0;
-  const r = await conBadulaque(ctx => usarOFallar(ctx, "memoria_attach", argumentos));
+  if (simular(op, "attach", argumentos)) return 0;
+  const r = await conServidor(ctx => usarOFallar(ctx, "attach", argumentos));
   console.log(r.texto);
   return 0;
 }
@@ -1258,7 +1262,7 @@ function cambiosDe(commit, desde = null) {
 }
 
 const VERBOS = { A: "crear", M: "escribir", R: "mover", D: "borrar" };
-const HERRAMIENTAS = { A: "memoria_create", M: "memoria_write", R: "memoria_move", D: "memoria_delete" };
+const HERRAMIENTAS = { A: "create", M: "write", R: "move", D: "delete" };
 
 /**
  * Los commits por publicar (del más antiguo al más nuevo), con sus cambios y la razón (su asunto). Con `aplanar`, uno
@@ -1442,11 +1446,18 @@ function explicar(json, texto) {
 const MAX_PUBLISH = 500;
 
 /**
- * ¿Tiene el servidor la herramienta `publish` (varios commits en un solo envío, todo o nada)? Se mira en su lista de
- * herramientas, la que da la pasarela con `buscador_buscar` (un nombre exacto sale el primero). Si la pasarela no sabe
- * buscar o no la tiene, no: se publica nota a nota, como siempre.
+ * ¿Tiene el servidor la herramienta `publish` (varios commits en un solo envío, todo o nada)?
+ * En modo directo, mira `tools/list`; en modo pasarela, `buscador_buscar` (`memoria_publish`).
  */
 async function tienePublish(ctx) {
+  if (ctx.modo === "directo") {
+    try {
+      const r = await ctx.pasarela.pedir("tools/list", {});
+      return Array.isArray(r?.tools) && r.tools.some(t => t?.name === "publish");
+    } catch {
+      return false;
+    }
+  }
   let r;
   try {
     r = await ctx.pasarela.llamar("buscador_buscar", { consulta: "memoria_publish", limite: 1 });
@@ -1494,7 +1505,7 @@ async function publicarDeUnaVez(ctx, base, commits, op) {
   const envio = op.aplanar
     ? commits[0].cambios.map(x => ({ reason: x.razon, changes: cambiosParaPublish(commits[0].commit, [x], base), local: commits[0], cambios: [x] }))
     : commits.map(c => ({ reason: c.razon, changes: cambiosParaPublish(c.commit, c.cambios, `${c.commit}^`), local: c, cambios: c.cambios }));
-  const r = await usar(ctx, "memoria_publish", {
+  const r = await usar(ctx, "publish", {
     commits: envio.map(e => ({ reason: e.reason, changes: e.changes })), ...(op.confirmar_nueva ? { confirm_new: true } : {})
   });
   return { r, envio };
@@ -1559,13 +1570,13 @@ async function publicar(pos, op) {
     if (op.json) {
       imprimirJson({
         simulado: true, problemas, chocan,
-        commits: commits.map(c => ({ commit: corto(c.commit), razon: c.razon, llamadas: c.cambios.map(x => ({ herramienta: HERRAMIENTAS[x.estado], ruta: x.ruta, ...(x.de ? { de: x.de } : {}) })) }))
+        commits: commits.map(c => ({ commit: corto(c.commit), razon: c.razon, llamadas: c.cambios.map(x => ({ herramienta: nombreHerramienta(HERRAMIENTAS[x.estado]), ruta: x.ruta, ...(x.de ? { de: x.de } : {}) })) }))
       });
       return 0;
     }
     for (const c of commits) {
       console.log(`${corto(c.commit)} ${enUnaLinea(c.razon, 100)}`);
-      for (const x of c.cambios) console.log(`  ${HERRAMIENTAS[x.estado]} ${x.de ? `${x.de} → ` : ""}${x.ruta}`);
+      for (const x of c.cambios) console.log(`  ${nombreHerramienta(HERRAMIENTAS[x.estado])} ${x.de ? `${x.de} → ` : ""}${x.ruta}`);
     }
     for (const p of problemas) console.log(`NO PASARÍA: ${p}`);
     for (const c of chocan) console.log(`CHOCA: ${c.ruta} la cambió ${c.quien} (${c.commit} ${c.motivo})`);
@@ -1585,7 +1596,7 @@ async function publicar(pos, op) {
   const cabeza = git(["rev-parse", "HEAD"]).salida.trim();
   let fallo = null;
   let deUnaVez = null; // lo que devolvió `publish`, si el servidor la tiene
-  await conBadulaque(async ctx => {
+  await conServidor(async ctx => {
     // Si el servidor tiene `publish`, todo va en un solo envío: todo o nada, con las reglas juzgadas sobre el envío entero.
     if (commits.reduce((n, c) => n + c.cambios.length, 0) <= MAX_PUBLISH && await tienePublish(ctx)) {
       deUnaVez = await publicarDeUnaVez(ctx, base, commits, op);
@@ -1603,17 +1614,17 @@ async function publicar(pos, op) {
         };
         let r;
         if (x.estado === "A") {
-          r = await llamar("memoria_create", { path: x.ruta, content: contenido(), reason: razon, ...(op.confirmar_nueva ? { confirm_new: true } : {}) });
+          r = await llamar("create", { path: x.ruta, content: contenido(), reason: razon, ...(op.confirmar_nueva ? { confirm_new: true } : {}) });
         } else if (x.estado === "M") {
-          r = await llamar("memoria_write", { path: x.ruta, content: contenido(), hash: hashDe(x.ruta), reason: razon });
+          r = await llamar("write", { path: x.ruta, content: contenido(), hash: hashDe(x.ruta), reason: razon });
           // El servidor ya tiene exactamente eso (por ejemplo, un enlace que reescribió al mover otra nota).
           if (r.error && r.json?.code === "CONFLICT" && r.json.content === contenido()) r = { error: false, json: { hash: r.json.hash }, texto: "" };
         } else if (x.estado === "D") {
-          r = await llamar("memoria_delete", { path: x.ruta, hash: hashDe(x.ruta), reason: razon });
+          r = await llamar("delete", { path: x.ruta, hash: hashDe(x.ruta), reason: razon });
         } else {
-          r = await llamar("memoria_move", { from: x.de, to: x.ruta, hash: hashDe(x.de), reason: razon });
+          r = await llamar("move", { from: x.de, to: x.ruta, hash: hashDe(x.de), reason: razon });
           if (!r.error && blobEn(c.commit, x.ruta) !== r.json?.hash) {
-            r = await llamar("memoria_write", { path: x.ruta, content: contenido(), hash: r.json?.hash, reason: razon });
+            r = await llamar("write", { path: x.ruta, content: contenido(), hash: r.json?.hash, reason: razon });
           }
         }
         if (r.error) {

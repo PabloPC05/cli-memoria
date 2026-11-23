@@ -40,6 +40,7 @@ export interface SearchHit {
 	path: string;
 	name: string;
 	description: string | null;
+	updatedAt: string | null;
 	section: SectionRow;
 	snippet: string;
 	score: number;
@@ -326,7 +327,7 @@ export class SearchIndex {
 	search(match: string, opts: { folder?: string | null; includeArchive: boolean; limit: number }): SearchHit[] {
 		const rows = this.db
 			.prepare(
-				`SELECT s.id, s.path, s.heading, s.level, s.line_start, s.line_end, n.name, n.description,
+				`SELECT s.id, s.path, s.heading, s.level, s.line_start, s.line_end, n.name, n.description, n.updated_at,
                 bm25(sections_fts, 5.0, 4.0, 3.0, 2.0, 1.0) AS score,
                 snippet(sections_fts, -1, '«', '»', '…', 24) AS snippet
          FROM sections_fts
@@ -341,6 +342,7 @@ export class SearchIndex {
 			path: r.path as string,
 			name: r.name as string,
 			description: (r.description as string | null) ?? null,
+			updatedAt: (r.updated_at as string | null) ?? null,
 			section: { heading: r.heading as string, level: r.level as number, lineStart: r.line_start as number, lineEnd: r.line_end as number },
 			snippet: (r.snippet as string).replace(/\s+/g, " ").trim(),
 			score: Math.round(-(r.score as number) * 1000) / 1000,
@@ -412,7 +414,7 @@ export class SearchIndex {
 	sectionHit(id: number, score: number): SearchHit | null {
 		const r = this.db
 			.prepare(
-				`SELECT s.id, s.path, s.heading, s.level, s.line_start, s.line_end, n.name, n.description, f.body
+				`SELECT s.id, s.path, s.heading, s.level, s.line_start, s.line_end, n.name, n.description, n.updated_at, f.body
          FROM sections s JOIN notes n ON n.path = s.path JOIN sections_fts f ON f.rowid = s.id WHERE s.id = ?`,
 			)
 			.get(id) as Row | undefined;
@@ -423,6 +425,7 @@ export class SearchIndex {
 			path: r.path as string,
 			name: r.name as string,
 			description: (r.description as string | null) ?? null,
+			updatedAt: (r.updated_at as string | null) ?? null,
 			section: { heading: r.heading as string, level: r.level as number, lineStart: r.line_start as number, lineEnd: r.line_end as number },
 			snippet: words.length > 24 ? `${words.slice(0, 24).join(" ")}…` : words.join(" "),
 			score,

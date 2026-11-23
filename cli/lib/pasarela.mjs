@@ -1,18 +1,17 @@
-// El cliente de la pasarela MCP de la CLI memoria: una sesión MCP por HTTP (Streamable HTTP, JSON o SSE) con la clave de
-// un agente, para llamar a herramientas (`tools/call`) y atender los formularios que pida el servidor (`elicitation/create`).
-// La pasarela se configura por entorno: BADULAQUE_URL y BADULAQUE_CLAVE. Ver cli/README.md, «La pasarela».
-// Sin dependencias.
+// Cliente MCP por HTTP (Streamable HTTP, JSON o SSE) para la CLI memoria.
+// Soporta dos modos sin dependencias externas:
+// - Directo al servidor cli-memoria (sin sesión o con sesión): MEMORIA_URL y MEMORIA_TOKEN.
+// - A través de una pasarela MCP compatible (envuelve herramientas en `buscador_usar`): BADULAQUE_URL y BADULAQUE_CLAVE.
 
 import { request as pedirHttp } from "node:http";
 import { request as pedirHttps } from "node:https";
-import { createInterface } from "node:readline/promises";
 
-const VERSION = "1.0.0";
+const VERSION = "2.3.0";
 const PROTOCOLO = "2025-06-18";
-/** Sin noticias de la pasarela durante tanto, una llamada sencilla se da por perdida. */
+/** Sin noticias del servidor durante tanto, una llamada sencilla se da por perdida. */
 const TIEMPO_SIMPLE_MS = 60_000;
-/** Un «usar» puede esperar confirmación del usuario (un formulario): se da por perdido solo tras tanto silencio. */
-const SILENCIO_USAR_MS = 30 * 60_000;
+/** Una llamada a herramienta puede tardar (OCR, publish grande): se da por perdida solo tras tanto silencio. */
+const SILENCIO_USAR_MS = 5 * 60_000;
 
 /** Un error con su código de salida: 1 herramienta, 2 uso o configuración, 3 red o protocolo. */
 export class Fallo extends Error {
@@ -22,7 +21,6 @@ export class Fallo extends Error {
   }
 }
 
-/** Un error de red o de protocolo (código 3). */
 const errorRed = mensaje => new Fallo(mensaje, 3);
 
 let CLAVE = "";
@@ -40,9 +38,6 @@ const leerJson = texto => {
 };
 const esObjeto = v => v !== null && typeof v === "object" && !Array.isArray(v);
 
-// --- hablar con la pasarela ----------------------------------------------
-
-/** Parte un flujo SSE en sus mensajes completos; lo que queda sin acabar vuelve como `resto`. */
 function partirSse(buffer) {
   const trozos = buffer.replace(/\r\n/g, "\n").split("\n\n");
   const resto = trozos.pop();
@@ -53,16 +48,12 @@ function partirSse(buffer) {
       .map(l => l.slice(l.startsWith("data: ") ? 6 : 5));
     if (!datos.length) continue;
     const mensaje = leerJson(datos.join("\n"));
-    if (mensaje === undefined) continue; // un evento ilegible se ignora
+    if (mensaje === undefined) continue;
     mensajes.push(mensaje);
   }
   return { mensajes, resto };
 }
 
-/**
- * Una petición HTTP. Si la respuesta es un flujo SSE, `alMensaje` recibe cada mensaje en cuanto llega;
- * si es JSON, lo recibe al final. Devuelve estado, cabeceras y todos los mensajes.
- */
 function pedir(url, { metodo = "POST", cabeceras = {}, cuerpo, alMensaje, silencioMs = TIEMPO_SIMPLE_MS } = {}) {
   return new Promise((resolver, rechazar) => {
     const u = new URL(url);
@@ -78,12 +69,11 @@ function pedir(url, { metodo = "POST", cabeceras = {}, cuerpo, alMensaje, silenc
         ...(texto === undefined ? {} : { "Content-Length": Buffer.byteLength(texto) })
       }
     };
-    // node:http y no fetch: el de Node corta el cuerpo a los 300 s sin datos, y un formulario puede tardar más.
     const lib = u.protocol === "https:" ? pedirHttps : pedirHttp;
     let vigilante;
     const armar = () => {
       clearTimeout(vigilante);
-      vigilante = setTimeout(() => req.destroy(errorRed("la pasarela dejó de dar señales")), silencioMs);
+      vigilante = setTimeout(() => req.destroy(errorRed("el servidor dejó de dar señales")), silencioMs);
     };
     const req = lib(opciones, res => {
       const sse = (res.headers["content-type"] ?? "").includes("text/event-stream");
@@ -114,11 +104,10 @@ function pedir(url, { metodo = "POST", cabeceras = {}, cuerpo, alMensaje, silenc
           return;
         }
         const cuerpoTexto = trozos.join("");
-        // Un error (401, 500…) puede venir sin JSON: quien llama mira el estado antes que los mensajes.
         const exito = res.statusCode >= 200 && res.statusCode < 300;
         if (exito && cuerpoTexto.trim()) {
           const leido = leerJson(cuerpoTexto);
-          if (leido === undefined) return rechazar(errorRed("respuesta ilegible de la pasarela"));
+          if (leido === undefined) return rechazar(errorRed("respuesta ilegible del servidor"));
           (Array.isArray(leido) ? leido : [leido]).forEach(recibir);
         }
         resolver({ estado: res.statusCode, cabeceras: res.headers, texto: cuerpoTexto, mensajes });
@@ -127,7 +116,7 @@ function pedir(url, { metodo = "POST", cabeceras = {}, cuerpo, alMensaje, silenc
     });
     req.on("error", e => {
       clearTimeout(vigilante);
-      rechazar(errorRed(`no llego a la pasarela (${e.code ?? e.message})`));
+      rechazar(errorRed(`no llego al servidor (${e.code ?? e.message})`));
     });
     armar();
     if (texto !== undefined) req.write(texto);
@@ -135,100 +124,27 @@ function pedir(url, { metodo = "POST", cabeceras = {}, cuerpo, alMensaje, silenc
   });
 }
 
-/** Un formulario que pide la pasarela (`elicitation/create`): en una terminal, se pregunta; si no, se rechaza. */
-async function elicitar(params) {
-  const mensaje = String(params.message ?? "Badulaque pide una confirmación.");
-  if (!process.stdin.isTTY || !process.stderr.isTTY) {
-    log(`badulaque: la pasarela pide una confirmación («${mensaje}») que esta terminal no puede dar. ` +
-      "Se rechaza: ese paso necesita confirmación interactiva en un cliente con formularios.");
-    return { action: "decline" };
-  }
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
-  rl.on("SIGINT", () => {
-    rl.close();
-    process.exit(130);
-  });
-  try {
-    log(`\nBadulaque pide confirmación: ${mensaje}`);
-    const eleccion = (await rl.question("¿Aceptar? [s] sí · [n] rechazar · [c] cancelar: ")).trim().toLowerCase();
-    if (eleccion.startsWith("n")) return { action: "decline" };
-    if (!eleccion.startsWith("s")) return { action: "cancel" };
-    const esquema = params.requestedSchema ?? {};
-    const requeridos = esquema.required ?? [];
-    const contenido = {};
-    for (const [campo, definicion] of Object.entries(esquema.properties ?? {})) {
-      const valor = await preguntarCampo(rl, campo, definicion, requeridos.includes(campo));
-      if (valor !== undefined) contenido[campo] = valor;
-    }
-    return { action: "accept", content: contenido };
-  } finally {
-    rl.close();
-  }
-}
-
-async function preguntarCampo(rl, campo, definicion, requerido) {
-  const titulo = definicion.title ?? campo;
-  const descripcion = definicion.description ? ` (${definicion.description})` : "";
-  log(`${titulo}${descripcion}${requerido ? "" : " — Intro para omitir"}`);
-  const opciones = Array.isArray(definicion.enum)
-    ? definicion.enum.map((valor, i) => ({ valor, texto: definicion.enumNames?.[i] ?? String(valor) }))
-    : null;
-  for (;;) {
-    if (opciones) {
-      opciones.forEach((o, i) => log(`  ${i + 1}) ${o.texto}`));
-      const r = (await rl.question("Número: ")).trim();
-      if (!r) {
-        if (!requerido) return undefined;
-        continue;
-      }
-      const opcion = opciones[Number(r) - 1];
-      if (opcion) return opcion.valor;
-      log("Elige un número de la lista.");
-      continue;
-    }
-    if (definicion.type === "boolean") {
-      const r = (await rl.question("[s/n]: ")).trim().toLowerCase();
-      if (!r) {
-        if (!requerido) return undefined;
-        continue;
-      }
-      if (r.startsWith("s")) return true;
-      if (r.startsWith("n")) return false;
-      continue;
-    }
-    const r = (await rl.question("> ")).trim();
-    if (!r) {
-      if (!requerido) return undefined;
-      continue;
-    }
-    if (definicion.type === "number" || definicion.type === "integer") {
-      const n = Number(r);
-      if (!Number.isFinite(n) || (definicion.type === "integer" && !Number.isInteger(n))) {
-        log("Tiene que ser un número.");
-        continue;
-      }
-      return n;
-    }
-    return r;
-  }
-}
-
-function comprobarEstado(estado) {
+function comprobarEstado(estado, varClave) {
   if (estado === 401 || estado === 403) {
-    throw new Fallo("la pasarela no acepta la clave (BADULAQUE_CLAVE): ¿es la de tu agente?", 2);
+    throw new Fallo(`el servidor no acepta la credencial (${varClave}): ¿es la de tu agente?`, 2);
   }
-  if (estado < 200 || estado >= 300) throw errorRed(`la pasarela contestó ${estado}`);
+  if (estado < 200 || estado >= 300) throw errorRed(`el servidor contestó ${estado}`);
 }
 
-/** Una sesión MCP con la pasarela: una por invocación de la CLI, o las que haga falta. */
+/**
+ * Cliente MCP por HTTP. Funciona tanto con el servidor cli-memoria sin estado (sin Mcp-Session-Id)
+ * como con pasarelas MCP con sesión (`initialize` + `Mcp-Session-Id`).
+ */
 export class Pasarela {
-  constructor(url, clave) {
+  constructor(url, clave, { sinEstado = false, varClave = "MEMORIA_TOKEN" } = {}) {
     this.url = url;
     this.clave = clave;
+    this.sinEstado = sinEstado;
+    this.varClave = varClave;
     this.id = null;
+    this.abierta = false;
     this.version = PROTOCOLO;
     this.contador = 0;
-    /** Las peticiones del servidor (formularios) se atienden una a una. */
     this.cola = Promise.resolve();
   }
 
@@ -247,6 +163,7 @@ export class Pasarela {
 
   async abrir() {
     this.id = null;
+    this.abierta = false;
     const id = ++this.contador;
     const r = await pedir(this.url, {
       cabeceras: this.cabeceras(false),
@@ -256,43 +173,44 @@ export class Pasarela {
         method: "initialize",
         params: {
           protocolVersion: PROTOCOLO,
-          capabilities: { elicitation: {} },
-          clientInfo: { name: "badulaque-cli", version: VERSION }
+          capabilities: {},
+          clientInfo: { name: "memoria-cli", version: VERSION }
         }
       }
     });
-    comprobarEstado(r.estado);
+    comprobarEstado(r.estado, this.varClave);
     const respuesta = r.mensajes.find(m => m.id === id);
     if (!respuesta || respuesta.error) {
-      throw errorRed(`la pasarela no abrió la sesión${respuesta?.error?.message ? `: ${respuesta.error.message}` : ""}`);
+      throw errorRed(`el servidor no abrió la sesión${respuesta?.error?.message ? `: ${respuesta.error.message}` : ""}`);
     }
-    const sesion = r.cabeceras["mcp-session-id"];
-    if (!sesion) throw errorRed("la pasarela no dio sesión");
-    this.id = sesion;
     this.version = respuesta.result?.protocolVersion ?? PROTOCOLO;
-    // La pasarela espera este aviso antes de atender nada más.
-    await pedir(this.url, {
-      cabeceras: this.cabeceras(),
-      cuerpo: { jsonrpc: "2.0", method: "notifications/initialized" }
-    });
+    const sesion = r.cabeceras["mcp-session-id"];
+    if (sesion) {
+      this.id = sesion;
+      await pedir(this.url, {
+        cabeceras: this.cabeceras(),
+        cuerpo: { jsonrpc: "2.0", method: "notifications/initialized" }
+      });
+    } else if (!this.sinEstado) {
+      throw errorRed("la pasarela no dio sesión");
+    }
+    this.abierta = true;
   }
 
-  /** Contesta a una petición del servidor (un formulario) por la misma sesión. */
   async responder(peticion) {
     const cuerpo = peticion.method === "elicitation/create"
-      ? { jsonrpc: "2.0", id: peticion.id, result: await elicitar(peticion.params ?? {}) }
+      ? { jsonrpc: "2.0", id: peticion.id, result: { action: "decline" } }
       : { jsonrpc: "2.0", id: peticion.id, error: { code: -32601, message: "método no soportado por esta CLI" } };
     try {
       await pedir(this.url, { cabeceras: this.cabeceras(), cuerpo, silencioMs: TIEMPO_SIMPLE_MS });
     } catch (error) {
-      log(`badulaque: no se pudo contestar a la pasarela (${sanear(error.message)})`);
+      log(`memoria: no se pudo contestar al servidor (${sanear(error.message)})`);
     }
   }
 
-  /** Una petición JSON-RPC. Reabre la sesión una vez si la pasarela la olvidó. */
   async pedir(metodo, params, { silencioMs = TIEMPO_SIMPLE_MS } = {}) {
     for (let intento = 0; ; intento++) {
-      if (!this.id) await this.abrir();
+      if (!this.sinEstado && !this.abierta) await this.abrir();
       const id = ++this.contador;
       let final = null;
       const recibir = m => {
@@ -312,13 +230,14 @@ export class Pasarela {
       });
       await this.cola;
       if ((r.estado === 404 || r.estado === 400) && intento === 0) {
-        // La pasarela se reinició y olvidó la sesión: se abre otra y se repite una vez.
-        this.id = null;
+        // Si el servidor requiere sesión (o la reinició), abrimos una y reintentamos una vez.
+        this.sinEstado = false;
+        await this.abrir();
         continue;
       }
-      comprobarEstado(r.estado);
-      if (!final) throw errorRed("la pasarela cerró la conexión sin dar el resultado");
-      if (final.error) throw errorRed(`la pasarela devolvió un error${final.error.message ? `: ${final.error.message}` : ""}`);
+      comprobarEstado(r.estado, this.varClave);
+      if (!final) throw errorRed("el servidor cerró la conexión sin dar el resultado");
+      if (final.error) throw errorRed(`el servidor devolvió un error${final.error.message ? `: ${final.error.message}` : ""}`);
       return final.result ?? {};
     }
   }
@@ -326,14 +245,14 @@ export class Pasarela {
   llamar(nombre, argumentos) {
     return this.pedir("tools/call", {
       name: nombre,
-      arguments: argumentos ?? {},
-      _meta: { progressToken: `badulaque-${Date.now()}` }
+      arguments: argumentos ?? {}
     }, { silencioMs: SILENCIO_USAR_MS });
   }
 
   async cerrar() {
     const id = this.id;
     this.id = null;
+    this.abierta = false;
     if (!id) return;
     await pedir(this.url, {
       metodo: "DELETE",
@@ -343,25 +262,44 @@ export class Pasarela {
   }
 }
 
-// --- la configuración -------------------------------------------------------
+/** Qué modo de conexión se usaría con el entorno actual ("directo" o "pasarela"), sin abrir red. */
+export function modoDeConexion() {
+  if ((process.env.MEMORIA_URL ?? "").trim() || (process.env.MEMORIA_TOKEN ?? "").trim()) return "directo";
+  return "pasarela";
+}
 
 /**
- * La sesión de una invocación, a partir de BADULAQUE_URL y BADULAQUE_CLAVE: { pasarela }.
+ * Configura el cliente a partir del entorno:
+ * - Directo (preferido): MEMORIA_URL + MEMORIA_TOKEN (contra el servidor cli-memoria, `/mcp`).
+ * - Pasarela (compatibilidad): BADULAQUE_URL + BADULAQUE_CLAVE (envuelve llamadas en `buscador_usar`).
  */
 export function configurar() {
+  const modo = modoDeConexion();
+  if (modo === "directo") {
+    const url = (process.env.MEMORIA_URL ?? "").trim();
+    const token = (process.env.MEMORIA_TOKEN ?? "").trim();
+    if (!url) throw new Fallo("falta MEMORIA_URL: indica la dirección /mcp del servidor cli-memoria.", 2);
+    if (!token) throw new Fallo("falta MEMORIA_TOKEN: indica el token del agente para el servidor cli-memoria.", 2);
+    try {
+      new URL(url);
+    } catch {
+      throw new Fallo("MEMORIA_URL no es una dirección válida", 2);
+    }
+    CLAVE = token;
+    return { modo, pasarela: new Pasarela(url, token, { sinEstado: true, varClave: "MEMORIA_TOKEN" }) };
+  }
   const clave = (process.env.BADULAQUE_CLAVE ?? "").trim();
-  if (!clave) {
-    throw new Fallo("falta BADULAQUE_CLAVE: indica la clave del agente en la variable de entorno BADULAQUE_CLAVE.", 2);
-  }
   const url = (process.env.BADULAQUE_URL ?? "").trim();
-  if (!url) {
-    throw new Fallo("falta BADULAQUE_URL: indica la dirección MCP de la pasarela en la variable de entorno BADULAQUE_URL.", 2);
+  if (!url && !clave) {
+    throw new Fallo("falta configurar el servidor: define MEMORIA_URL y MEMORIA_TOKEN (o BADULAQUE_URL y BADULAQUE_CLAVE para pasarela).", 2);
   }
+  if (!clave) throw new Fallo("falta BADULAQUE_CLAVE: indica la clave del agente en la variable de entorno BADULAQUE_CLAVE.", 2);
+  if (!url) throw new Fallo("falta BADULAQUE_URL: indica la dirección MCP de la pasarela en la variable de entorno BADULAQUE_URL.", 2);
   try {
     new URL(url);
   } catch {
     throw new Fallo("BADULAQUE_URL no es una dirección válida", 2);
   }
   CLAVE = clave;
-  return { pasarela: new Pasarela(url, clave) };
+  return { modo, pasarela: new Pasarela(url, clave, { sinEstado: false, varClave: "BADULAQUE_CLAVE" }) };
 }

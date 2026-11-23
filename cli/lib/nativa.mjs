@@ -3,7 +3,7 @@
 
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { Fallo, configurar, sanear } from "./pasarela.mjs";
+import { Fallo, configurar, modoDeConexion, sanear } from "./pasarela.mjs";
 
 export { Fallo };
 
@@ -63,21 +63,20 @@ export function analizar(tokens, def, uso = "") {
   return { pos, op };
 }
 
-// --- subcomandos: alias en inglés y errores que corrigen (lo comparten todas las CLIs nativas) ---------------------------------------
+// --- subcomandos: alias en inglés y errores que corrigen ---------------------------------------
 // Los modelos prueban `memoria search` antes que `memoria buscar`. En vez de fallar, el nombre en inglés vale como alias del
-// español SOLO si la CLI tiene ese comando (la primera opción de cada lista que exista en su tabla de subcomandos); y si no
-// se entiende, el error dice en una línea qué querías decir y qué comandos hay. No se admiten alias de comandos que borran.
+// español SOLO si la CLI tiene ese comando; y si no se entiende, el error dice en una línea qué querías decir y qué comandos hay.
+// No se admiten alias para comandos destructivos (borrar).
 const SINONIMOS = {
   search: ["buscar"], find: ["buscar"], query: ["buscar"],
-  read: ["leer", "ver"], show: ["leer", "ver"], cat: ["leer", "ver"], get: ["leer", "ver"], view: ["leer", "ver"], open: ["leer", "ver"],
-  list: ["lista", "listar", "eventos", "buscar"], ls: ["lista", "listar", "eventos", "buscar"], lista: ["listar", "eventos", "buscar"],
-  lists: ["listas"], events: ["eventos"], calendars: ["calendarios"], recent: ["recientes"], history: ["historial"], links: ["enlaces"],
-  status: ["estado"], accounts: ["cuentas"], folders: ["carpetas", "libretas"], drafts: ["borradores"], rules: ["reglas"],
-  attachments: ["adjuntos"], attachment: ["adjunto"], thread: ["hilo"], birthdays: ["cumples"], slots: ["huecos"], free: ["huecos"],
-  create: ["crear"], add: ["crear"], new: ["nueva", "crear"], edit: ["editar"], update: ["editar", "actualizar"],
-  move: ["mover"], mv: ["mover"], copy: ["copiar"], cp: ["copiar"], upload: ["subir"], send: ["enviar"], reply: ["responder"],
-  forward: ["reenviar"], archive: ["archivar"], mark: ["marcar"], label: ["etiquetar"], ask: ["preguntar"],
-  done: ["completar"], complete: ["completar"], publish: ["publicar"], write: ["escribir"], recover: ["recuperar"], restore: ["recuperar"]
+  read: ["leer"], show: ["leer"], cat: ["leer"], get: ["leer"], view: ["leer"], open: ["leer"],
+  list: ["lista"], ls: ["lista"],
+  recent: ["recientes"], history: ["historial"], links: ["enlaces"], lint: ["revisar"], check: ["revisar"],
+  status: ["estado"], clone: ["copia"], pull: ["actualizar"], sync: ["actualizar"], update: ["actualizar", "editar"],
+  create: ["crear"], add: ["crear"], new: ["crear"],
+  edit: ["editar"], write: ["escribir"],
+  move: ["mover"], mv: ["mover"], rename: ["mover"],
+  attach: ["adjuntar"], revert: ["revertir"], undo: ["revertir"], publish: ["publicar"]
 };
 
 /** ¿Es la petición de ayuda? (`--help`, `-h`, `help`, `ayuda`) */
@@ -130,11 +129,13 @@ export function textoDe(valor, archivo) {
 }
 
 /**
- * Llama a una herramienta del Badulaque (`buscador_usar`) y devuelve { texto, bloques, json, error }. `bloques` son los
- * textos de cada contenido; `json` es el texto leído como JSON, o undefined si no lo es. No valida contra el esquema: estas CLIs saben qué pasan.
+ * Llama a una herramienta del servidor (`nombre` sin prefijo, p. ej. `create`, `read`, `publish`) directamente o a través
+ * de la pasarela (`buscador_usar` con `memoria_<nombre>`), y devuelve { texto, bloques, json, error }.
  */
 export async function usar(ctx, nombre, argumentos = {}) {
-  const r = await ctx.pasarela.llamar("buscador_usar", { nombre, argumentos });
+  const r = ctx.modo === "directo"
+    ? await ctx.pasarela.llamar(nombre, argumentos)
+    : await ctx.pasarela.llamar("buscador_usar", { nombre: `memoria_${nombre}`, argumentos });
   const partes = [];
   for (const c of r.content ?? []) {
     if (c?.type === "text") partes.push(c.text);
@@ -159,8 +160,8 @@ export async function usarOFallar(ctx, nombre, argumentos = {}) {
   return r;
 }
 
-/** Abre la sesión con el Badulaque (BADULAQUE_CLAVE), corre `fn(ctx)` y la cierra. */
-export async function conBadulaque(fn) {
+/** Abre la conexión con el servidor (directo o pasarela), corre `fn(ctx)` y la cierra. */
+export async function conServidor(fn) {
   const ctx = configurar();
   try {
     return await fn(ctx);
@@ -168,6 +169,8 @@ export async function conBadulaque(fn) {
     await ctx.pasarela.cerrar();
   }
 }
+
+export const conBadulaque = conServidor;
 
 /** Corre un programa y devuelve { estado, salida, error }; la salida es texto. */
 export function correr(programa, args, opciones = {}) {
@@ -214,6 +217,11 @@ export function imprimirJson(valor) {
   return 0;
 }
 
+/** Nombre de herramienta tal como se enviará (directo: `write`; pasarela: `memoria_write`). */
+export function nombreHerramienta(herramienta) {
+  return modoDeConexion() === "directo" ? herramienta : `memoria_${herramienta}`;
+}
+
 /**
  * Las escrituras aceptan --simular: enseñan qué herramienta llamarían y con qué argumentos, y no llaman a nada.
  * Devuelve true si simuló (el comando acaba ahí). Los textos muy largos (base64) se abrevian.
@@ -221,6 +229,6 @@ export function imprimirJson(valor) {
 export function simular(op, herramienta, argumentos) {
   if (!op.simular) return false;
   const corto = v => (typeof v === "string" && v.length > 300 ? `${v.slice(0, 60)}… (${v.length} caracteres)` : v);
-  imprimirJson({ simulado: true, herramienta, argumentos: Object.fromEntries(Object.entries(argumentos).map(([k, v]) => [k, corto(v)])) });
+  imprimirJson({ simulado: true, herramienta: nombreHerramienta(herramienta), argumentos: Object.fromEntries(Object.entries(argumentos).map(([k, v]) => [k, corto(v)])) });
   return true;
 }
