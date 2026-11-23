@@ -29,7 +29,8 @@ export interface Rules {
 	exclude: string[];
 	frontmatter: { required: boolean; action: RuleAction };
 	type: { field: string; allowed: string[] | null; untypedFolders: string[]; attachmentType: string | null; action: RuleAction };
-	obsolete: { patterns: ObsoletePattern[]; action: RuleAction };
+	/** `allowDated`: a mention on a line that gives a date (outside its origin markers) is history, not an instruction. */
+	obsolete: { patterns: ObsoletePattern[]; allowDated: boolean; action: RuleAction };
 	appendOnly: { sections: string[]; action: RuleAction };
 	forbiddenSections: { sections: string[]; fix: string | null; action: RuleAction };
 	/** Allowed headings of `level`, in order, per type. */
@@ -72,6 +73,8 @@ export interface CheckOptions {
 	 * same section of another note of the same submission (`checkBatch`).
 	 */
 	allowRemoved?: string[];
+	/** Findings (keys) this write may add because they left another note of the same submission (`checkBatch`). */
+	allowAdded?: string[];
 	/** Part of a submission of several notes (a `publish`, a commit): changes the advice of `append_only`. */
 	batch?: boolean;
 }
@@ -123,7 +126,7 @@ export function parseRules(value: unknown): Rules | null {
 		exclude: doc.exclude === undefined ? [] : strings(doc.exclude, "rules.exclude", (v) => FOLDER.test(v)),
 		frontmatter: { required: false, action: "block" },
 		type: { field: "type", allowed: null, untypedFolders: [], attachmentType: null, action: "block" },
-		obsolete: { patterns: [], action: "block" },
+		obsolete: { patterns: [], allowDated: true, action: "block" },
 		appendOnly: { sections: [], action: "block" },
 		forbiddenSections: { sections: [], fix: null, action: "block" },
 		templates: { byType: {}, level: 2, action: "warn" },
@@ -156,10 +159,12 @@ export function parseRules(value: unknown): Rules | null {
 
 	const obsolete = table(doc.obsolete, "rules.obsolete");
 	if (obsolete) {
-		unknownKeys(obsolete, "rules.obsolete", ["patterns", "action"]);
+		unknownKeys(obsolete, "rules.obsolete", ["patterns", "allow_dated", "action"]);
 		if (!Array.isArray(obsolete.patterns) || obsolete.patterns.length === 0) throw new Error("rules.obsolete.patterns must be a non-empty list");
+		if (obsolete.allow_dated !== undefined && typeof obsolete.allow_dated !== "boolean") throw new Error("rules.obsolete.allow_dated must be true or false");
 		rules.obsolete = {
 			action: action(obsolete, "rules.obsolete", "block"),
+			allowDated: obsolete.allow_dated ?? true,
 			patterns: obsolete.patterns.map((entry, i) => {
 				const key = `rules.obsolete.patterns[${i}]`;
 				const t: Record<string, unknown> = typeof entry === "string" ? { pattern: entry } : (table(entry, key) ?? {});
@@ -304,6 +309,18 @@ function typeLine(p: Parsed, field: string): number | null {
 	return i < 0 ? null : p.yamlStart + i + 1;
 }
 
+/** A full date (YYYY-MM-DD). */
+const DATE = /(?<!\d)\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])(?!\d)/;
+
+/**
+ * Whether a line dates what it says, so a retired name in it is history («quitado el 2026-11-22», «Del 2026-10-18 al
+ * 2026-11-15»), not an instruction. Dates inside `[…]` do not count: an origin marker like «[Claude, 2026-11-21,
+ * sesión]» says where a fact comes from, not until when it held.
+ */
+export function datesThePast(line: string): boolean {
+	return DATE.test(line.replace(/\[\[[^\]\n]*\]\]/g, " ").replace(/\[[^\]\n]*\]/g, " "));
+}
+
 /**
  * Violations a note has as it stands (every rule but `append_only`, which compares two versions).
  * Used for each side of a write and, on its own, by `lint` and `my-memory check`.
@@ -337,6 +354,7 @@ export function noteViolations(rules: Rules, path: string, text: string, only?: 
 		rules.obsolete.patterns.forEach((pat, i) => {
 			if (pat.except.some((e) => pathMatches(path, e))) return;
 			p.lines.forEach((line, l) => {
+				if (rules.obsolete.allowDated && datesThePast(line)) return;
 				for (const m of line.matchAll(pat.regex)) {
 					if (!m[0]) continue;
 					add("obsolete", rules.obsolete.action, `${i}:${m[0].toLowerCase()}`, l + 1, `«${clip(m[0], 60)}» is a retired name this memory no longer uses`, pat.fix ?? "remove it or write the name of what replaced it");
@@ -428,6 +446,7 @@ export function checkWrite(rules: Rules, after: NoteText, before: NoteText | nul
 	const changed = changedLines(before ? before.text.split("\n").map((l) => l.replace(/\r$/, "")) : [], afterLines);
 	const wasCount = new Map<string, number>();
 	for (const v of was) wasCount.set(v.key, (wasCount.get(v.key) ?? 0) + 1);
+	for (const key of opts.allowAdded ?? []) wasCount.set(key, (wasCount.get(key) ?? 0) + 1);
 	const groups = new Map<string, Violation[]>();
 	for (const v of now) groups.set(v.key, [...(groups.get(v.key) ?? []), v]);
 	for (const [key, group] of groups) {
@@ -488,14 +507,28 @@ export function checkWrite(rules: Rules, after: NoteText, before: NoteText | nul
 }
 
 /**
- * The notes of one submission (several notes in one `publish`, or one commit), judged together: a line that leaves an
- * append-only section of one note is not lost if the same line, unchanged, enters that section of another note of
- * the submission, as when a note is split. Each line that enters covers one line that leaves.
+ * The notes of one submission (several notes in one `publish`, or one commit), judged together, so that splitting or
+ * merging notes moves what they had instead of adding it: a line that leaves an append-only section of one note is
+ * not lost if the same line, unchanged, enters that section of another note; and a retired name that leaves one note
+ * is not new where it enters another. Each one that enters covers one that leaves. Entries without `after` are notes
+ * the submission deletes: they only give. The result has one check per entry (empty for deleted notes).
  */
-export function checkBatch(rules: Rules, entries: { after: NoteText; before: NoteText | null; opts?: CheckOptions }[]): WriteCheck[] {
+export function checkBatch(rules: Rules, entries: { after: NoteText | null; before: NoteText | null; opts?: CheckOptions }[]): WriteCheck[] {
 	const entering = new Map<string, number>();
-	for (const e of entries) for (const l of appendOnlyAdded(rules, e.before?.text ?? null, e.after.text)) entering.set(l, (entering.get(l) ?? 0) + 1);
-	return entries.map((e) => {
+	const leaving = new Map<string, number>();
+	const counts = (n: NoteText | null) => {
+		const out = new Map<string, number>();
+		if (n) for (const v of noteViolations(rules, n.path, n.text, ["obsolete"])) out.set(v.key, (out.get(v.key) ?? 0) + 1);
+		return out;
+	};
+	const mentions = entries.map((e) => ({ was: counts(e.before), now: counts(e.after) }));
+	entries.forEach((e, i) => {
+		if (e.after) for (const l of appendOnlyAdded(rules, e.before?.text ?? null, e.after.text)) entering.set(l, (entering.get(l) ?? 0) + 1);
+		const { was, now } = mentions[i] as (typeof mentions)[number];
+		for (const [key, n] of was) if (n > (now.get(key) ?? 0)) leaving.set(key, (leaving.get(key) ?? 0) + n - (now.get(key) ?? 0));
+	});
+	return entries.map((e, i) => {
+		if (!e.after) return { blocking: [], warnings: [], existing: [] };
 		const moved: string[] = [];
 		if (e.before) {
 			for (const l of appendOnlyAdded(rules, e.after.text, e.before.text)) {
@@ -505,7 +538,15 @@ export function checkBatch(rules: Rules, entries: { after: NoteText; before: Not
 				moved.push(l);
 			}
 		}
-		return checkWrite(rules, e.after, e.before, { ...e.opts, allowRemoved: [...(e.opts?.allowRemoved ?? []), ...moved], batch: true });
+		const carried: string[] = [];
+		const { was, now } = mentions[i] as (typeof mentions)[number];
+		for (const [key, n] of now) {
+			for (let extra = n - (was.get(key) ?? 0); extra > 0 && (leaving.get(key) ?? 0) > 0; extra--) {
+				leaving.set(key, (leaving.get(key) ?? 0) - 1);
+				carried.push(key);
+			}
+		}
+		return checkWrite(rules, e.after, e.before, { ...e.opts, allowRemoved: [...(e.opts?.allowRemoved ?? []), ...moved], allowAdded: [...(e.opts?.allowAdded ?? []), ...carried], batch: true });
 	});
 }
 
@@ -586,7 +627,7 @@ export function describeRules(rules: Rules | null): string | null {
 	}
 	if (rules.forbiddenSections.sections.length) parts.push(`no ${rules.forbiddenSections.sections.map((s) => `«## ${s}»`).join(", ")} sections`);
 	for (const [type, sections] of Object.entries(rules.templates.byType)) parts.push(`${type} notes use the sections ${sections.join(" · ")}, in that order`);
-	if (rules.obsolete.patterns.length) parts.push("names of retired tools and services are refused");
+	if (rules.obsolete.patterns.length) parts.push(`names of retired tools and services are refused${rules.obsolete.allowDated ? " (except on a line that dates them as past, e.g. «until 2026-11-22»)" : ""}`);
 	if (rules.size.maxChars) parts.push(`notes stay under ${rules.size.maxChars.toLocaleString("en")} characters`);
 	if (!parts.length) return null;
 	return `Every write is checked against this memory's rules: ${parts.join("; ")}. A write that adds a violation fails with RULES_VIOLATED and says, per problem, the line and how to fix it; problems a note already had only warn.`;

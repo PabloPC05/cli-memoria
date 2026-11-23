@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultConventions, parseConventions } from "../src/conventions.js";
-import { appendOnlyAdded, checkBatch, checkWrite, describeRules, formatViolation, noteViolations, parseRules, type Rules, type WriteCheck } from "../src/rules.js";
+import { appendOnlyAdded, checkBatch, checkWrite, datesThePast, describeRules, formatViolation, noteViolations, parseRules, type Rules, type WriteCheck } from "../src/rules.js";
 import { RULES } from "./rules-config.js";
 
 
@@ -127,6 +127,22 @@ describe("retired names", () => {
 		expect(checkWrite(loose, { path: "topics/x.md", text: person("Y lisa ia.\n", "Notes") }, null).blocking.map((v) => v.rule)).toEqual(["obsolete"]);
 	});
 
+	it("takes a mention on a line that dates it as history, not as an instruction", () => {
+		for (const line of ["Se usaba memoria_search hasta el 2026-11-22.", "`memoria_read` quitado el 2026-11-22 [Pablo, 2026-11-22].", "Del 2026-10-18 al 2026-11-15, Lisa IA respondía en la web."]) {
+			expect(datesThePast(line)).toBe(true);
+			expect(check("topics/x.md", person(`${line}\n`, "Notes"), null)).toEqual({ blocking: [], warnings: [], existing: [] });
+		}
+		// A date only inside an origin marker or a link, or only a month, is not a cut-off: still an instruction.
+		for (const line of ["Busca con memoria_search [Claude, 2026-11-21, sesión].", "Usa memoria_read, ver [[2026-11-22-cambios]].", "Usa memoria_read (desde 2026-11)."]) {
+			expect(datesThePast(line)).toBe(false);
+			expect(rulesOf(check("topics/x.md", person(`${line}\n`, "Notes"), null), "blocking")).toEqual(["obsolete"]);
+		}
+		const strict = parseConventions(RULES.replace("[rules.obsolete]\n", "[rules.obsolete]\nallow_dated = false\n")).rules as Rules;
+		expect(strict.obsolete.allowDated).toBe(false);
+		expect(checkWrite(strict, { path: "topics/x.md", text: person("Se usaba memoria_search hasta el 2026-11-22.\n", "Notes") }, null).blocking).toHaveLength(1);
+		expect(rules.obsolete.allowDated).toBe(true);
+	});
+
 	it("leaves alone the notes a pattern excepts", () => {
 		expect(check("projects/historia-de-lisa.md", person("Antes se llamaba Lisa IA.\n", "Work"), null).blocking).toEqual([]);
 		expect(rulesOf(check("projects/historia-de-lisa.md", person("Usa memoria_read.\n", "Work"), null), "blocking")).toEqual(["obsolete"]);
@@ -202,6 +218,42 @@ describe("append-only sections across the notes of one submission", () => {
 			{ after: at("people/ana/trabajo-de-ana.md", sub("- Pablo, 2026-11-02: «vive en Vigo»\n")), before: null },
 		]);
 		expect(twice.map((c) => c.blocking.length)).toEqual([0, 1, 0]);
+	});
+});
+
+describe("retired names across the notes of one submission", () => {
+	const at = (path: string, text: string) => ({ path, text });
+	const mother = person("## Quién es\n\nPrima.\n\n## Herramientas\n\nUsa `buscador_usar` y `memoria_read`.\n", "Notes");
+	const motherShort = person("## Quién es\n\nPrima.\n", "Notes");
+	const child = (body: string) => person(`${body}\n`, "Notes");
+
+	it("a mention that leaves one note and enters another is not new; one more is", () => {
+		const split = checkBatch(rules, [
+			{ after: at("topics/a.md", motherShort), before: at("topics/a.md", mother) },
+			{ after: at("topics/a/herramientas.md", child("Usa `buscador_usar` y `memoria_read`.")), before: null },
+		]);
+		expect(split.map((c) => c.blocking.length)).toEqual([0, 0]);
+		const more = checkBatch(rules, [
+			{ after: at("topics/a.md", motherShort), before: at("topics/a.md", mother) },
+			{ after: at("topics/a/herramientas.md", child("Usa `buscador_usar` y `memoria_read`.\n\nY otra vez `memoria_read`.")), before: null },
+		]);
+		expect(more[1]?.blocking.map((v) => [v.rule, v.message])).toEqual([["obsolete", "«memoria_read» is a retired name this memory no longer uses"]]);
+		// Nothing left the other note: the mention is new.
+		const fresh = checkBatch(rules, [
+			{ after: at("topics/a.md", mother), before: at("topics/a.md", mother) },
+			{ after: at("topics/a/herramientas.md", child("Usa `memoria_read`.")), before: null },
+		]);
+		expect(fresh[1]?.blocking).toHaveLength(1);
+	});
+
+	it("a note the submission deletes gives what it had (merging notes)", () => {
+		const merged = checkBatch(rules, [
+			{ after: null, before: at("topics/vieja.md", mother) },
+			{ after: at("topics/nueva.md", child("Prima.\n\nUsa `buscador_usar` y `memoria_read`.")), before: at("topics/nueva.md", child("Prima.")) },
+		]);
+		expect(merged.map((c) => c.blocking.length)).toEqual([0, 0]);
+		// What came over is an old problem, now in the other note: it warns, it does not block.
+		expect(merged[1]?.existing.map((v) => v.rule)).toEqual(["obsolete"]);
 	});
 });
 

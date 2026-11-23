@@ -117,6 +117,9 @@ export interface WriteResult {
 
 type NoteRef = { path?: string; name?: string };
 
+/** A note of a `publish` for the rules; `after` null for a note it deletes (it only gives what leaves it). */
+type BatchEntry = { after: NoteText | null; before: NoteText | null; opts: CheckOptions & { quiet?: boolean } };
+
 /** One change of a `publish`: create {path, content}, write {path, content, hash}, move {from, to, hash}, delete {path, hash}. */
 export interface PublishChange {
 	op: "create" | "write" | "move" | "delete";
@@ -173,7 +176,7 @@ export class MemoryService {
 	private syncTimer: NodeJS.Timeout | null = null;
 	private syncRequested = false;
 	/** While a `publish` runs: the notes it writes, judged together at the end instead of one by one. */
-	private rulesBatch: { after: NoteText; before: NoteText | null; opts: CheckOptions & { quiet?: boolean } }[] | null = null;
+	private rulesBatch: BatchEntry[] | null = null;
 	/** Background embedding of sections; null when `[embeddings]` is not configured. */
 	readonly embedder: Embedder | null = null;
 
@@ -674,11 +677,11 @@ export class MemoryService {
 	}
 
 	/** The notes of a `publish`, judged together (see `checkBatch`): RULES_VIOLATED for all its problems at once. */
-	private judgeBatch(entries: { after: NoteText; before: NoteText | null; opts: CheckOptions & { quiet?: boolean } }[]): Warning[] {
+	private judgeBatch(entries: BatchEntry[]): Warning[] {
 		const rules = this.conventions.rules;
 		if (!rules || entries.length === 0) return [];
 		const checks = checkBatch(rules, entries);
-		const results = entries.map((e, i) => ({ path: e.after.path, check: checks[i] as WriteCheck, quiet: e.opts.quiet ?? false }));
+		const results = entries.flatMap((e, i) => (e.after ? [{ path: e.after.path, check: checks[i] as WriteCheck, quiet: e.opts.quiet ?? false }] : []));
 		if (results.some((r) => r.check.blocking.length)) {
 			throw new MemoryError("RULES_VIOLATED", batchBlockingMessage(results), { violations: results.flatMap((r) => r.check.blocking.map((v) => ({ path: r.path, ...violationJson(v) }))) });
 		}
@@ -726,9 +729,14 @@ export class MemoryService {
 		try {
 			const changes = parseNameStatus(await this.git.out(["diff", "-M", "--name-status", from, to]));
 			// What arrived is one submission: a line may leave the Fuentes of one note for those of another.
-			const entries: { after: NoteText; before: NoteText | null }[] = [];
+			const entries: { after: NoteText | null; before: NoteText | null }[] = [];
 			for (const c of changes) {
-				if (c.status === "D" || !rulesApply(this.conventions, c.path)) continue;
+				if (c.status === "D") {
+					const gone = rulesApply(this.conventions, c.path) ? await this.git.run(["show", `${from}:${c.path}`], { allowFail: true }) : null;
+					if (gone?.code === 0) entries.push({ after: null, before: { path: c.path, text: gone.stdout } });
+					continue;
+				}
+				if (!rulesApply(this.conventions, c.path)) continue;
 				const after = await this.git.run(["show", `${to}:${c.path}`], { allowFail: true });
 				if (after.code !== 0) continue;
 				const beforePath = c.status === "R" && c.from ? c.from : c.path;
@@ -737,7 +745,7 @@ export class MemoryService {
 				entries.push({ after: { path: c.path, text: after.stdout }, before: previous });
 			}
 			checkBatch(rules, entries).forEach((check, i) => {
-				if (check.blocking.length) this.log("warn", "rules.remote_violations", { path: entries[i]?.after.path, from, to, violations: check.blocking.map(violationJson) });
+				if (check.blocking.length) this.log("warn", "rules.remote_violations", { path: entries[i]?.after?.path, from, to, violations: check.blocking.map(violationJson) });
 			});
 		} catch (error) {
 			this.log("warn", "rules.remote_check_failed", { error: String(error) });
@@ -1361,6 +1369,8 @@ export class MemoryService {
 		await this.assertNoSymlink(row.path);
 		const current = await this.readText(row.path);
 		this.checkHash(row.path, current, args.hash, true);
+		// In a publish, what this note had may go to another note of it (merging notes).
+		if (this.rulesBatch && rulesApply(this.conventions, row.path)) this.rulesBatch.push({ after: null, before: { path: row.path, text: current }, opts: {} });
 		const binary = row.attachment ? joinPath(dirOf(row.path), row.attachment) : null;
 		const backlinks = [...this.index.linksIn(row.path), ...(binary ? this.index.linksIn(binary) : [])].filter((l) => l.srcPath !== row.path);
 		if (backlinks.length) {

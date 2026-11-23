@@ -62,28 +62,36 @@ async function judge(git: Git, conventions: Conventions, pairs: { from: string; 
 	const rules = rulesOf(conventions);
 	const specs: string[] = [];
 	const plan = pairs.map(({ from, to, change, group }) => {
-		if (change.status === "D" || !rulesApply(conventions, change.path)) return null;
 		const beforePath = change.status === "R" && change.from ? change.from : change.path;
-		const hasBefore = from !== EMPTY_TREE && (change.status === "M" || change.status === "T" || change.status === "R") && rulesApply(conventions, beforePath);
-		specs.push(`${to}:${change.path}`);
+		// A deleted note is part of the submission too: what it had may have gone to another note.
+		const deleted = change.status === "D";
+		if (!rulesApply(conventions, deleted ? beforePath : change.path)) return null;
+		const hasBefore = from !== EMPTY_TREE && (deleted || change.status === "M" || change.status === "T" || change.status === "R") && rulesApply(conventions, beforePath);
+		if (deleted && !hasBefore) return null;
+		if (!deleted) specs.push(`${to}:${change.path}`);
 		if (hasBefore) specs.push(`${from}:${beforePath}`);
-		return { change, beforePath, hasBefore, group };
+		return { change, beforePath, hasBefore, deleted, group };
 	});
 	const texts = await git.blobs(specs);
 	let k = 0;
-	const groups = new Map<number, { index: number; after: NoteText; before: NoteText | null }[]>();
+	const groups = new Map<number, { index: number; after: NoteText | null; before: NoteText | null }[]>();
 	plan.forEach((p, index) => {
 		if (!p) return;
-		const after = texts[k++];
+		const after = p.deleted ? null : texts[k++];
 		const before = p.hasBefore ? texts[k++] : null;
-		if (after === null || after === undefined) return;
-		const entry = { index, after: { path: p.change.path, text: after }, before: before === null || before === undefined ? null : { path: p.beforePath, text: before } };
+		if (!p.deleted && (after === null || after === undefined)) return;
+		const entry = {
+			index,
+			after: p.deleted ? null : { path: p.change.path, text: after as string },
+			before: before === null || before === undefined ? null : { path: p.beforePath, text: before },
+		};
 		groups.set(p.group, [...(groups.get(p.group) ?? []), entry]);
 	});
 	const out: FileCheck[][] = pairs.map(() => []);
 	for (const entries of groups.values()) {
 		checkBatch(rules, entries).forEach((check, i) => {
 			const e = entries[i] as (typeof entries)[number];
+			if (!e.after) return;
 			const change = (plan[e.index] as { change: FileChange }).change;
 			out[e.index] = [{ path: change.path, ...(change.status === "R" ? { from: change.from } : {}), check }];
 		});

@@ -270,6 +270,34 @@ describe("publish: several commits as one submission", () => {
 		expect((m.list({ folder: "people" }) as { notes: { path: string }[] }).notes.map((n) => n.path)).toEqual(["people/ana.md"]);
 	});
 
+	it("a retired name may go from the note being split to the new note, but no more of it", async () => {
+		const m = await setup();
+		const head = await m.git.head();
+		const mother = await readFile(join(m.opts.repoDir, "topics/vieja.md"), "utf8");
+		const short = mother.replace("Usa `memoria_search` para buscar.\n\n", "");
+		const send = (body: string) =>
+			m.publish(writer, {
+				commits: [
+					{
+						reason: "Parte la nota vieja",
+						changes: [
+							{ op: "write", path: "topics/vieja.md", content: short, hash: blobHash(mother) },
+							{ op: "create", path: "topics/vieja/buscar.md", content: `${fm("Buscar", "Notes")}${body}\n` },
+						],
+					},
+				],
+			});
+		const e = await refused(send("Usa `memoria_search` para buscar, y `memoria_search` otra vez."));
+		expect(e.details.violations).toMatchObject([{ path: "topics/vieja/buscar.md", rule: "obsolete" }]);
+		expect(await m.git.head()).toBe(head);
+		const r = await send("Usa `memoria_search` para buscar.");
+		expect(r.commits).toHaveLength(1);
+		// Written as history, with its cut-off date on the line, it is not a violation anywhere.
+		const dated = await m.edit(writer, { path: "people/ana.md", edits: [{ old_string: "Prima de Pablo.", new_string: "Prima de Pablo. Antes se buscaba con memoria_search (hasta el 2026-11-22)." }], reason: "Historia" });
+		expect(dated.commit).not.toBe(r.commits[0]?.commit);
+		expect(JSON.stringify(dated.warnings)).not.toContain("obsolete");
+	});
+
 	it("any failed change refuses everything, saying which commit and change", async () => {
 		const m = await setup();
 		const head = await m.git.head();
