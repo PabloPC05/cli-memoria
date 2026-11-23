@@ -7,6 +7,7 @@ Informe de la rama `normas-al-escribir` de cli-memoria (antes my-memory), 2026-1
 - **El código pone las normas.** Cada escritura del servidor (`create`, `edit`, `write`, `move`, `revert`, `attach`) se comprueba contra las reglas que la memoria declara en la tabla `[rules]` de su `memory.toml`. Un agente que no lea o no siga `AGENTS.md` no puede saltárselas: el servidor rechaza la escritura con `RULES_VIOLATED`.
 - **Solo bloquea lo nuevo.** La versión anterior de la nota es la referencia. Lo que la nota ya tenía mal no impide editarla (vuelve como aviso `RULES_EXISTING`), pero una escritura no puede añadir problemas.
 - **Mensajes que corrigen.** Cada problema ocupa una línea con la regla, la línea de la nota, qué está mal y cómo arreglarlo (principio de SWE-agent, arXiv 2405.15793). Por ejemplo: `obsolete, line 14: «memoria_search» is a retired name this memory no longer uses. Fix: the memoria_* tools are gone: agents use the memoria CLI (memoria buscar, leer, copia, publicar…) through the Badulaque.`
+- **Partir una nota en un solo envío.** Una línea que sale del `## Fuentes` de una nota no cuenta como borrada si entra, sin cambios, en el `## Fuentes` de otra nota del mismo envío. Un envío es una llamada a la herramienta nueva `publish` (lo que puede mandar `memoria publicar`) o un mismo commit de varias notas. En escrituras sueltas la regla sigue igual, y el rechazo sugiere hacer la partición en un solo envío.
 - **Configurable y publicable.** Sin `[rules]` el servidor hace exactamente lo de hoy. Las reglas viven en `memory.toml`, que ninguna herramienta puede escribir: solo Pablo, con git.
 - **Sobre la memoria real** (copia de solo lectura, HEAD `4c12c7f`):
   - Hoy, 56 de 282 notas tienen algún problema con las reglas propuestas.
@@ -40,7 +41,7 @@ Todas son opcionales: cada tabla de `[rules]` que falta es una regla que no se a
 | `frontmatter` | La nota empieza con frontmatter entre `---` | block | Si antes lo tenía y ahora no, o si la nota es nueva |
 | `type` | El campo `type` existe y está en la lista cerrada. Las carpetas de `untyped_folders` no lo llevan | block | Por valor: mantener `type: Topic` avisa, pero cambiarlo a otro inválido bloquea |
 | `obsolete` | Nombres retirados, como expresiones regulares que distinguen mayúsculas. Cada patrón puede llevar su `fix` y notas o carpetas exentas (`except`). Cuenta también dentro de `código` | block | Por texto encontrado: una escritura no puede subir la cuenta, así que retocar la línea que ya lo tenía no bloquea |
-| `append_only` | Las líneas existentes de las secciones listadas (`Fuentes`) no se cambian ni se borran. Se pueden añadir líneas en cualquier sitio y reordenar; no cuentan los espacios del final ni las líneas en blanco | block | Línea a línea, entre la versión anterior y la nueva |
+| `append_only` | Las líneas existentes de las secciones listadas (`Fuentes`) no se cambian ni se borran. Se pueden añadir líneas en cualquier sitio y reordenar; no cuentan los espacios del final ni las líneas en blanco. En un envío de varias notas, una línea puede pasar sin cambios al `## Fuentes` de otra nota del envío | block | Línea a línea, entre la versión anterior y la nueva. En un envío, cada línea que entra en otra nota cubre una que sale |
 | `forbidden_section` | Encabezados prohibidos, de cualquier nivel, sin distinguir mayúsculas ni tildes, fuera de bloques de código | block | Por encabezado |
 | `template` | Las secciones de nivel 2 de un tipo con plantilla son las de la plantilla y van en su orden | warn | Por encabezado fuera de la plantilla o fuera de orden |
 | `size` | Caracteres de la nota por encima de `max_chars`. Las notas compañeras de adjuntos quedan fuera | warn | Si cruza el límite, o si ya lo pasaba y crece |
@@ -52,11 +53,12 @@ Casos especiales por ruta:
 - **`move`:** la nota se juzga en su destino frente a lo que era en su origen. Sacarla del archivo, o de una carpeta sin tipo, convierte sus problemas en nuevos. Las notas cuyos enlaces reescribe solo se bloquean si la reescritura añade algo, y no reciben avisos de lo viejo.
 - **`revert`:** se compara con la nota como está ahora. Puede quitar de `Fuentes` las líneas que añadió el commit que deshace, y ninguna otra. Así se puede deshacer una fuente inventada, pero no volver a meter un nombre retirado que alguien limpió. Una nota borrada que vuelve se compara con su última versión: vuelve tal cual era.
 - **`attach`:** solo comprueba el frontmatter que escribe el servidor. El texto extraído es el documento tal cual. El tipo sale del nuevo parámetro `type` de la herramienta o, si no lo hay, de `attachment_type`.
+- **`publish` (nueva):** varios commits de cambios (`create`, `write`, `move`, `delete`) como un solo envío, que es lo que manda `memoria publicar`. Cada commit queda como un commit con su razón y cada cambio ve lo que hicieron los anteriores. Las reglas se juzgan al final sobre todo el envío, y es todo o nada: si falla un cambio o una regla, la rama, el árbol de trabajo y el índice vuelven a como estaban y no se empuja nada. El error dice qué commit y qué cambio fallaron. Devuelve los commits y el hash nuevo de cada nota, para que la copia de trabajo siga sin preguntar.
 - **Commits del remoto:** no se pueden rechazar porque ya están publicados. Lo que añaden se registra en el log como `rules.remote_violations`, y `my-memory check` puede rechazarlos antes como hook del servidor git.
 
 Además, las instrucciones MCP del servidor resumen las reglas en un párrafo, sin repetir los nombres retirados, para acertar a la primera:
 
-> Every write is checked against this memory's rules: every note starts with frontmatter; «type» is one of Profile, Preference, Work, People, Notes (except notes in skills/); the existing lines of «## Fuentes» are never changed or removed, only added to; no «## Historia» sections; People notes use the sections Quién es · Relación con Pablo · Contacto · Trato · Asuntos · Pendiente · Fuentes, in that order; names of retired tools and services are refused; notes stay under 20,000 characters. A write that adds a violation fails with RULES_VIOLATED and says, per problem, the line and how to fix it; problems a note already had only warn.
+> Every write is checked against this memory's rules: every note starts with frontmatter; «type» is one of Profile, Preference, Work, People, Notes (except notes in skills/); the existing lines of «## Fuentes» are never changed or removed, only added to (to split a note, send both notes in one publish: a line may then move unchanged to the same section of the other note); no «## Historia» sections; People notes use the sections Quién es · Relación con Pablo · Contacto · Trato · Asuntos · Pendiente · Fuentes, in that order; names of retired tools and services are refused; notes stay under 20,000 characters. A write that adds a violation fails with RULES_VIOLATED and says, per problem, the line and how to fix it; problems a note already had only warn.
 
 ### Respuestas del servidor
 
@@ -119,17 +121,18 @@ Un `memory.toml` mal escrito no se carga. El mensaje dice qué clave falla, por 
 | `revert` | Reglas completas frente a la nota de ahora; `Fuentes` puede perder solo lo que añadió el commit que se deshace |
 | `attach` | Frontmatter y tipo de la nota compañera |
 | `delete` | No escribe contenido: sin cambios |
-| `memoria publicar` | Pasa nota a nota por `create`, `write`, `move` y `delete`, así que se aplica todo lo anterior. Comparar con la versión del servidor es justo «solo lo nuevo». Probado imitando su protocolo |
+| `publish` | Todas las reglas de cada cambio, juzgadas juntas sobre el envío entero; todo o nada |
+| `memoria publicar` | Hoy pasa nota a nota por `create`, `write`, `move` y `delete`, así que se aplica todo lo anterior. Comparar con la versión del servidor es justo «solo lo nuevo». Probado imitando su protocolo. Para mover líneas de Fuentes entre notas tiene que mandar la publicación como un `publish` (ver la sección 8) |
 | Remoto git | Log `rules.remote_violations`, más `my-memory check` como hook |
 | `lint` | Nuevo tipo `rules`: una entrada por nota con `by_rule` y una línea por problema. Solo aparece si hay `[rules]`. También en `my-memory lint --kind rules` |
-| `my-memory check <repo> [<rev> \| <de>..<a> [--each]] [--conventions f] [--json]` | Las mismas reglas sobre un repo git, sin servidor. Sobre un árbol, lo que incumple cada nota. Sobre un rango, juzgado como una escritura (sale con 1 si añade algo que bloquea). Con `--each`, cada commit frente a su padre |
+| `my-memory check <repo> [<rev> \| <de>..<a> [--each]] [--conventions f] [--json]` | Las mismas reglas sobre un repo git, sin servidor. Sobre un árbol, lo que incumple cada nota. Sobre un rango, juzgado como un solo envío (sale con 1 si añade algo que bloquea). Con `--each`, cada commit frente a su padre y como un envío. Los commits del remoto se juzgan igual |
 
 ## 5. Pruebas
 
 - **Archivos nuevos:**
-  - `test/rules.test.ts`: 20 pruebas puras de cada regla, nueva frente a existente, con los mensajes exactos, la configuración, los errores de configuración y las mayúsculas.
-  - `test/rules-writes.test.ts`: 13 pruebas de integración con `MemoryService`: `create`, `edit`, `write`, `move` (renombrar, salir de `skills/` y salir del archivo), `revert` (quitar una fuente añadida, no deshacer una limpieza, recuperar una nota borrada), publicación de una copia de trabajo commit a commit y aplanada, `attach` (necesita git-lfs), commits del remoto, configuración ausente, `lint` (herramienta y CLI) y `check` (árbol, rango, `--each` y códigos de salida).
-- **En lisa** (`nix shell nixpkgs#nodejs_24 git-lfs poppler-utils tesseract`): typecheck limpio y **139 de 139 pruebas** (en `main` eran 106).
+  - `test/rules.test.ts`: 22 pruebas puras de cada regla, nueva frente a existente, con los mensajes exactos, la configuración, los errores de configuración y las mayúsculas. Para Fuentes entre notas de un envío: partir pasa; una línea que no va a ningún sitio, que llega cambiada o que acaba fuera de Fuentes sigue bloqueada; y cada línea que entra cubre una sola que sale.
+  - `test/rules-writes.test.ts`: 17 pruebas de integración con `MemoryService`. Con `publish`: partir una nota con Fuentes en dos commits de un envío pasa, mientras que la escritura suelta de la nota madre se rechaza con la sugerencia; una línea que no va a ningún sitio o que llega cambiada rechaza todo el envío sin dejar rastro (rama, árbol e índice); un cambio que falla dice qué commit y qué cambio; y un commit de una copia de trabajo mandado como lo haría `memoria publicar` también pasa en `check --each`. Además, `create`, `edit`, `write`, `move` (renombrar, salir de `skills/` y salir del archivo), `revert` (quitar una fuente añadida, no deshacer una limpieza, recuperar una nota borrada), publicación de una copia de trabajo commit a commit y aplanada, `attach` (necesita git-lfs), commits del remoto, configuración ausente, `lint` (herramienta y CLI) y `check` (árbol, rango, `--each` y códigos de salida).
+- **En lisa** (`nix shell nixpkgs#nodejs_24 git-lfs poppler-utils tesseract`): typecheck limpio y **145 de 145 pruebas** (en `main` eran 106). `test/http.test.ts` comprueba además `publish` por MCP.
 - **En el Mac:** typecheck limpio. Fallan las 6 pruebas de `attach` que ya fallaban en `main`, porque falta git-lfs. La de esta rama se salta sola sin LFS.
 
 ## 6. Simulación sobre la memoria real
@@ -193,8 +196,25 @@ Qué eran los rechazos:
 - **Los 18 de la última semana añaden problemas nuevos de verdad:**
   - 1 nota creada con `type: Topic`.
   - 10 ediciones que escribieron «Lisa IA», `buscador_*`, `correo_*`… los días en que esos nombres aún eran actuales o se estaban retirando (2026-11-18 a 11-22). Desde ahora es justo lo que se quiere parar.
-  - 7 `create` del 2026-11-22 18:06, al partir `badulaque`, `lisa-web` y `memoria-de-lisa` en subnotas. Las subnotas heredaron los nombres retirados de la nota madre, y hoy habría que limpiarlos al moverlos (ver riesgos).
+  - 7 `create` del 2026-11-22 18:06, al partir `badulaque`, `lisa-web` y `memoria-de-lisa` en subnotas. Las subnotas heredaron los nombres retirados de la nota madre, y hoy habría que limpiarlos al moverlos (ver abajo y los riesgos).
 - En la última semana, 128 escrituras tocaron notas con problemas viejos y todas habrían pasado.
+
+### Las particiones del 2026-11-22
+
+Ese día se partieron 4 notas grandes (`badulaque`, `lisa-web`, `memoria-de-lisa` y `lisa`) en 17 escrituras: una de la nota madre y las demás, subnotas nuevas, con la misma razón cada partición. Repetida la semana con el cambio de Fuentes entre notas (código `d0b78ba`), los números no se mueven: siguen 18 commits rechazados (17 por `obsolete`, 1 por `type`) y ninguno por `append_only`.
+
+**Los 7 `create` de subnotas siguen sin pasar, y no por Fuentes.** Las madres no perdieron ninguna línea de Fuentes en esas particiones. Lo que las frena son 32 nombres retirados que las subnotas copiaron de su madre: «Lisa IA», `buscador_*`, `memoria_*`… Juzgadas como un solo envío por partición, o las cuatro juntas, da lo mismo: 7 notas rechazadas por 32 menciones `obsolete` y 0 por `append_only`. La partición de `lisa` pasa entera.
+
+Si se aplicara a los nombres retirados la misma idea que a Fuentes (una mención que sale de una nota y entra en otra del mismo envío no es nueva), el balance por partición sería este:
+
+| Partición | Menciones antes (todas sus notas) | Después | De más |
+|---|---|---|---|
+| `lisa-web` | 22 | 16 | 0 |
+| `memoria-de-lisa` | 4 | 4 | 0 |
+| `lisa` | 1 | 1 | 0 |
+| `badulaque` | 16 | 25 | 9 (repetidas en varias subnotas) |
+
+Con esa extensión pasarían 3 de los 7 `create` (los de `lisa-web` y `memoria-de-lisa`); los 4 de `badulaque` seguirían rechazados por 9 menciones repetidas. No está hecha: el encargo era solo Fuentes y las demás reglas siguen igual.
 
 ## 7. Bloque de configuración propuesto
 
@@ -275,7 +295,7 @@ Los `fix` están en inglés, como las instrucciones de `AGENTS.md`. Las exencion
 
 ## 8. Riesgos y decisiones abiertas
 
-- **Partir una nota.** Al dividir una nota con nombres retirados, las subnotas nuevas no pueden llevarlos: el agente recibe el rechazo con línea y arreglo, y limpia al mover. Tampoco puede quitar líneas de `## Fuentes` de la nota madre; puede copiarlas a la subnota y dejarlas en las dos. Es lo que pasó el 2026-11-22. Una alternativa sería dar por viejas las líneas copiadas tal cual de otra nota. No está hecha, porque deja propagar la contaminación.
+- **Partir una nota.** Las líneas de `## Fuentes` pueden pasar de la nota madre a las subnotas si todo va en un solo envío (`publish`). En escrituras sueltas siguen bloqueadas, y el rechazo sugiere el envío único. Los nombres retirados, en cambio, no pueden llegar a las subnotas: el agente recibe el rechazo con línea y arreglo, y limpia al mover. Eso es lo que frenó los 7 `create` del 2026-11-22. Extender la idea del envío a los nombres retirados haría pasar 3 de esos 7 (sección 6); queda como decisión de Pablo.
 - **Migraciones de formato.** Una migración como la 0.5.0 reescribe `Fuentes` y quedaría bloqueada: en el ensayo serían 109 commits. Para la próxima, hay dos salidas: poner `[rules.append_only] action = "warn"` mientras dure, o hacerla Pablo con git.
 - **Patrones.** `archivos_x` y `correo_x` en minúscula podrían chocar con un nombre de archivo; hoy no pasa en ninguna nota. Por eso los patrones distinguen mayúsculas por defecto (`ignore_case` lo cambia), y la herramienta `memoria_*` va con la lista exacta de nombres.
 - **Raíz fuera de las reglas.** `AGENTS.md` y `README.md` no se comprueban. El propio `AGENTS.md` de la memoria nombra `archivos_*`, `correo_*`, `recordatorios_*` y `chats_*`, y Pablo debería corregirlo a mano.
@@ -285,7 +305,7 @@ Los `fix` están en inglés, como las instrucciones de `AGENTS.md`. Las exencion
 - **Plantillas solo para People.** Los demás tipos siguen sin plantilla. Los encabezados de las notas Work son los más variados y serían los siguientes candidatos.
 - **Instrucciones.** El resumen de las reglas va en las instrucciones MCP de cli-memoria. Un agente que entra por el Badulaque quizá no las vea; entonces aprende de los mensajes de error, que es lo que se ha cuidado.
 - **Para la CLI `memoria`** (rama `cli-memoria`, carpeta `cli/`, que esta rama no toca):
-  - Hoy `memoria publicar` publica hasta el primer commit rechazado y rehace el resto encima; ya lo hace con cualquier error. Mejor comprobar todos los commits antes de enviar nada, con `checkWrite` de `dist/rules.js` o con `my-memory check <copia> <base>..HEAD --each --conventions <memory.toml del servidor>`.
+  - Que `memoria publicar` mande la publicación entera como un solo `publish`: un commit del servidor por commit de la copia, cada uno con su asunto como razón y con los hashes de las versiones de la copia (los blobs coinciden con los del servidor). Así una partición con Fuentes pasa, y la publicación es todo o nada en vez de quedarse a medias en el primer rechazo, como pasa hoy. El `hashes` de la respuesta le dice cómo queda cada nota.
   - `memoria adjuntar` debería aceptar `--tipo`. Sin él, el servidor usa `attachment_type`.
 
 ## 9. Para activarlo (no hecho)
