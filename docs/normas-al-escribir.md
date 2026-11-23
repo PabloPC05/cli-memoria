@@ -8,11 +8,12 @@ Informe de la rama `normas-al-escribir` de cli-memoria (antes my-memory), 2026-1
 - **Solo bloquea lo nuevo.** La versión anterior de la nota es la referencia. Lo que la nota ya tenía mal no impide editarla (vuelve como aviso `RULES_EXISTING`), pero una escritura no puede añadir problemas.
 - **Mensajes que corrigen.** Cada problema ocupa una línea con la regla, la línea de la nota, qué está mal y cómo arreglarlo (principio de SWE-agent, arXiv 2405.15793). Por ejemplo: `obsolete, line 14: «memoria_search» is a retired name this memory no longer uses. Fix: the memoria_* tools are gone: agents use the memoria CLI (memoria buscar, leer, copia, publicar…) through the Badulaque.`
 - **Partir una nota en un solo envío.** Una línea que sale del `## Fuentes` de una nota no cuenta como borrada si entra, sin cambios, en el `## Fuentes` de otra nota del mismo envío. Un envío es una llamada a la herramienta nueva `publish` (lo que puede mandar `memoria publicar`) o un mismo commit de varias notas. En escrituras sueltas la regla sigue igual, y el rechazo sugiere hacer la partición en un solo envío.
+- **Nombres retirados: instrucciones no, historia sí.** Una mención en una línea con una fecha explícita fuera de los marcadores de origen («quitado el 2026-11-22») es historia: no bloquea ni avisa. En un envío, una mención que sale de una nota y entra en otra tampoco es nueva.
 - **Configurable y publicable.** Sin `[rules]` el servidor hace exactamente lo de hoy. Las reglas viven en `memory.toml`, que ninguna herramienta puede escribir: solo Pablo, con git.
 - **Sobre la memoria real** (copia de solo lectura, HEAD `4c12c7f`):
-  - Hoy, 56 de 282 notas tienen algún problema con las reglas propuestas.
-  - Ninguna de las 935 ediciones normales simuladas queda bloqueada.
-  - En la última semana, 128 escrituras a notas con problemas viejos habrían pasado igual. Las 18 que se habrían rechazado añadían problemas nuevos.
+  - Hoy, 49 de 282 notas tienen algún problema con las reglas propuestas.
+  - Ninguna de las 926 ediciones normales simuladas queda bloqueada.
+  - En la última semana, 117 escrituras a notas con problemas viejos habrían pasado igual. Se habrían rechazado 13; si cada partición de notas hubiera ido en un solo envío, 9. Todas añaden problemas nuevos: un tipo inválido y 8 nombres retirados en líneas sin fecha.
 
 ## 1. Rutas de escritura y lo que ya se comprobaba
 
@@ -40,7 +41,7 @@ Todas son opcionales: cada tabla de `[rules]` que falta es una regla que no se a
 |---|---|---|---|
 | `frontmatter` | La nota empieza con frontmatter entre `---` | block | Si antes lo tenía y ahora no, o si la nota es nueva |
 | `type` | El campo `type` existe y está en la lista cerrada. Las carpetas de `untyped_folders` no lo llevan | block | Por valor: mantener `type: Topic` avisa, pero cambiarlo a otro inválido bloquea |
-| `obsolete` | Nombres retirados, como expresiones regulares que distinguen mayúsculas. Cada patrón puede llevar su `fix` y notas o carpetas exentas (`except`). Cuenta también dentro de `código` | block | Por texto encontrado: una escritura no puede subir la cuenta, así que retocar la línea que ya lo tenía no bloquea |
+| `obsolete` | Nombres retirados, como expresiones regulares que distinguen mayúsculas. Cada patrón puede llevar su `fix` y notas o carpetas exentas (`except`). Cuenta también dentro de `código`. Con `allow_dated` (por defecto), una línea que lleva una fecha `AAAA-MM-DD` fuera de `[…]` es historia y no cuenta: «hasta el 2026-11-22» sí, «[Claude, 2026-11-21, sesión]» no, porque esa fecha dice de dónde sale el dato y no hasta cuándo valía | block | Por texto encontrado: una escritura no puede subir la cuenta, así que retocar la línea que ya lo tenía no bloquea. En un envío, cada mención que sale de una nota cubre una que entra en otra, y las notas que el envío borra también dan las suyas |
 | `append_only` | Las líneas existentes de las secciones listadas (`Fuentes`) no se cambian ni se borran. Se pueden añadir líneas en cualquier sitio y reordenar; no cuentan los espacios del final ni las líneas en blanco. En un envío de varias notas, una línea puede pasar sin cambios al `## Fuentes` de otra nota del envío | block | Línea a línea, entre la versión anterior y la nueva. En un envío, cada línea que entra en otra nota cubre una que sale |
 | `forbidden_section` | Encabezados prohibidos, de cualquier nivel, sin distinguir mayúsculas ni tildes, fuera de bloques de código | block | Por encabezado |
 | `template` | Las secciones de nivel 2 de un tipo con plantilla son las de la plantilla y van en su orden | warn | Por encabezado fuera de la plantilla o fuera de orden |
@@ -58,7 +59,7 @@ Casos especiales por ruta:
 
 Además, las instrucciones MCP del servidor resumen las reglas en un párrafo, sin repetir los nombres retirados, para acertar a la primera:
 
-> Every write is checked against this memory's rules: every note starts with frontmatter; «type» is one of Profile, Preference, Work, People, Notes (except notes in skills/); the existing lines of «## Fuentes» are never changed or removed, only added to (to split a note, send both notes in one publish: a line may then move unchanged to the same section of the other note); no «## Historia» sections; People notes use the sections Quién es · Relación con Pablo · Contacto · Trato · Asuntos · Pendiente · Fuentes, in that order; names of retired tools and services are refused; notes stay under 20,000 characters. A write that adds a violation fails with RULES_VIOLATED and says, per problem, the line and how to fix it; problems a note already had only warn.
+> Every write is checked against this memory's rules: every note starts with frontmatter; «type» is one of Profile, Preference, Work, People, Notes (except notes in skills/); the existing lines of «## Fuentes» are never changed or removed, only added to (to split a note, send both notes in one publish: a line may then move unchanged to the same section of the other note); no «## Historia» sections; People notes use the sections Quién es · Relación con Pablo · Contacto · Trato · Asuntos · Pendiente · Fuentes, in that order; names of retired tools and services are refused (except on a line that dates them as past, e.g. «until 2026-11-22»); notes stay under 20,000 characters. A write that adds a violation fails with RULES_VIOLATED and says, per problem, the line and how to fix it; problems a note already had only warn.
 
 ### Respuestas del servidor
 
@@ -87,6 +88,9 @@ field = "type"                       # por defecto
 allowed = ["Profile", "Preference", "Work", "People", "Notes"]
 untyped_folders = ["skills"]         # sus notas van sin tipo
 attachment_type = "Notes"            # el tipo de las notas compañeras de attach
+
+[rules.obsolete]
+allow_dated = true                   # una línea con fecha AAAA-MM-DD fuera de […] es historia
 
 [[rules.obsolete.patterns]]          # uno por nombre retirado
 pattern = '\blisa-skill\b'           # expresión regular; ignore_case = true para no distinguir mayúsculas
@@ -130,9 +134,9 @@ Un `memory.toml` mal escrito no se carga. El mensaje dice qué clave falla, por 
 ## 5. Pruebas
 
 - **Archivos nuevos:**
-  - `test/rules.test.ts`: 22 pruebas puras de cada regla, nueva frente a existente, con los mensajes exactos, la configuración, los errores de configuración y las mayúsculas. Para Fuentes entre notas de un envío: partir pasa; una línea que no va a ningún sitio, que llega cambiada o que acaba fuera de Fuentes sigue bloqueada; y cada línea que entra cubre una sola que sale.
-  - `test/rules-writes.test.ts`: 17 pruebas de integración con `MemoryService`. Con `publish`: partir una nota con Fuentes en dos commits de un envío pasa, mientras que la escritura suelta de la nota madre se rechaza con la sugerencia; una línea que no va a ningún sitio o que llega cambiada rechaza todo el envío sin dejar rastro (rama, árbol e índice); un cambio que falla dice qué commit y qué cambio; y un commit de una copia de trabajo mandado como lo haría `memoria publicar` también pasa en `check --each`. Además, `create`, `edit`, `write`, `move` (renombrar, salir de `skills/` y salir del archivo), `revert` (quitar una fuente añadida, no deshacer una limpieza, recuperar una nota borrada), publicación de una copia de trabajo commit a commit y aplanada, `attach` (necesita git-lfs), commits del remoto, configuración ausente, `lint` (herramienta y CLI) y `check` (árbol, rango, `--each` y códigos de salida).
-- **En lisa** (`nix shell nixpkgs#nodejs_24 git-lfs poppler-utils tesseract`): typecheck limpio y **145 de 145 pruebas** (en `main` eran 106). `test/http.test.ts` comprueba además `publish` por MCP.
+  - `test/rules.test.ts`: 25 pruebas puras de cada regla, nueva frente a existente, con los mensajes exactos, la configuración, los errores de configuración y las mayúsculas. Historia fechada: con fecha en la línea no cuenta; con la fecha solo en un marcador de origen o en un enlace, o solo con el mes, sí; y `allow_dated = false` lo apaga. Nombres retirados en un envío: los que pasan de nota a nota no son nuevos, uno de más sí, y una nota borrada da los suyos. Para Fuentes entre notas de un envío: partir pasa; una línea que no va a ningún sitio, que llega cambiada o que acaba fuera de Fuentes sigue bloqueada; y cada línea que entra cubre una sola que sale.
+  - `test/rules-writes.test.ts`: 18 pruebas de integración con `MemoryService`. Con `publish`: un nombre retirado puede pasar de la nota que se parte a la nueva, pero no uno más, y una edición que lo escribe con fecha pasa sin avisos de esa regla; partir una nota con Fuentes en dos commits de un envío pasa, mientras que la escritura suelta de la nota madre se rechaza con la sugerencia; una línea que no va a ningún sitio o que llega cambiada rechaza todo el envío sin dejar rastro (rama, árbol e índice); un cambio que falla dice qué commit y qué cambio; y un commit de una copia de trabajo mandado como lo haría `memoria publicar` también pasa en `check --each`. Además, `create`, `edit`, `write`, `move` (renombrar, salir de `skills/` y salir del archivo), `revert` (quitar una fuente añadida, no deshacer una limpieza, recuperar una nota borrada), publicación de una copia de trabajo commit a commit y aplanada, `attach` (necesita git-lfs), commits del remoto, configuración ausente, `lint` (herramienta y CLI) y `check` (árbol, rango, `--each` y códigos de salida).
+- **En lisa** (`nix shell nixpkgs#nodejs_24 git-lfs poppler-utils tesseract`): typecheck limpio y **149 de 149 pruebas** (en `main` eran 106). `test/http.test.ts` comprueba además `publish` por MCP.
 - **En el Mac:** typecheck limpio. Fallan las 6 pruebas de `attach` que ya fallaban en `main`, porque falta git-lfs. La de esta rama se salta sola sin LFS.
 
 ## 6. Simulación sobre la memoria real
@@ -145,11 +149,11 @@ Un `memory.toml` mal escrito no se carga. El mensaje dice qué clave falla, por 
 
 ### Cómo está hoy
 
-282 notas dentro de las reglas: no cuentan las 19 del archivo ni los archivos de raíz. Lint (tipo `rules`) da lo mismo: 56 notas.
+282 notas dentro de las reglas: no cuentan las 19 del archivo ni los archivos de raíz. `lint` (tipo `rules`) usa la misma función que `check`: 49 notas. Antes de dar por historia las líneas con fecha eran 56; lint lo comprobó entonces sobre una copia indexada.
 
 | Regla | Notas | Problemas | Detalle |
 |---|---|---|---|
-| `obsolete` | 30 | 70 | «Lisa IA» 26, `buscador_usar` 9, `buscador_buscar` 6, `memoria_*` 5, `archivos_*` 4, `dispositivos_ejecutar` 3, `correo_*` 3, `archivos_preparar_subida` 3, `memoria_search` 2, `memoria_anotar` 2, `correo_enviar` 2, y 1 de `memoria_create`, `memoria_attach`, `dispositivos_listar`, `dispositivos_*` y `correo_buscar`. Por carpetas: 24 en `projects/`, 3 en `skills/`, 2 en `me/` y 1 en `topics/`. Más concentradas: `projects/badulaque/panel-y-buscador.md` (14), `projects/lisa-web.md` (8) |
+| `obsolete` | 22 | 47 | «Lisa IA» 16, `buscador_usar` 7, `memoria_*` 4, `buscador_buscar` 4, `dispositivos_ejecutar` 3, `archivos_*` 3, `memoria_search` 2, `memoria_anotar` 2, y 1 de `memoria_create`, `dispositivos_listar`, `dispositivos_*`, `correo_enviar`, `correo_*` y `archivos_preparar_subida`. Por carpetas: 17 en `projects/`, 3 en `skills/`, 1 en `me/` y 1 en `topics/`. Sin `allow_dated` serían 70 en 30 notas: 23 menciones ya llevan su fecha de corte en la línea |
 | `type` | 5 | 5 | Sin tipo, 3: una en `people/`, otra en `projects/` y otra en `topics/`. Con tipo inválido, 2: `Project` y `Topic`. Las 5 aparecieron después de la 0.5.0, entre el 2026-11-06 y el 2026-11-19 |
 | `template` | 13 de 19 People | 34 | Todas son secciones fuera de la plantilla; no hay desórdenes. 6 son variantes de «Trato» («Cómo tratar con él/ella/ellos») y 8 de «Asuntos» («Sus asuntos con …»). El resto son secciones propias de cada persona |
 | `size` | 12 | 12 | De 20.097 a 57.266 caracteres. Las mayores son transcripciones de reuniones guardadas enteras y notas de proyectos largos |
@@ -159,7 +163,7 @@ Un `memory.toml` mal escrito no se carga. El mensaje dice qué clave falla, por 
 Por qué no coincide con el diagnóstico del encargo (13, 73 en 24 notas y 13):
 
 - **Tipo:** las 6 notas de `skills/` no llevan tipo por diseño (`AGENTS.md`), y la raíz queda fuera. Dentro de las reglas, 5.
-- **Nombres retirados:** los patrones propuestos distinguen mayúsculas, así que 17 nombres de archivo del tipo «Memoria_….pdf» no cuentan como la herramienta. «Lisa IA» no cuenta en su propia nota (13 apariciones exentas), ni `lisa-skill` en las 2 notas que cuentan su historia. Entran `skills/` y los nombres de herramienta concretos.
+- **Nombres retirados:** 23 menciones con fecha en la línea cuentan como historia. Además, los patrones propuestos distinguen mayúsculas, así que 17 nombres de archivo del tipo «Memoria_….pdf» no cuentan como la herramienta. «Lisa IA» no cuenta en su propia nota (13 apariciones exentas), ni `lisa-skill` en las 2 notas que cuentan su historia. Entran `skills/` y los nombres de herramienta concretos.
 - **Tamaño:** se mide en caracteres, no en bytes, y las notas compañeras de adjuntos no cuentan.
 
 ### Ninguna edición normal queda bloqueada por problemas viejos
@@ -171,50 +175,58 @@ Por qué no coincide con el diagnóstico del encargo (13, 73 en 24 notas y 13):
 | Reescribirla igual (`write` sin cambios) | 282 | 0 | 0 |
 | Añadir una frase al final | 282 | 0 | 13 (notas grandes que crecen) |
 | Añadir una línea a `## Fuentes` | 54 | 0 | 8 |
-| Retocar cada línea que ya tiene un problema (fuera del frontmatter y de Fuentes) | 45 | 0 | 16 (encabezados retocados, crecimiento) |
+| Retocar cada línea que ya tiene un problema (fuera del frontmatter y de Fuentes) | 36 | 0 | 15 (encabezados retocados, crecimiento) |
 | Borrar una sección entera que no sea Fuentes | 272 | 0 | 0 |
-| **Total** | **935** | **0** | |
+| **Total** | **926** | **0** | |
 
 **Escrituras de verdad por el servicio**, sobre una copia desechable con el bloque propuesto, en `projects/badulaque/panel-y-buscador.md` (14 problemas viejos):
 
-- Una edición normal se guarda, con `RULES_EXISTING` (14).
+- Una edición normal se guarda, con `RULES_EXISTING` (14). Esta prueba es de antes de `allow_dated`, que solo afloja.
 - Añadir `memoria_search` se rechaza con `obsolete, line 14: … Fix: the memoria_* tools are gone…`.
 - Crear una nota con `type: Topic` se rechaza con `type, line 5: … Fix: use one of: …`.
 
-**Repetición del historial real** (`my-memory check --each`). Cada commit se juzga frente a su padre con las reglas propuestas, como si hubieran existido siempre:
+**Repetición del historial real** (`my-memory check --each`). Cada commit se juzga frente a su padre con las reglas propuestas, como si hubieran existido siempre. En el historial real cada llamada a una herramienta fue su propio commit, así que aquí ninguna partición cuenta como un solo envío (eso va en la sección siguiente):
 
 | Ventana | Commits | Escrituras de notas | Commits rechazados (escrituras) | Commits por regla | Escrituras a notas con problemas viejos que pasan | Avisos nuevos |
 |---|---|---|---|---|---|---|
-| Todo (2026-10-01 → 11-23) | 2.207 | 2.534 | 304 (459) | `append_only` 135, `type` 75, `obsolete` 72, `forbidden_section` 35, `frontmatter` 4 | 1.202 | `size` 384, `template` 46 |
-| Desde la 0.5.0 (2026-11-04) | 1.256 | 1.279 | 142 (142) | `append_only` 109, `obsolete` 30, `type` 5 | 278 | `size` 190, `template` 46 |
-| Última semana (desde 2026-11-16) | 389 | 415 | 18 (18) | `obsolete` 17, `type` 1 | 128 | `size` 119, `template` 1 |
+| Todo (2026-10-01 → 11-23) | 2.207 | 2.534 | 278 (433) | `append_only` 135, `type` 75, `obsolete` 46, `forbidden_section` 35, `frontmatter` 4 | 1.203 | `size` 384, `template` 46 |
+| Desde la 0.5.0 (2026-11-04) | 1.256 | 1.279 | 133 (133) | `append_only` 109, `obsolete` 23, `type` 5 | 262 | `size` 190, `template` 46 |
+| Última semana (desde 2026-11-16) | 389 | 415 | 13 (13) | `obsolete` 12, `type` 1 | 117 | `size` 119, `template` 1 |
 
 Qué eran los rechazos:
 
 - **Antes del 2026-11-04** (tipos ausentes, «Historia», Fuentes que no eran citas): reglas que entonces no existían. No es una señal de nada.
 - **Los 109 de `append_only` desde la 0.5.0** son todos del 2026-11-04, de `write` por `gw-claude-code`: la migración a 0.5.0 nota a nota («Migración a 0.5.0: …»), que convirtió las Fuentes antiguas (descripciones de dónde salió cada dato) en marcadores en línea. Desde el 2026-11-05, ninguna escritura ha cambiado ni borrado una línea de Fuentes.
-- **Los 18 de la última semana añaden problemas nuevos de verdad:**
+- **Los 13 de la última semana añaden problemas nuevos de verdad** (sin `allow_dated` eran 18; 5 escribían el nombre con su fecha de corte):
   - 1 nota creada con `type: Topic`.
-  - 10 ediciones que escribieron «Lisa IA», `buscador_*`, `correo_*`… los días en que esos nombres aún eran actuales o se estaban retirando (2026-11-18 a 11-22). Desde ahora es justo lo que se quiere parar.
-  - 7 `create` del 2026-11-22 18:06, al partir `badulaque`, `lisa-web` y `memoria-de-lisa` en subnotas. Las subnotas heredaron los nombres retirados de la nota madre, y hoy habría que limpiarlos al moverlos (ver abajo y los riesgos).
-- En la última semana, 128 escrituras tocaron notas con problemas viejos y todas habrían pasado.
+  - 7 ediciones que escribieron «Lisa IA» o `buscador_*` mientras aún eran actuales o se estaban retirando (2026-11-21 y 11-22), sin fecha en la línea: un encabezado «El buscador (`buscador_buscar` y `buscador_usar`)», que el hook del Mac llama a `memoria_*` por `buscador_usar`, que Lisa IA «todavía no se ha quitado», listas de lo que se quita… Desde ahora es justo lo que se quiere parar.
+  - 5 `create` de subnotas del 2026-11-22, juzgados cada uno solo (ver abajo).
+- En la última semana, 117 escrituras tocaron notas con problemas viejos y todas habrían pasado.
 
 ### Las particiones del 2026-11-22
 
-Ese día se partieron 4 notas grandes (`badulaque`, `lisa-web`, `memoria-de-lisa` y `lisa`) en 17 escrituras: una de la nota madre y las demás, subnotas nuevas, con la misma razón cada partición. Repetida la semana con el cambio de Fuentes entre notas (código `d0b78ba`), los números no se mueven: siguen 18 commits rechazados (17 por `obsolete`, 1 por `type`) y ninguno por `append_only`.
+Ese día se partieron 4 notas grandes (`badulaque`, `lisa-web`, `memoria-de-lisa` y `lisa`) en 17 escrituras: una de la nota madre y las demás, subnotas nuevas, con la misma razón cada partición. Las madres no perdieron ninguna línea de Fuentes. Lo que frenaba a 7 subnotas eran los nombres retirados que copiaron.
 
-**Los 7 `create` de subnotas siguen sin pasar, y no por Fuentes.** Las madres no perdieron ninguna línea de Fuentes en esas particiones. Lo que las frena son 32 nombres retirados que las subnotas copiaron de su madre: «Lisa IA», `buscador_*`, `memoria_*`… Juzgadas como un solo envío por partición, o las cuatro juntas, da lo mismo: 7 notas rechazadas por 32 menciones `obsolete` y 0 por `append_only`. La partición de `lisa` pasa entera.
+Juzgada cada partición como un solo envío (lo que haría `publish`), con los nombres que pasan de nota a nota y la historia fechada:
 
-Si se aplicara a los nombres retirados la misma idea que a Fuentes (una mención que sale de una nota y entra en otra del mismo envío no es nueva), el balance por partición sería este:
-
-| Partición | Menciones antes (todas sus notas) | Después | De más |
+| Partición | Escrituras | Rechazadas | Por qué |
 |---|---|---|---|
-| `lisa-web` | 22 | 16 | 0 |
-| `memoria-de-lisa` | 4 | 4 | 0 |
-| `lisa` | 1 | 1 | 0 |
-| `badulaque` | 16 | 25 | 9 (repetidas en varias subnotas) |
+| `lisa-web` | 4 | 0 | |
+| `memoria-de-lisa` | 3 | 0 | |
+| `lisa` | 3 | 0 | |
+| `badulaque` | 7 | 1 | `panel-y-buscador.md`: 5 menciones de `buscador_*` y `memoria_*` en 3 líneas sin fecha (el encabezado del buscador, el hook del Mac y una comprobación) que no venían de la madre sino de otra nota, `mcp-unico.md`: no salían de ninguna nota del envío |
 
-Con esa extensión pasarían 3 de los 7 `create` (los de `lisa-web` y `memoria-de-lisa`); los 4 de `badulaque` seguirían rechazados por 9 menciones repetidas. No está hecha: el encargo era solo Fuentes y las demás reglas siguen igual.
+**6 de los 7 `create` de subnotas pasan** (sin estos dos cambios, ninguno). Queda uno, por 3 líneas copiadas de otra nota que describen en presente cómo funcionaba lo retirado.
+
+Con las particiones en un envío cada una, **la semana queda en 9 rechazos**: 1 tipo inválido, las 7 ediciones de arriba y esa subnota. Las 8 de nombres retirados son líneas sin fecha fuera de los marcadores de origen. Casi todas describen en presente un estado que ya no vale, o sea, instrucciones obsoletas. Hay tres casos dudosos:
+
+- «Hasta ese día el buscador era un destino más…»: es historia, pero la fecha está en otra línea.
+- Las listas de lo que se quitaba de Lisa web: la fecha está en la línea de arriba.
+- Un pendiente que dice que `~/.claude/CLAUDE.md` «todavía habla de herramientas `memoria_*`».
+
+Los tres pasarían con su fecha en la misma línea.
+
+**Las fechas de los marcadores de origen no cuentan, y es a propósito.** Casi toda línea de la memoria acaba en un marcador con fecha («[Claude, 2026-11-21, sesión]»), así que si contaran pasaría cualquier instrucción con su marcador, y la regla no pararía casi nada. Si contaran, en esta semana pasarían también varias de esas 8, por ejemplo «el hook del Mac llama a `memoria_*` con `buscador_usar` … [Claude, 2026-11-21, sesión]», que describe en presente cómo funciona algo.
 
 ## 7. Bloque de configuración propuesto
 
@@ -259,7 +271,11 @@ People = ["Quién es", "Relación con Pablo", "Contacto", "Trato", "Asuntos", "P
 max_chars = 20000
 action = "warn"
 
-# Retired names. Case-sensitive: «Memoria_2025.pdf» is a file, not a tool.
+# Retired names. Case-sensitive: «Memoria_2025.pdf» is a file, not a tool. A line that dates the mention
+# («until 2026-11-22»; a date inside an origin marker […] does not count) is history, not an instruction.
+[rules.obsolete]
+allow_dated = true
+
 [[rules.obsolete.patterns]]
 pattern = '\bmemoria_(?:search|list|read|create|edit|write|move|delete|links|history|recent|revert|attach|lint|clients|anotar)\b|\bmemoria_\*'
 fix = "the memoria_* tools are gone: agents use the memoria CLI (memoria buscar, leer, copia, publicar…) through the Badulaque"
@@ -295,7 +311,8 @@ Los `fix` están en inglés, como las instrucciones de `AGENTS.md`. Las exencion
 
 ## 8. Riesgos y decisiones abiertas
 
-- **Partir una nota.** Las líneas de `## Fuentes` pueden pasar de la nota madre a las subnotas si todo va en un solo envío (`publish`). En escrituras sueltas siguen bloqueadas, y el rechazo sugiere el envío único. Los nombres retirados, en cambio, no pueden llegar a las subnotas: el agente recibe el rechazo con línea y arreglo, y limpia al mover. Eso es lo que frenó los 7 `create` del 2026-11-22. Extender la idea del envío a los nombres retirados haría pasar 3 de esos 7 (sección 6); queda como decisión de Pablo.
+- **Partir o fusionar notas.** Si todo va en un solo envío (`publish`), las líneas de `## Fuentes` y los nombres retirados pueden pasar de una nota a otra; las notas que el envío borra también dan lo suyo. En escrituras sueltas siguen bloqueadas, y el rechazo sugiere el envío único. Un nombre retirado copiado de una nota que no está en el envío sí es nuevo.
+- **Historia fechada.** `allow_dated` deja pasar cualquier mención en una línea con fecha fuera de `[…]`, incluso una instrucción con una fecha puesta para colarla («usa `memoria_search` desde el 2026-11-23»). Es el precio de no distinguir con un modelo. `lint` no lista estas menciones aparte (no lo he añadido); `my-memory check` con `allow_dated = false` las saca todas.
 - **Migraciones de formato.** Una migración como la 0.5.0 reescribe `Fuentes` y quedaría bloqueada: en el ensayo serían 109 commits. Para la próxima, hay dos salidas: poner `[rules.append_only] action = "warn"` mientras dure, o hacerla Pablo con git.
 - **Patrones.** `archivos_x` y `correo_x` en minúscula podrían chocar con un nombre de archivo; hoy no pasa en ninguna nota. Por eso los patrones distinguen mayúsculas por defecto (`ignore_case` lo cambia), y la herramienta `memoria_*` va con la lista exacta de nombres.
 - **Raíz fuera de las reglas.** `AGENTS.md` y `README.md` no se comprueban. El propio `AGENTS.md` de la memoria nombra `archivos_*`, `correo_*`, `recordatorios_*` y `chats_*`, y Pablo debería corregirlo a mano.
@@ -313,4 +330,4 @@ Los `fix` están en inglés, como las instrucciones de `AGENTS.md`. Las exencion
 1. Revisar y fusionar la rama, y desplegar cli-memoria en lisa (`aplicar-seguro` → comprobar → `confirmar-cambio`). Sin `[rules]` en la memoria, el comportamiento no cambia.
 2. Hacer commit del bloque de la sección 7 en `memory.toml` de `/var/lib/my-memory/repo`, como `my-memory`, con git. Las herramientas no pueden escribir ese archivo.
 3. Reiniciar `my-memory`. Sin remoto, el servidor no ve un commit hecho a mano hasta que arranca; al arrancar recarga las convenciones y reindexa.
-4. Comprobar con `my-memory lint --config … --kind rules`: deberían salir las 56 notas de la sección 6.
+4. Comprobar con `my-memory lint --config … --kind rules`: deberían salir las 49 notas de la sección 6.
