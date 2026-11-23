@@ -8,68 +8,52 @@ self:
 
 let
   inherit (lib)
+    mkDefault
     mkEnableOption
     mkIf
+    mkMerge
     mkOption
-    types
     optional
     optionalAttrs
+    types
     ;
-  cfg = config.services.cli-memoria;
   toml = pkgs.formats.toml { };
 
-  # Tesseract with just the language data the OCR config asks for. Only referenced (so only built) with OCR on.
-  ocrTesseract = pkgs.tesseract.override { enableLanguages = lib.unique cfg.ocr.languages; };
-
-  # Secrets reach the service through systemd credentials; the config only names them.
-  credentials =
-    optional (cfg.remote != null && cfg.remote.tokenFile != null) "remote-token:${cfg.remote.tokenFile}"
-    ++ optional (cfg.webhookSecretFile != null) "webhook-secret:${cfg.webhookSecretFile}";
-
-  settings =
-    {
-      data_dir = "/var/lib/cli-memoria";
-      inherit (cfg) branch;
-      author_domain = cfg.authorDomain;
-      fetch_interval_seconds = cfg.fetchIntervalSeconds;
-      log_level = cfg.logLevel;
-      pdftotext = "${pkgs.poppler-utils}/bin/pdftotext";
-      ocr =
-        {
-          enabled = cfg.ocr.enable;
-        }
-        // optionalAttrs cfg.ocr.enable {
-          languages = lib.concatStringsSep "+" cfg.ocr.languages;
-          max_pages = cfg.ocr.maxPages;
-          page_timeout_seconds = cfg.ocr.pageTimeoutSeconds;
-          inherit (cfg.ocr) dpi;
-          tesseract = "${ocrTesseract}/bin/tesseract";
-          pdftoppm = "${pkgs.poppler-utils}/bin/pdftoppm";
-        };
-      listen = {
-        inherit (cfg.listen) address port;
+  listenSubmodule = types.submodule {
+    options = {
+      address = mkOption {
+        type = types.str;
+        default = "127.0.0.1";
       };
-    }
-    // optionalAttrs (cfg.tokensFile != null) { tokens_file = cfg.tokensFile; }
-    // optionalAttrs (cfg.webhookSecretFile != null) { webhook_secret_file = "credential:webhook-secret"; }
-    // optionalAttrs (cfg.remote != null) {
-      remote =
-        {
-          inherit (cfg.remote) url username;
-        }
-        // optionalAttrs (cfg.remote.tokenFile != null) { token_file = "credential:remote-token"; };
+      port = mkOption { type = types.port; };
     };
+  };
 
-  configFile = toml.generate "cli-memoria.toml" settings;
-in
-{
-  options.services.cli-memoria = {
-    enable = mkEnableOption "cli-memoria, a git-backed memory server for AI agents (MCP)";
+  mkOptions = defaultName: {
+    enable = mkEnableOption "${defaultName}, a git-backed memory server for AI agents (MCP)";
 
     package = mkOption {
       type = types.package;
       default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
       description = "The cli-memoria package.";
+    };
+
+    user = mkOption {
+      type = types.str;
+      default = defaultName;
+      description = "System user the service runs as.";
+    };
+
+    group = mkOption {
+      type = types.str;
+      default = defaultName;
+      description = "System group the service runs as.";
+    };
+
+    dataDir = mkOption {
+      type = types.str;
+      default = "/var/lib/${defaultName}";
+      description = "Directory holding the notes repo clone, SQLite index, activity log and uploads.";
     };
 
     branch = mkOption {
@@ -79,7 +63,7 @@ in
 
     authorDomain = mkOption {
       type = types.str;
-      default = "cli-memoria.invalid";
+      default = "${defaultName}.invalid";
       description = "Domain of commit author emails (<client-id>@<domain>).";
     };
 
@@ -92,7 +76,7 @@ in
             url = mkOption { type = types.str; };
             username = mkOption {
               type = types.str;
-              default = "cli-memoria";
+              default = defaultName;
             };
             tokenFile = mkOption {
               type = types.nullOr types.str;
@@ -115,6 +99,11 @@ in
         default = 8782;
         description = "Bind port for the HTTP listener.";
       };
+      private = mkOption {
+        type = types.nullOr listenSubmodule;
+        default = null;
+        description = "Legacy alias for listen.{address,port}; when set, overrides listen.address and listen.port.";
+      };
     };
 
     tokensFile = mkOption {
@@ -122,8 +111,8 @@ in
       default = null;
       description = ''
         TOML file with static token hashes, managed with `cli-memoria token add|list|revoke --file <it>`.
-        Read directly (not as a credential) so `systemctl reload cli-memoria` picks up changes; it must be
-        readable by the cli-memoria group.
+        Read directly (not as a credential) so `systemctl reload ${defaultName}` picks up changes; it must be
+        readable by the service group.
       '';
     };
 
@@ -185,76 +174,161 @@ in
     };
   };
 
-  config = mkIf cfg.enable {
-    assertions = [
-      {
-        assertion = !cfg.ocr.enable || cfg.ocr.languages != [ ];
-        message = "services.cli-memoria: ocr.languages must name at least one language";
-      }
-    ];
+  mkService =
+    unitName: cfg:
+    let
+      # Tesseract with just the language data the OCR config asks for. Only referenced (so only built) with OCR on.
+      ocrTesseract = pkgs.tesseract.override { enableLanguages = lib.unique cfg.ocr.languages; };
 
-    users.users.cli-memoria = {
-      isSystemUser = true;
-      group = "cli-memoria";
-      home = "/var/lib/cli-memoria";
-    };
-    users.groups.cli-memoria = { };
+      # Secrets reach the service through systemd credentials; the config only names them.
+      credentials =
+        optional (cfg.remote != null && cfg.remote.tokenFile != null) "remote-token:${cfg.remote.tokenFile}"
+        ++ optional (cfg.webhookSecretFile != null) "webhook-secret:${cfg.webhookSecretFile}";
 
-    environment.systemPackages = [ cfg.package ];
-    environment.etc."cli-memoria/config.toml".source = configFile;
+      effectiveListen =
+        if cfg.listen.private != null then
+          cfg.listen.private
+        else
+          {
+            inherit (cfg.listen) address port;
+          };
 
-    systemd.services.cli-memoria = {
-      description = "cli-memoria MCP server";
-      wantedBy = [ "multi-user.target" ];
-      wants = [ "network-online.target" ];
-      after = [ "network-online.target" ];
-      restartTriggers = [ configFile ];
-      environment = {
-        HOME = "/var/lib/cli-memoria";
-        NODE_ENV = "production";
+      # If dataDir sits directly under /var/lib/<name>, let systemd manage it via StateDirectory;
+      # otherwise grant explicit ReadWritePaths so ProtectSystem=strict does not block writes.
+      stateDirRel = lib.removePrefix "/var/lib/" cfg.dataDir;
+      useStateDirectory =
+        lib.hasPrefix "/var/lib/" cfg.dataDir && stateDirRel != "" && !lib.hasInfix "/" stateDirRel;
+
+      settings =
+        {
+          data_dir = cfg.dataDir;
+          inherit (cfg) branch;
+          author_domain = cfg.authorDomain;
+          fetch_interval_seconds = cfg.fetchIntervalSeconds;
+          log_level = cfg.logLevel;
+          pdftotext = "${pkgs.poppler-utils}/bin/pdftotext";
+          ocr =
+            {
+              enabled = cfg.ocr.enable;
+            }
+            // optionalAttrs cfg.ocr.enable {
+              languages = lib.concatStringsSep "+" cfg.ocr.languages;
+              max_pages = cfg.ocr.maxPages;
+              page_timeout_seconds = cfg.ocr.pageTimeoutSeconds;
+              inherit (cfg.ocr) dpi;
+              tesseract = "${ocrTesseract}/bin/tesseract";
+              pdftoppm = "${pkgs.poppler-utils}/bin/pdftoppm";
+            };
+          listen = effectiveListen;
+        }
+        // optionalAttrs (cfg.tokensFile != null) { tokens_file = cfg.tokensFile; }
+        // optionalAttrs (cfg.webhookSecretFile != null) { webhook_secret_file = "credential:webhook-secret"; }
+        // optionalAttrs (cfg.remote != null) {
+          remote =
+            {
+              inherit (cfg.remote) url username;
+            }
+            // optionalAttrs (cfg.remote.tokenFile != null) { token_file = "credential:remote-token"; };
+        };
+
+      configFile = toml.generate "${unitName}.toml" settings;
+    in
+    mkIf cfg.enable {
+      assertions = [
+        {
+          assertion = !cfg.ocr.enable || cfg.ocr.languages != [ ];
+          message = "services.${unitName}: ocr.languages must name at least one language";
+        }
+      ];
+
+      users.users.${cfg.user} = {
+        isSystemUser = mkDefault true;
+        group = mkDefault cfg.group;
+        home = mkDefault cfg.dataDir;
       };
-      serviceConfig = {
-        ExecStart = "${cfg.package}/bin/cli-memoria serve --config ${configFile}";
-        ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
-        User = "cli-memoria";
-        Group = "cli-memoria";
-        StateDirectory = "cli-memoria";
-        StateDirectoryMode = "0750";
-        WorkingDirectory = "/var/lib/cli-memoria";
-        LoadCredential = credentials;
-        Restart = "on-failure";
-        RestartSec = 5;
-        UMask = "0027";
+      users.groups.${cfg.group} = { };
 
-        NoNewPrivileges = true;
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        PrivateTmp = true;
-        PrivateDevices = true;
-        ProtectKernelTunables = true;
-        ProtectKernelModules = true;
-        ProtectKernelLogs = true;
-        ProtectControlGroups = true;
-        ProtectClock = true;
-        ProtectHostname = true;
-        RestrictNamespaces = true;
-        RestrictRealtime = true;
-        RestrictSUIDSGID = true;
-        LockPersonality = true;
-        RestrictAddressFamilies = [
-          "AF_INET"
-          "AF_INET6"
-          "AF_UNIX"
-        ];
-        CapabilityBoundingSet = "";
-        SystemCallArchitectures = "native";
-        SystemCallFilter = [
-          "@system-service"
-          "~@privileged"
-        ];
-        # V8's JIT needs writable+executable memory.
-        MemoryDenyWriteExecute = false;
+      environment.systemPackages = [ cfg.package ];
+      environment.etc."${unitName}/config.toml".source = configFile;
+
+      systemd.services.${unitName} = {
+        description = "${unitName} MCP server";
+        wantedBy = [ "multi-user.target" ];
+        wants = [ "network-online.target" ];
+        after = [ "network-online.target" ];
+        restartTriggers = [ configFile ];
+        environment = {
+          HOME = cfg.dataDir;
+          NODE_ENV = "production";
+        };
+        serviceConfig =
+          {
+            ExecStart = "${cfg.package}/bin/cli-memoria serve --config ${configFile}";
+            ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
+            User = cfg.user;
+            Group = cfg.group;
+            WorkingDirectory = cfg.dataDir;
+            LoadCredential = credentials;
+            Restart = "on-failure";
+            RestartSec = 5;
+            UMask = "0027";
+
+            NoNewPrivileges = true;
+            ProtectSystem = "strict";
+            ProtectHome = true;
+            PrivateTmp = true;
+            PrivateDevices = true;
+            ProtectKernelTunables = true;
+            ProtectKernelModules = true;
+            ProtectKernelLogs = true;
+            ProtectControlGroups = true;
+            ProtectClock = true;
+            ProtectHostname = true;
+            RestrictNamespaces = true;
+            RestrictRealtime = true;
+            RestrictSUIDSGID = true;
+            LockPersonality = true;
+            RestrictAddressFamilies = [
+              "AF_INET"
+              "AF_INET6"
+              "AF_UNIX"
+            ];
+            CapabilityBoundingSet = "";
+            SystemCallArchitectures = "native";
+            SystemCallFilter = [
+              "@system-service"
+              "~@privileged"
+            ];
+            # V8's JIT needs writable+executable memory.
+            MemoryDenyWriteExecute = false;
+          }
+          // optionalAttrs useStateDirectory {
+            StateDirectory = stateDirRel;
+            StateDirectoryMode = "0750";
+          }
+          // optionalAttrs (!useStateDirectory) {
+            ReadWritePaths = [ cfg.dataDir ];
+          };
       };
     };
+in
+{
+  options.services = {
+    cli-memoria = mkOptions "cli-memoria";
+    # Legacy service name kept for existing NixOS deployments (preserves /var/lib/my-memory and systemd unit name).
+    my-memory = mkOptions "my-memory";
   };
+
+  config = mkMerge [
+    {
+      assertions = [
+        {
+          assertion = !(config.services.cli-memoria.enable && config.services.my-memory.enable);
+          message = "Enable only one of services.cli-memoria or services.my-memory, not both.";
+        }
+      ];
+    }
+    (mkService "cli-memoria" config.services.cli-memoria)
+    (mkService "my-memory" config.services.my-memory)
+  ];
 }

@@ -15,7 +15,7 @@ A self-hosted, git-backed memory for AI agents: a compact **CLI (`memoria`)** fo
 - **Attachments.** Binaries go to git LFS with a companion note holding their text (PDFs via `pdftotext`; scanned PDFs and images via local OCR with `tesseract`, when installed), so they are searchable too.
 - **Typed links.** `works_at:: [[acme]]` says what a link means, and `links` can filter by it.
 
-How it works inside (index, write flow, concurrency, auth): [docs/design.md](docs/design.md).
+How it works inside (index, write flow, concurrency, auth): [docs/design.md](docs/design.md). Write-rules design and evaluation (Spanish): [docs/normas-al-escribir.md](docs/normas-al-escribir.md).
 
 ## The `memoria` CLI
 
@@ -183,7 +183,7 @@ Git push webhook (optional): `POST /hooks/git` signed with HMAC-SHA256 (`X-Hub-S
 }
 ```
 
-After `cli-memoria token add … --file <tokensFile>`, run `systemctl reload cli-memoria`. The package brings `pdftotext`, `pdftoppm` and `tesseract`; the module installs the language data listed in `ocr.languages` (default Spanish and English), and builds that tesseract only when `ocr.enable` is on.
+After `cli-memoria token add … --file <tokensFile>`, run `systemctl reload cli-memoria`. The package brings `pdftotext`, `pdftoppm` and `tesseract`; the module installs the language data listed in `ocr.languages` (default Spanish and English), and builds that tesseract only when `ocr.enable` is on. `user`, `group` and `dataDir` are configurable (and `services.my-memory` plus `listen.private` remain supported for existing deployments).
 
 ### Connecting clients
 

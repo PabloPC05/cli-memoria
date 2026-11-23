@@ -15,7 +15,7 @@ Una memoria autoalojada en git para agentes de IA: una **CLI compacta (`memoria`
 - **Adjuntos.** Los binarios van a git LFS con una nota al lado que contiene su texto (los PDF, con `pdftotext`; los PDF escaneados y las imágenes, con OCR local mediante `tesseract` si está instalado), así que también se encuentran al buscar.
 - **Enlaces con tipo.** `works_at:: [[acme]]` dice qué significa un enlace, y `links` puede filtrar por él.
 
-Cómo funciona por dentro (índice, flujo de escritura, concurrencia, autenticación): [docs/design.md](docs/design.md).
+Cómo funciona por dentro (índice, flujo de escritura, concurrencia, autenticación): [docs/design.md](docs/design.md). Diseño y evaluación de las reglas de escritura: [docs/normas-al-escribir.md](docs/normas-al-escribir.md).
 
 ## La CLI `memoria`
 
@@ -183,7 +183,7 @@ Webhook de git (opcional): `POST /hooks/git` firmado con HMAC-SHA256 (`X-Hub-Sig
 }
 ```
 
-Tras `cli-memoria token add … --file <tokensFile>`, ejecuta `systemctl reload cli-memoria`. El paquete trae `pdftotext`, `pdftoppm` y `tesseract`; el módulo instala los datos de los idiomas de `ocr.languages` (por defecto español e inglés), y solo compila ese tesseract con `ocr.enable` activado.
+Tras `cli-memoria token add … --file <tokensFile>`, ejecuta `systemctl reload cli-memoria`. El paquete trae `pdftotext`, `pdftoppm` y `tesseract`; el módulo instala los datos de los idiomas de `ocr.languages` (por defecto español e inglés), y solo compila ese tesseract con `ocr.enable` activado. `user`, `group` y `dataDir` son configurables (y se mantiene compatibilidad con `services.my-memory` y `listen.private` para instalaciones existentes).
 
 ### Conectar clientes
 

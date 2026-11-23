@@ -54,6 +54,7 @@ buildNpmPackage {
           tesseractOcr
         ]
       }
+    ln -s cli-memoria $out/bin/my-memory
   '';
 
   meta = {
