@@ -1,6 +1,6 @@
-# my-memory
+# cli-memoria (antes my-memory)
 
-Una memoria autoalojada para agentes de IA. Tus notas son una carpeta de Markdown en git; my-memory las sirve por [MCP](https://modelcontextprotocol.io) para que cualquier agente (Claude Code, Codex, claude.ai, tus propios bots) pueda buscarlas, leerlas y escribirlas. Cada escritura es un commit atribuido al cliente que la hizo.
+Una memoria autoalojada para agentes de IA, con su servidor y su CLI. Tus notas son una carpeta de Markdown en git; my-memory las sirve por [MCP](https://modelcontextprotocol.io) para que cualquier agente (Claude Code, Codex, claude.ai, tus propios bots) pueda buscarlas, leerlas y escribirlas. Cada escritura es un commit atribuido al cliente que la hizo.
 
 *[Read in English](README.md)*
 
@@ -14,6 +14,7 @@ Una memoria autoalojada para agentes de IA. Tus notas son una carpeta de Markdow
 - **Adjuntos.** Los binarios van a git LFS con una nota al lado que contiene su texto (los PDF, con `pdftotext`; los PDF escaneados y las imágenes, con OCR local mediante `tesseract` si está instalado), así que también se encuentran al buscar.
 - **Enlaces con tipo.** `works_at:: [[acme]]` dice qué significa un enlace, y `links` puede filtrar por él.
 - **Búsqueda por significado, opcional.** Apunta `[embeddings]` a cualquier endpoint de embeddings compatible con OpenAI (Ollama o llama.cpp en la misma CPU, TEI, OpenAI…) y `search` combina el texto completo con la similitud de vectores, así que «coche» encuentra la nota que dice «vehículo». Dentro del servidor no corre ningún modelo y no hace falta GPU; sin él, la búsqueda es solo de texto completo.
+- **Una CLI para agentes.** `memoria` ([cli/](cli/README.md)) busca, lee y escribe las notas desde una terminal, con salida compacta: lee directamente de una copia del repo de notas y escribe siempre a través del servidor. Paquete de Nix `memoria`, para Linux y macOS.
 
 Cómo funciona por dentro (índice, flujo de escritura, concurrencia, autenticación): [docs/design.md](docs/design.md).
 
@@ -231,6 +232,21 @@ my-memory atribuye cada escritura (el autor del commit de git y su trailer `Clie
 
 `my-memory migrate <clone>` muestra lo que cambiaría: los enlaces Markdown relativos pasan a `[[wikilinks]]`, las colisiones de nombres se renombran y el frontmatter que no es YAML válido se entrecomilla. Añade `--apply` para hacer el commit. Solo cambian esos fragmentos.
 
+## La CLI `memoria`
+
+`memoria` convierte la memoria en comandos de terminal para agentes: una línea por resultado con el total y cómo seguir, `--json` para `jq` y `--simular` en todo lo que escribe. Está en español (comandos `buscar`, `leer`, `lista`, `recientes`…, con alias en inglés como `search` y `read`). Sin dependencias de npm: Node 22 o más y unos `.mjs`.
+
+```sh
+nix run github:PabloPC05/cli-memoria#memoria -- --help
+memoria buscar cocina --carpeta projects --limite 5
+```
+
+- **Lee** directamente de una copia del repo de notas cuando `MEMORIA_DIR` apunta a ella (con `rg` y `git`), o por MCP si no.
+- **Escribe** siempre a través del servidor, así que firma con la credencial del agente y sigue `memory.toml`: una nota cada vez, o una copia de trabajo de git (`memoria copia`) cuyos commits `memoria publicar` envía nota a nota, cada una con su hash.
+- Habla MCP con una **pasarela** (`BADULAQUE_URL`, `BADULAQUE_CLAVE`) que ofrece las herramientas de my-memory como `memoria_<herramienta>` detrás de una sola herramienta `buscador_usar`, con una clave por agente ([Una credencial por agente](#una-credencial-por-agente)). Los nombres vienen de la pasarela del autor; son configuración, no una dependencia.
+
+Estructura, configuración, empaquetado y pruebas: [cli/README.md](cli/README.md).
+
 ## Desarrollo
 
 ```sh
@@ -238,6 +254,8 @@ npm ci
 npm test          # vitest: unitarias, de integración (repos git reales) y extremo a extremo HTTP/OAuth
 npm run typecheck
 nix flake check   # compila el paquete y ejecuta el test de la VM de NixOS
+NODE=$(command -v node) MY_MEMORY=$(nix build --no-link --print-out-paths .#default)/bin/my-memory \
+  cli/probar.sh   # la CLI memoria de punta a punta, contra un my-memory de verdad con notas de juguete
 ```
 
 ## Licencia

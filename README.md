@@ -1,6 +1,6 @@
-# my-memory
+# cli-memoria (formerly my-memory)
 
-A self-hosted memory for AI agents. Your notes are a folder of Markdown files in git; my-memory serves them over [MCP](https://modelcontextprotocol.io) so any agent (Claude Code, Codex, claude.ai, your own bots) can search, read and write them. Every write is a git commit attributed to the client that made it.
+A self-hosted memory for AI agents, as a server and a CLI. Your notes are a folder of Markdown files in git; my-memory serves them over [MCP](https://modelcontextprotocol.io) so any agent (Claude Code, Codex, claude.ai, your own bots) can search, read and write them. Every write is a git commit attributed to the client that made it.
 
 *[Leer en español](README.es.md)*
 
@@ -14,6 +14,7 @@ A self-hosted memory for AI agents. Your notes are a folder of Markdown files in
 - **Attachments.** Binaries go to git LFS with a companion note holding their text (PDFs via `pdftotext`; scanned PDFs and images via local OCR with `tesseract`, when installed), so they are searchable too.
 - **Typed links.** `works_at:: [[acme]]` says what a link means, and `links` can filter by it.
 - **Optional search by meaning.** Point `[embeddings]` at any OpenAI-compatible embeddings endpoint (Ollama or llama.cpp on the same CPU, TEI, OpenAI…) and `search` fuses full text with vector similarity, so "car" finds the note that says "vehicle". No model runs inside the server and no GPU is needed; without it, search is full text only.
+- **A CLI for agents.** `memoria` ([cli/](cli/README.md)) searches, reads and writes the notes from a shell, with compact output: reads straight from a checkout of the notes repo, writes always through the server. Nix package `memoria`, for Linux and macOS.
 
 How it works inside (index, write flow, concurrency, auth): [docs/design.md](docs/design.md).
 
@@ -231,6 +232,21 @@ my-memory attributes every write (the git commit author and its `Client:` traile
 
 `my-memory migrate <clone>` shows what would change: relative Markdown links become `[[wikilinks]]`, name collisions are renamed, and frontmatter that is not valid YAML gets quoted. Add `--apply` to commit it. Only those spans change.
 
+## The `memoria` CLI
+
+`memoria` turns the memory into shell commands for agents: one line per result with the total and how to go on, `--json` for `jq`, and dry runs with `--simular` on every write. It is written in Spanish (commands `buscar`, `leer`, `lista`, `recientes`…, with English aliases such as `search` and `read`). No npm dependencies: Node 22 or later and a few `.mjs` files.
+
+```sh
+nix run github:PabloPC05/cli-memoria#memoria -- --help
+memoria buscar kitchen --carpeta projects --limite 5
+```
+
+- **Reads** go straight to a checkout of the notes repo when `MEMORIA_DIR` points at one (with `rg` and `git`), or through MCP otherwise.
+- **Writes** always go through the server, so they are signed by the agent's credential and follow `memory.toml`: one note at a time, or a git working copy (`memoria copia`) whose commits `memoria publicar` sends note by note, each with its hash.
+- It talks MCP to a **gateway** (`BADULAQUE_URL`, `BADULAQUE_CLAVE`) that exposes my-memory's tools as `memoria_<tool>` behind one `buscador_usar` tool, with one key per agent ([One credential per agent](#one-credential-per-agent)). The names come from the author's own gateway; they are configuration, not a dependency.
+
+Layout, configuration, packaging and tests: [cli/README.md](cli/README.md) (in Spanish).
+
 ## Development
 
 ```sh
@@ -238,6 +254,8 @@ npm ci
 npm test          # vitest: unit, integration (real git repos) and HTTP/OAuth end to end
 npm run typecheck
 nix flake check   # builds the package and runs the NixOS VM test
+NODE=$(command -v node) MY_MEMORY=$(nix build --no-link --print-out-paths .#default)/bin/my-memory \
+  cli/probar.sh   # the memoria CLI end to end, against a real my-memory with toy notes
 ```
 
 ## License
