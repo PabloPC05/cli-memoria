@@ -92,7 +92,7 @@ describe("rules on every write path", () => {
 		const head = await m.git.head();
 		await refused(m.edit(writer, { path: "topics/vieja.md", edits: [{ old_string: "Otra línea, corregida.", new_string: "Otra línea, y memoria_write para escribir." }], reason: "Añade" }));
 		const e = await refused(m.edit(writer, { path: "topics/vieja.md", edits: [{ old_string: "«esto es viejo»", new_string: "«esto es nuevo»" }], reason: "Cambia la fuente" }));
-		expect(e.details.violations).toEqual([{ rule: "append_only", line: 17, message: "the line «- Pablo, 2026-10-01: «esto es viejo»» of «## Fuentes» was changed or removed", fix: "put it back exactly as it was; this section only takes new lines" }]);
+		expect(e.details.violations).toEqual([{ rule: "append_only", line: 17, message: "the line «- Pablo, 2026-10-01: «esto es viejo»» of «## Fuentes» was changed or removed", fix: expect.stringMatching(/^put it back exactly as it was; this section only takes new lines\. To split the note, do it in one submission \(the publish tool, or one memoria publicar\)/) }]);
 		expect(await m.git.head()).toBe(head);
 		// Fixing an old problem is a plain edit.
 		const fixed = await m.edit(writer, { path: "topics/vieja.md", edits: [{ old_string: "type: Topic", new_string: "type: Notes" }], reason: "Tipo" });
@@ -213,6 +213,107 @@ describe("rules on every write path", () => {
 		const logged = events.find((e) => e.event === "rules.remote_violations");
 		expect(logged?.data.path).toBe("topics/vieja.md");
 		expect((logged?.data.violations as { rule: string; line: number }[]).map((v) => [v.rule, v.line])).toEqual([["obsolete", 11]]);
+	});
+});
+
+describe("publish: several commits as one submission", () => {
+	/** Ana with a second section and its own source, ready to be split. */
+	const BIG = ANA.replace("## Fuentes", "## Trabajo\n\nTrabaja en Vigo.\n\n## Fuentes").replace("«Ana es mi prima»\n", "«Ana es mi prima»\n- Pablo, 2026-11-02: «trabaja en Vigo»\n");
+	const SHORT = ANA;
+	const sub = (fuente: string) => `${fm("Trabajo de Ana", "Work")}Ana trabaja en Vigo. Ver [[ana]].\n\n## Fuentes\n\n${fuente}\n`;
+
+	async function setup() {
+		env = await makeMemory({ ...SEED, "people/ana.md": BIG });
+		return env.memory;
+	}
+
+	it("splitting a note moves its source lines to the new note in one submission, commit by commit", async () => {
+		const m = await setup();
+		const head = await m.git.head();
+		// One write of the original alone is still refused, and says how to split.
+		const alone = await refused(m.write(writer, { path: "people/ana.md", content: SHORT, hash: await hashOf("people/ana.md"), reason: "Acorta" }));
+		expect(alone.details.violations[0]?.fix).toContain("To split the note, do it in one submission");
+		const r = await m.publish(writer, {
+			commits: [
+				{ reason: "Acorta la nota de Ana", changes: [{ op: "write", path: "people/ana.md", content: SHORT, hash: await hashOf("people/ana.md") }] },
+				{ reason: "El trabajo de Ana, en su nota", changes: [{ op: "create", path: "people/trabajo-de-ana.md", content: sub("- Pablo, 2026-11-02: «trabaja en Vigo»") }] },
+			],
+		});
+		expect(r.commits.map((c) => c.reason)).toEqual(["Acorta la nota de Ana", "El trabajo de Ana, en su nota"]);
+		expect(r.commits[1]?.commit).toBe(await m.git.head());
+		expect((await m.git.out(["rev-list", "--count", `${head}..HEAD`])).trim()).toBe("2");
+		expect((await m.git.out(["log", "-1", "--format=%(trailers:key=Tool,valueonly)"])).trim()).toBe("publish");
+		expect(r.hashes).toEqual({ "people/ana.md": await hashOf("people/ana.md"), "people/trabajo-de-ana.md": await hashOf("people/trabajo-de-ana.md") });
+		await expect(m.read({ path: "people/trabajo-de-ana.md" })).resolves.toMatchObject({ path: "people/trabajo-de-ana.md" });
+		await expect(m.links({ path: "people/ana.md", direction: "in" })).resolves.toMatchObject({ in: expect.arrayContaining([expect.objectContaining({ src_path: "people/trabajo-de-ana.md" })]) });
+	});
+
+	it("a source line that goes nowhere, or arrives changed, refuses the whole submission and leaves no trace", async () => {
+		const m = await setup();
+		const head = await m.git.head();
+		const send = async (fuente: string) =>
+			m.publish(writer, {
+				commits: [
+					{ reason: "Nueva nota", changes: [{ op: "create", path: "people/trabajo-de-ana.md", content: sub(fuente) }] },
+					{ reason: "Acorta", changes: [{ op: "write", path: "people/ana.md", content: SHORT, hash: await hashOf("people/ana.md") }] },
+				],
+			});
+		const nowhere = await refused(send("- Pablo, 2026-11-23: «otra cosa»"));
+		expect(nowhere.message.split("\n")[0]).toBe(
+			"Not saved: this submission would add 1 problem that the memory's rules forbid in «people/ana.md» (memory.toml [rules]). Nothing was saved; fix each one and send it again.",
+		);
+		expect(nowhere.message).toContain("- people/ana.md: append_only, line 15: the line «- Pablo, 2026-11-02: «trabaja en Vigo»» of «## Fuentes» was changed or removed. Fix: put it back exactly as it was; this section only takes new lines, unless it moves unchanged into the «## Fuentes» of another note of this same submission.");
+		await refused(send("- Pablo, 2026-11-02: «trabaja en Vigo, en el puerto»"));
+		expect(await m.git.head()).toBe(head);
+		expect(await m.git.isClean()).toBe(true);
+		await expect(m.read({ path: "people/trabajo-de-ana.md" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+		expect((m.list({ folder: "people" }) as { notes: { path: string }[] }).notes.map((n) => n.path)).toEqual(["people/ana.md"]);
+	});
+
+	it("any failed change refuses everything, saying which commit and change", async () => {
+		const m = await setup();
+		const head = await m.git.head();
+		let error: MemoryError | null = null;
+		try {
+			await m.publish(writer, {
+				commits: [
+					{ reason: "Uno", changes: [{ op: "create", path: "topics/uno.md", content: `${fm("Uno", "Notes")}Uno.\n` }] },
+					{ reason: "Dos", changes: [{ op: "write", path: "people/ana.md", content: SHORT, hash: "0000" }] },
+				],
+			});
+		} catch (e) {
+			error = e as MemoryError;
+		}
+		expect(error?.code).toBe("CONFLICT");
+		expect(error?.message).toMatch(/^Nothing was saved\. Commit 2, change 1 \(write people\/ana\.md\): «people\/ana\.md» changed since you read it\./);
+		expect(await m.git.head()).toBe(head);
+		await expect(m.read({ path: "topics/uno.md" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+		expect((await m.read({ path: "people/ana.md" })).content).toBe(BIG);
+	});
+
+	it("what memoria publicar would send: the commits of a working copy, and check judges each commit the same way", async () => {
+		const m = await setup();
+		const copy = join(env!.root, "copia");
+		execFileSync("git", ["clone", "-q", m.opts.repoDir, copy]);
+		const git = new Git(copy);
+		await git.run(["config", "user.name", "copia"]);
+		await git.run(["config", "user.email", "copia@example.com"]);
+		const base = (await git.head()) as string;
+		// One commit that splits the note: what `memoria publicar` turns into one publish.
+		await writeFile(join(copy, "people/ana.md"), SHORT);
+		await writeFile(join(copy, "people/trabajo-de-ana.md"), sub("- Pablo, 2026-11-02: «trabaja en Vigo»"));
+		await git.run(["add", "-A"]);
+		await git.run(["commit", "-q", "-m", "Parte la nota de Ana"]);
+		const changes = [];
+		for (const line of (await git.out(["diff", "--name-status", base, "HEAD"])).trim().split("\n")) {
+			const [status, path] = line.split("\t") as [string, string];
+			const content = await git.out(["show", `HEAD:${path}`]);
+			changes.push(status === "A" ? { op: "create" as const, path, content } : { op: "write" as const, path, content, hash: (await git.out(["rev-parse", `${base}:${path}`])).trim() });
+		}
+		const r = await m.publish(writer, { commits: [{ reason: "Parte la nota de Ana", changes }] });
+		expect(r.commits).toHaveLength(1);
+		const each = commitsReport(await checkCommits(new Git(m.opts.repoDir), parseConventions(WITH_RULES), `${base}..HEAD`));
+		expect(each).toMatchObject({ commits: 1, refused_commits: 0 });
 	});
 });
 

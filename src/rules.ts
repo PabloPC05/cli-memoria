@@ -67,8 +67,13 @@ export interface WriteCheck {
 export interface CheckOptions {
 	/** Only these rules (attach checks only the frontmatter of the note it generates). */
 	only?: RuleId[];
-	/** Lines of append-only sections this write may remove: what a reverted commit itself added. */
+	/**
+	 * Lines of append-only sections this write may remove: what a reverted commit itself added, or what enters the
+	 * same section of another note of the same submission (`checkBatch`).
+	 */
 	allowRemoved?: string[];
+	/** Part of a submission of several notes (a `publish`, a commit): changes the advice of `append_only`. */
+	batch?: boolean;
 }
 
 // ── configuration ──────────────────────────────────────────────────────────
@@ -466,7 +471,11 @@ export function checkWrite(rules: Rules, after: NoteText, before: NoteText | nul
 					rule: "append_only",
 					line: neu.headingLine,
 					message: neu.headingLine === null ? `the section «${name}» was removed with its line «${clip(l)}»` : `the line «${clip(l)}» of «${name}» was changed or removed`,
-					fix: neu.headingLine === null ? `keep «${name}» with all its lines; you may only add lines to it` : "put it back exactly as it was; this section only takes new lines",
+					fix: `${neu.headingLine === null ? `keep «${name}» with all its lines; you may only add lines to it` : "put it back exactly as it was; this section only takes new lines"}${
+						opts.batch
+							? `, unless it moves unchanged into the «${name}» of another note of this same submission`
+							: `. To split the note, do it in one submission (the publish tool, or one memoria publicar): a line may then leave «${name}» here if it enters, unchanged, the «${name}» of another note of the same submission`
+					}`,
 					action: rules.appendOnly.action,
 					key: `append_only:${l}`,
 				});
@@ -476,6 +485,28 @@ export function checkWrite(rules: Rules, after: NoteText, before: NoteText | nul
 	fresh.sort(byLine);
 	existing.sort(byLine);
 	return { blocking: fresh.filter((v) => v.action === "block"), warnings: fresh.filter((v) => v.action === "warn"), existing };
+}
+
+/**
+ * The notes of one submission (several notes in one `publish`, or one commit), judged together: a line that leaves an
+ * append-only section of one note is not lost if the same line, unchanged, enters that section of another note of
+ * the submission, as when a note is split. Each line that enters covers one line that leaves.
+ */
+export function checkBatch(rules: Rules, entries: { after: NoteText; before: NoteText | null; opts?: CheckOptions }[]): WriteCheck[] {
+	const entering = new Map<string, number>();
+	for (const e of entries) for (const l of appendOnlyAdded(rules, e.before?.text ?? null, e.after.text)) entering.set(l, (entering.get(l) ?? 0) + 1);
+	return entries.map((e) => {
+		const moved: string[] = [];
+		if (e.before) {
+			for (const l of appendOnlyAdded(rules, e.after.text, e.before.text)) {
+				const n = entering.get(l) ?? 0;
+				if (n === 0) continue;
+				entering.set(l, n - 1);
+				moved.push(l);
+			}
+		}
+		return checkWrite(rules, e.after, e.before, { ...e.opts, allowRemoved: [...(e.opts?.allowRemoved ?? []), ...moved], batch: true });
+	});
 }
 
 /** Lines of the append-only sections that one version adds over another: what a revert of that change may remove. */
@@ -518,6 +549,16 @@ export function blockingMessage(path: string, check: WriteCheck): string {
 	return `Not saved: this write would add ${n} problem${n === 1 ? "" : "s"} that the memory's rules forbid in «${path}» (memory.toml [rules]). Fix each one and retry; nothing else changes.${older}\n${list(check.blocking)}`;
 }
 
+/** The error text of a refused submission of several notes. */
+export function batchBlockingMessage(results: { path: string; check: WriteCheck }[]): string {
+	const refused = results.filter((r) => r.check.blocking.length);
+	const n = refused.reduce((k, r) => k + r.check.blocking.length, 0);
+	const lines = refused.flatMap((r) => r.check.blocking.map((v) => `- ${r.path}: ${formatViolation(v)}`));
+	const shown = lines.slice(0, MAX_LINES);
+	if (lines.length > MAX_LINES) shown.push(`- …and ${lines.length - MAX_LINES} more (see «violations»).`);
+	return `Not saved: this submission would add ${n} problem${n === 1 ? "" : "s"} that the memory's rules forbid in ${refused.map((r) => `«${r.path}»`).join(", ")} (memory.toml [rules]). Nothing was saved; fix each one and send it again.\n${shown.join("\n")}`;
+}
+
 /** Warnings of an accepted write: new problems of `warn` rules and problems the note already had. */
 export function warningTexts(check: WriteCheck): { code: "RULES_WARNINGS" | "RULES_EXISTING"; message: string; violations: ReturnType<typeof violationJson>[] }[] {
 	const out: { code: "RULES_WARNINGS" | "RULES_EXISTING"; message: string; violations: ReturnType<typeof violationJson>[] }[] = [];
@@ -539,7 +580,10 @@ export function describeRules(rules: Rules | null): string | null {
 		const untyped = rules.type.untypedFolders.length ? ` (except notes in ${rules.type.untypedFolders.map((f) => `${f}/`).join(", ")})` : "";
 		parts.push(`«${rules.type.field}» is one of ${rules.type.allowed.join(", ")}${untyped}`);
 	}
-	if (rules.appendOnly.sections.length) parts.push(`the existing lines of ${rules.appendOnly.sections.map((s) => `«## ${s}»`).join(", ")} are never changed or removed, only added to`);
+	if (rules.appendOnly.sections.length) {
+		const names = rules.appendOnly.sections.map((s) => `«## ${s}»`).join(", ");
+		parts.push(`the existing lines of ${names} are never changed or removed, only added to (to split a note, send both notes in one publish: a line may then move unchanged to the same section of the other note)`);
+	}
 	if (rules.forbiddenSections.sections.length) parts.push(`no ${rules.forbiddenSections.sections.map((s) => `«## ${s}»`).join(", ")} sections`);
 	for (const [type, sections] of Object.entries(rules.templates.byType)) parts.push(`${type} notes use the sections ${sections.join(" · ")}, in that order`);
 	if (rules.obsolete.patterns.length) parts.push("names of retired tools and services are refused");

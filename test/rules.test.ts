@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultConventions, parseConventions } from "../src/conventions.js";
-import { appendOnlyAdded, checkWrite, describeRules, formatViolation, noteViolations, parseRules, type Rules, type WriteCheck } from "../src/rules.js";
+import { appendOnlyAdded, checkBatch, checkWrite, describeRules, formatViolation, noteViolations, parseRules, type Rules, type WriteCheck } from "../src/rules.js";
 import { RULES } from "./rules-config.js";
 
 
@@ -146,7 +146,7 @@ describe("append-only sections", () => {
 		const changed = check("people/ana.md", person(`## Quién es\n\nPrima.\n\n${FUENTES.replace("vive en Vigo", "vive en Ourense")}`), old);
 		expect(changed.blocking).toHaveLength(1);
 		expect(formatViolation(changed.blocking[0]!)).toBe(
-			"append_only, line 15: the line «- Pablo, 2026-11-02: «vive en Vigo»» of «## Fuentes» was changed or removed. Fix: put it back exactly as it was; this section only takes new lines.",
+			"append_only, line 15: the line «- Pablo, 2026-11-02: «vive en Vigo»» of «## Fuentes» was changed or removed. Fix: put it back exactly as it was; this section only takes new lines. To split the note, do it in one submission (the publish tool, or one memoria publicar): a line may then leave «## Fuentes» here if it enters, unchanged, the «## Fuentes» of another note of the same submission.",
 		);
 		const gone = check("people/ana.md", person("## Quién es\n\nPrima.\n"), old);
 		expect(gone.blocking).toHaveLength(2);
@@ -160,6 +160,48 @@ describe("append-only sections", () => {
 		expect(allowRemoved).toEqual(["- Pablo, 2026-11-20: «inventado»"]);
 		expect(check("people/ana.md", old, added, { allowRemoved }).blocking).toEqual([]);
 		expect(check("people/ana.md", person("## Quién es\n\nPrima.\n"), added, { allowRemoved }).blocking).toHaveLength(2);
+	});
+});
+
+describe("append-only sections across the notes of one submission", () => {
+	const old = person(`## Quién es\n\nPrima.\n\n## Trabajo\n\nEn Vigo.\n\n${FUENTES}`);
+	const shortened = person(`## Quién es\n\nPrima.\n\n## Fuentes\n\n- Pablo, 2026-10-21: «Ana es mi prima»\n`);
+	const sub = (fuentes: string) => `${person(`Ana trabaja en Vigo.\n\n## Fuentes\n\n${fuentes}`, "Work")}`;
+	const at = (path: string, text: string) => ({ path, text });
+
+	it("let a line leave a note's Fuentes when it enters, unchanged, another note's Fuentes (splitting a note)", () => {
+		const [a, b] = checkBatch(rules, [
+			{ after: at("people/ana.md", shortened), before: at("people/ana.md", old) },
+			{ after: at("people/ana/trabajo-de-ana.md", sub("- Pablo, 2026-11-02: «vive en Vigo»\n")), before: null },
+		]);
+		expect(a?.blocking).toEqual([]);
+		expect(b?.blocking).toEqual([]);
+	});
+
+	it("still block a line that goes nowhere, or arrives changed, and say so for a submission", () => {
+		const [nowhere] = checkBatch(rules, [
+			{ after: at("people/ana.md", shortened), before: at("people/ana.md", old) },
+			{ after: at("people/ana/trabajo-de-ana.md", sub("- Pablo, 2026-11-23: «otra cosa»\n")), before: null },
+		]);
+		expect(nowhere?.blocking.map((v) => v.rule)).toEqual(["append_only"]);
+		expect(nowhere?.blocking[0]?.fix).toBe("put it back exactly as it was; this section only takes new lines, unless it moves unchanged into the «## Fuentes» of another note of this same submission");
+		const [changed] = checkBatch(rules, [
+			{ after: at("people/ana.md", shortened), before: at("people/ana.md", old) },
+			{ after: at("people/ana/trabajo-de-ana.md", sub("- Pablo, 2026-11-02: «vive en Vigo, en el centro»\n")), before: null },
+		]);
+		expect(changed?.blocking.map((v) => v.rule)).toEqual(["append_only"]);
+		// Outside Fuentes it does not count, and one line that enters covers only one that leaves.
+		const [outside] = checkBatch(rules, [
+			{ after: at("people/ana.md", shortened), before: at("people/ana.md", old) },
+			{ after: at("topics/vigo.md", person("- Pablo, 2026-11-02: «vive en Vigo»\n", "Notes")), before: null },
+		]);
+		expect(outside?.blocking.map((v) => v.rule)).toEqual(["append_only"]);
+		const twice = checkBatch(rules, [
+			{ after: at("people/ana.md", shortened), before: at("people/ana.md", old) },
+			{ after: at("people/eva.md", shortened.replace("Ana", "Eva")), before: at("people/eva.md", old.replace("Ana", "Eva")) },
+			{ after: at("people/ana/trabajo-de-ana.md", sub("- Pablo, 2026-11-02: «vive en Vigo»\n")), before: null },
+		]);
+		expect(twice.map((c) => c.blocking.length)).toEqual([0, 1, 0]);
 	});
 });
 

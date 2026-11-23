@@ -1,12 +1,13 @@
 import type { Conventions } from "./conventions.js";
 import type { Git } from "./git.js";
-import { checkWrite, formatViolation, noteViolations, type Rules, rulesApply, type Violation, violationJson, type WriteCheck } from "./rules.js";
+import { checkBatch, formatViolation, type NoteText, noteViolations, type Rules, rulesApply, type Violation, violationJson, type WriteCheck } from "./rules.js";
 import { type FileChange, parseNameStatus } from "./util.js";
 
 /**
  * `my-memory check`: the write rules over a git repo, without the server. On a tree it lists what every note breaks
- * (like `lint`); on a range it judges the change the way the server judges a write (only new problems block), so it
- * can run as a pre-receive or pre-push hook; with `each` it judges every commit of the range on its own.
+ * (like `lint`); on a range it judges the change the way the server judges a submission (only new problems block,
+ * and a line may move between the Fuentes of two notes), so it can run as a pre-receive or pre-push hook; with
+ * `each` it judges every commit of the range on its own.
  */
 
 /** git's empty tree, the "parent" of a root commit. */
@@ -52,35 +53,49 @@ export async function checkTree(git: Git, conventions: Conventions, rev = "HEAD"
 	return { notes: paths.length, findings };
 }
 
-/** The notes a change writes, judged against what they were before it, in one `cat-file` for all of them. */
-async function judge(git: Git, conventions: Conventions, pairs: { from: string; to: string; change: FileChange }[]): Promise<FileCheck[][]> {
+/**
+ * The notes a change writes, judged against what they were before it, in one `cat-file` for all of them. Pairs with
+ * the same `group` (one commit, or the whole range) are one submission: a line may leave the Fuentes of one note if
+ * it enters those of another (`checkBatch`).
+ */
+async function judge(git: Git, conventions: Conventions, pairs: { from: string; to: string; change: FileChange; group: number }[]): Promise<FileCheck[][]> {
 	const rules = rulesOf(conventions);
 	const specs: string[] = [];
-	const plan = pairs.map(({ from, to, change }) => {
+	const plan = pairs.map(({ from, to, change, group }) => {
 		if (change.status === "D" || !rulesApply(conventions, change.path)) return null;
 		const beforePath = change.status === "R" && change.from ? change.from : change.path;
 		const hasBefore = from !== EMPTY_TREE && (change.status === "M" || change.status === "T" || change.status === "R") && rulesApply(conventions, beforePath);
 		specs.push(`${to}:${change.path}`);
 		if (hasBefore) specs.push(`${from}:${beforePath}`);
-		return { change, beforePath, hasBefore };
+		return { change, beforePath, hasBefore, group };
 	});
 	const texts = await git.blobs(specs);
 	let k = 0;
-	return plan.map((p) => {
-		if (!p) return [];
+	const groups = new Map<number, { index: number; after: NoteText; before: NoteText | null }[]>();
+	plan.forEach((p, index) => {
+		if (!p) return;
 		const after = texts[k++];
 		const before = p.hasBefore ? texts[k++] : null;
-		if (after === null || after === undefined) return [];
-		const check = checkWrite(rules, { path: p.change.path, text: after }, before === null || before === undefined ? null : { path: p.beforePath, text: before });
-		return [{ path: p.change.path, ...(p.change.status === "R" ? { from: p.change.from } : {}), check }];
+		if (after === null || after === undefined) return;
+		const entry = { index, after: { path: p.change.path, text: after }, before: before === null || before === undefined ? null : { path: p.beforePath, text: before } };
+		groups.set(p.group, [...(groups.get(p.group) ?? []), entry]);
 	});
+	const out: FileCheck[][] = pairs.map(() => []);
+	for (const entries of groups.values()) {
+		checkBatch(rules, entries).forEach((check, i) => {
+			const e = entries[i] as (typeof entries)[number];
+			const change = (plan[e.index] as { change: FileChange }).change;
+			out[e.index] = [{ path: change.path, ...(change.status === "R" ? { from: change.from } : {}), check }];
+		});
+	}
+	return out;
 }
 
 /** The whole range as one change (what a push brings), each note against its version at `from`. */
 export async function checkRange(git: Git, conventions: Conventions, from: string | null, to: string): Promise<FileCheck[]> {
 	const base = from ?? EMPTY_TREE;
 	const changes = parseNameStatus(await git.out(["diff", "-M", "--name-status", base, to]));
-	return (await judge(git, conventions, changes.map((change) => ({ from: base, to, change })))).flat();
+	return (await judge(git, conventions, changes.map((change) => ({ from: base, to, change, group: 0 })))).flat();
 }
 
 /** Every commit of a range (oldest first, merges left out) against its parent. */
@@ -95,7 +110,7 @@ export async function checkCommits(git: Git, conventions: Conventions, range: st
 		range,
 	]);
 	const commits: Omit<CommitCheck, "files">[] = [];
-	const pairs: { from: string; to: string; change: FileChange }[] = [];
+	const pairs: { from: string; to: string; change: FileChange; group: number }[] = [];
 	const owner: number[] = [];
 	for (const block of log.split("\x1e")) {
 		if (!block.trim()) continue;
@@ -103,7 +118,7 @@ export async function checkCommits(git: Git, conventions: Conventions, range: st
 		const parent = (parents ?? "").trim().split(" ")[0] || EMPTY_TREE;
 		commits.push({ commit: commit as string, date: date as string, client: (client ?? "").trim(), tool: (tool ?? "").trim(), subject: subject as string });
 		for (const change of parseNameStatus(files ?? "")) {
-			pairs.push({ from: parent, to: commit as string, change });
+			pairs.push({ from: parent, to: commit as string, change, group: commits.length - 1 });
 			owner.push(commits.length - 1);
 		}
 	}

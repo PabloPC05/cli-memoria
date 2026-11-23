@@ -96,7 +96,7 @@ describe("private listener", () => {
 		const client = await mcp(priv.url, writeToken, "chat-7");
 		expect(client.getInstructions()).toContain("[[perfil]]");
 		const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-		expect(tools).toEqual(["attach", "create", "delete", "edit", "history", "links", "lint", "list", "move", "read", "recent", "revert", "search", "write"]);
+		expect(tools).toEqual(["attach", "create", "delete", "edit", "history", "links", "lint", "list", "move", "publish", "read", "recent", "revert", "search", "write"]);
 		const created = parse(await client.callTool({ name: "create", arguments: { path: "personas/sara.md", content: note("Sara", "Amiga", "Le gusta el té."), reason: "Nueva" } }));
 		expect(created.commit).toBeTruthy();
 		const hist = parse(await client.callTool({ name: "history", arguments: { name: "sara" } })) as { commits: { author: string; trailers: Record<string, string> }[] };
@@ -106,6 +106,11 @@ describe("private listener", () => {
 		expect(recent.commits[0]).toMatchObject({ commit: created.commit, client: "claude-surface", tool: "create", notes: [{ path: "personas/sara.md", name: "sara", change: "added" }] });
 		const undone = parse(await client.callTool({ name: "revert", arguments: { commit: created.commit, reason: "Deshacer" } }));
 		expect(undone).toMatchObject({ reverted: created.commit, changes: [{ path: "personas/sara.md", change: "removed" }] });
+		const published = parse(
+			await client.callTool({ name: "publish", arguments: { commits: [{ reason: "Llega Luis", changes: [{ op: "create", path: "personas/luis.md", content: note("Luis", "Compañero", "Juega al ajedrez.") }] }] } }),
+		) as { commits: { reason: string }[]; hashes: Record<string, string> };
+		expect(published.commits.map((c) => c.reason)).toEqual(["Llega Luis"]);
+		expect(Object.keys(published.hashes)).toEqual(["personas/luis.md"]);
 		const err = parse(await client.callTool({ name: "read", arguments: { name: "nadie" } }));
 		expect(err).toMatchObject({ isError: true, code: "NOT_FOUND" });
 		await client.close();
@@ -241,7 +246,7 @@ describe("public listener and OAuth", () => {
 		const back3 = await authorize(clientId);
 		const t3 = (await (await token({ grant_type: "authorization_code", client_id: clientId, code: back3.searchParams.get("code") as string, code_verifier: verifier, redirect_uri: redirectUri })).json()) as { access_token: string };
 		const viaPrivate = await mcp(priv.url, t3.access_token);
-		expect((await viaPrivate.listTools()).tools.length).toBe(14);
+		expect((await viaPrivate.listTools()).tools.length).toBe(15);
 		await viaPrivate.close();
 		expect(oauth.revokeClient(clientId)).toBeGreaterThan(0);
 		await expect(oauth.verifyAccessToken(t3.access_token)).rejects.toThrow();

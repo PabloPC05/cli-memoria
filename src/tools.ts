@@ -5,7 +5,7 @@ import { MemoryError } from "./errors.js";
 import { LINT_KINDS } from "./lint.js";
 import type { ClientsService } from "./clients.js";
 import type { Logger } from "./log.js";
-import type { ClientIdentity, MemoryService, SearchMode } from "./memory.js";
+import type { ClientIdentity, MemoryService, PublishChange, SearchMode } from "./memory.js";
 import { SETUP_GUIDE_URI, setupGuide } from "./setup-guide.js";
 
 export const SERVER_NAME = "my-memory";
@@ -266,6 +266,39 @@ export async function createMcpServer(memory: MemoryService, client: ClientIdent
 			annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
 		},
 		wrap("delete", (a: { path?: string; name?: string; hash: string; reason: string }) => memory.delete(client, a)),
+	);
+
+	server.registerTool(
+		"publish",
+		{
+			title: "Publish several commits",
+			description:
+				"Sends several commits of changes as one submission, as `memoria publicar` sends the commits of a working copy: each commit becomes one commit with its reason, and if any change fails nothing is saved. The rules are judged over the whole submission, so a line may leave the «## Fuentes» of a note if it enters, unchanged, the «## Fuentes» of another note of the same submission (to split a note, send both in one publish). Changes: create {path, content}, write {path, content, hash}, move {from, to, hash}, delete {path, hash}; each hash is that of the version the change starts from. Returns the commits and the new hash of every note it touched.",
+			inputSchema: {
+				commits: z
+					.array(
+						z.object({
+							reason,
+							changes: z
+								.array(
+									z.object({
+										op: z.enum(["create", "write", "move", "delete"]),
+										path: z.string().optional().describe("The note, for create, write and delete."),
+										from: z.string().optional().describe("For move: the current path."),
+										to: z.string().optional().describe("For move: the new path."),
+										content: z.string().optional().describe("For create and write: the full note."),
+										hash: z.string().optional().describe("For write, move and delete: the hash of the version this change starts from."),
+									}),
+								)
+								.min(1),
+						}),
+					)
+					.min(1),
+				confirm_new: z.boolean().optional().describe("Create notes even if existing ones look alike (see create)."),
+			},
+			annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+		},
+		wrap("publish", (a: { commits: { reason: string; changes: PublishChange[] }[]; confirm_new?: boolean }) => memory.publish(client, a)),
 	);
 
 	server.registerTool(
