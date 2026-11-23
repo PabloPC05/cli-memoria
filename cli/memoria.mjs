@@ -2,19 +2,23 @@
 // memoria: la memoria de Pablo (notas Markdown en un repositorio git) como comandos.
 //
 // - Leer (buscar, leer, lista, recientes): directamente en el repositorio, que en lisa la terminal monta en solo
-//   lectura y dice en MEMORIA_DIR. Con rg y git, sin pasar por el MCP: filtra con rg, jq o head.
+//   lectura y dice en MEMORIA_DIR. Con rg y git, sin pasar por el MCP: filtra con rg, jq o head. `buscar --en <nota>`
+//   busca dentro de una sola nota; cada nota de los resultados lleva su description y la fecha de su último cambio
+//   (del historial de git, en una sola pasada de git log).
 // - Sin MEMORIA_DIR (el Mac): las mismas lecturas por el Badulaque (memoria_search, read, list, recent).
 //   En el Mac no se lee la copia de Google Drive.
-// - Escribir, en nativo (fase 4): una copia de trabajo (`memoria copia`, un git clone del repositorio de solo lectura)
-//   que se edita con las herramientas de siempre y se commitea con git; `memoria publicar` lleva esos commits al servidor
-//   de la memoria nota a nota (create, write, move, delete del Badulaque), con el hash de cada nota para no pisar cambios
-//   ajenos. El servidor es el único que escribe en el repositorio real: firma con la clave del agente y aplica sus reglas.
-//   `crear` y `editar` siguen siendo atajos de una sola nota por el Badulaque (y lo único que hay en el Mac).
+// - Escribir una nota: `crear`, `editar`, `escribir`, `mover` y `borrar --si`, cada uno una herramienta del servidor por
+//   el Badulaque (también en el Mac). El servidor es el único que escribe en el repositorio real: firma con la clave del
+//   agente y aplica sus reglas.
+// - Cambios de varias notas a la vez, en nativo (fase 4): una copia de trabajo (`memoria copia`, un git clone del
+//   repositorio de solo lectura) que se edita con las herramientas de siempre y se commitea con git; `memoria publicar`
+//   lleva esos commits al servidor nota a nota (create, write, move, delete), con el hash de cada nota para no pisar
+//   cambios ajenos.
 //
 // Uso: memoria --help. Sin dependencias (sus módulos van en cli/lib/). Ver cli/README.md.
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   Fallo, analizar, conBadulaque, correr, ejecutarCli, enUnaLinea, fechaCorta, imprimirJson, plano, simular, textoDe, usar, usarOFallar
@@ -22,7 +26,7 @@ import {
 import { esAyuda, resolverOrden } from "./lib/nativa.mjs";
 import { VENTANA_CARACTERES, VENTANA_LINEAS, miles, paginaDe, rangoDe, trozoDeListado } from "./lib/paginas.mjs";
 
-const VERSION = "2.2.0";
+const VERSION = "2.3.0";
 /** Una nota de más caracteres que esto es «larga»: `memoria leer` da su índice de secciones en vez de ella entera. */
 const NOTA_LARGA = 4000;
 const MEMORIA_DIR = (process.env.MEMORIA_DIR ?? "").trim();
@@ -33,11 +37,14 @@ const SERVIDOR = "refs/memoria/servidor";
 const AYUDA = `memoria: la memoria de Pablo como comandos (versión ${VERSION}).
 
 Lectura (${LOCAL ? `local, en ${MEMORIA_DIR}` : "por el Badulaque: no hay MEMORIA_DIR"}):
-  memoria buscar <texto…> [--carpeta X] [--limite N] [--pagina N] [--archivo] [--regex] [--json]
-      Una línea por resultado: ruta:línea · sección · fragmento (la sección sirve para ir luego con leer --seccion). Varias
-      palabras: todas en la misma línea, sin acentos ni mayúsculas. Un texto entre comillas con espacios es una frase.
-      --archivo incluye archive/. Acaba con el total («12 resultados; mostrando 1-5: --pagina 2»): --limite da los de
-      cada página (20 por defecto).
+  memoria buscar <texto…> [--carpeta X | --en <nota>] [--limite N] [--pagina N] [--archivo] [--regex] [--json]
+      Una línea por resultado: ruta:línea · sección · fragmento (la sección sirve para ir luego con leer --seccion) y,
+      bajo el primer resultado de cada nota, «↳ (cambiada el AAAA-MM-DD) su description». Varias palabras: todas en la
+      misma línea, sin acentos ni mayúsculas (si ninguna línea las tiene todas, por palabras sueltas). Un texto entre
+      comillas con espacios es una frase. --archivo incluye archive/. Acaba con el total («12 resultados; mostrando
+      1-5: --pagina 2»): --limite da los de cada página (20 por defecto).
+      --en <nota>: solo dentro de esa nota (nombre o ruta), cada línea que coincide con su número y su sección: así se
+      mira dentro de una nota sin leerla entera, y luego se lee lo que haga falta con leer --lineas A-B o --seccion S.
   memoria leer <nombre|ruta> [--seccion X | --lineas A-B] [--pagina N] [--todo]
       Una nota corta (hasta ~${miles(NOTA_LARGA)} caracteres) sale entera, con su frontmatter. Una larga da su cabecera (nombre,
       descripción, hash), el índice de sus secciones (línea de inicio y caracteres de cada una) y cómo seguir.
@@ -51,30 +58,38 @@ Lectura (${LOCAL ? `local, en ${MEMORIA_DIR}` : "por el Badulaque: no hay MEMORI
       Sin carpeta, las carpetas con su número de notas. Con carpeta, cada nota con su description y el total (50 por página).
   memoria recientes [N] [--json]
       Los últimos N cambios (15 por defecto): cuándo, quién, para qué y las notas que tocó.
+${LOCAL ? `  Las notas en bruto están en $MEMORIA_DIR (${MEMORIA_DIR}, solo lectura), para rg -n <texto> "$MEMORIA_DIR" si hace falta.\n` : ""}
+Escribir una nota, con esta misma CLI (la escribe el servidor, firmada por tu agente y con las reglas de la memoria;
+también en el Mac). --razon es el mensaje del cambio; --simular enseña la llamada sin hacerla:
+  memoria crear <ruta> --razon <texto> (--archivo <f> | -) [--confirmar-nueva]
+      Nota nueva con su frontmatter (name, description), desde un archivo o stdin. Si se parece a otra, falla y te la enseña.
+  memoria editar <nota> --razon <texto> --viejo <texto> --nuevo <texto> [--todas] [--hash H]
+  memoria editar <nota> --razon <texto> --ediciones <f.json>   (una lista de {old_string, new_string, replace_all})
+      Reemplazo exacto: --viejo tiene que aparecer una sola vez (o --todas).
+  memoria escribir <nota> --razon <texto> (--archivo <f> | -) [--hash H]    La nota existente entera, reemplazada (sin --hash, el de ahora).
+  memoria mover <nota> <destino> --razon <texto> [--hash H]                Mueve o renombra (los [[enlaces]] se reescriben); a archive/ la retira.
+  memoria borrar <nota> --razon <texto> --si [--hash H]                    Borra (queda en el historial; falla mientras otras notas la enlacen).
+      Sin --si no borra: solo si Pablo lo pidió.
+  memoria adjuntar <ruta> --archivo <f> --descripcion <texto> --razon <texto> [--titulo T] [--nombre N] [--alias A] [--confirmar-nueva]
+      Guarda un binario (PDF, imagen…) y crea al lado su nota con el texto. Hasta 6 MB.
+  memoria revertir <commit> --razon <texto> [--nota X]                     Deshace un cambio de historial o recientes con otro.
 
-Escribir como en un ordenador (copia de trabajo + git; hace falta MEMORIA_DIR, o sea, en lisa):
+Cambios de varias notas a la vez (copia de trabajo + git; hace falta MEMORIA_DIR, o sea, en lisa):
   memoria copia
       Crea tu copia de trabajo (un git clone de las notas) en ${COPIA} (cámbialo con MEMORIA_COPIA) y dice dónde está.
       Edítala con tus herramientas y haz git add / git commit (el asunto del commit es la razón del cambio).
   memoria estado [--json]
       Qué tienes sin commitear, qué commits faltan por publicar y si el servidor tiene cambios nuevos (y si chocan).
   memoria publicar [--razon <texto>] [--simular] [--confirmar-nueva] [--aplanar] [--json]
-      Lleva tus commits al servidor, nota a nota y firmados por ti: nota nueva, cambio, movimiento o borrado, cada uno con el
-      hash de la nota que viste, así que no pisa lo que otro cambió (si choca, para y te lo explica). Antes comprueba las
-      reglas de la memoria. Con --razon hace antes un commit con todo lo pendiente. --simular no envía nada: lo enseña.
+      Lleva tus commits al servidor, firmados por ti: nota nueva, cambio, movimiento o borrado, cada uno con el hash de la
+      nota que viste, así que no pisa lo que otro cambió (si choca, para y te lo explica). Si el servidor tiene publish, va
+      todo en un solo envío (un commit suyo por cada uno tuyo; si algo falla, no se guarda nada); si no, nota a nota. Antes
+      comprueba las reglas de la memoria. Con --razon hace antes un commit con todo lo pendiente. --simular no envía nada: lo enseña.
       --aplanar publica el resultado final de todos los commits (no uno a uno) con la razón hecha de sus asuntos: sirve si un
       commit intermedio no se puede publicar y otro posterior lo arregla.
-      Al acabar, tu copia queda igual que el servidor. Solo notas .md: los adjuntos van con badulaque memoria attach.
+      Al acabar, tu copia queda igual que el servidor. Solo notas .md: los adjuntos van con memoria adjuntar.
   memoria actualizar
       Trae los cambios nuevos del servidor a tu copia (rebase de tus commits sin publicar; si choca, lo deja como estaba).
-
-Escritura de una sola nota por el Badulaque (lo único que hay en el Mac), con la clave de tu agente:
-  memoria crear <ruta> --razon <texto> (--archivo <f> | -) [--confirmar-nueva]
-      Nota nueva con su frontmatter, desde un archivo o stdin. Si se parece a otra, falla y te la enseña.
-  memoria editar <nota> --razon <texto> --viejo <texto> --nuevo <texto> [--todas] [--hash H]
-  memoria editar <nota> --razon <texto> --ediciones <f.json>   (una lista de {old_string, new_string, replace_all})
-      Reemplazo exacto: --viejo tiene que aparecer una sola vez (o --todas).
-  --simular enseña la llamada sin hacerla. Para escribir una nota entera, moverla o borrarla: badulaque memoria write | move | delete.
 
 Lo demás del servidor de la memoria, por el Badulaque con la clave de tu agente (cada comando es una herramienta suya):
   memoria historial <nota> [--limite N] [--json]
@@ -83,13 +98,6 @@ Lo demás del servidor de la memoria, por el Badulaque con la clave de tu agente
       Los [[enlaces]] que salen de la nota (con los rotos marcados) y los que llegan a ella, con la línea que los contiene.
   memoria revisar [--tipos a,b] [--carpeta X] [--limite N] [--json]
       Candidatos de mantenimiento (huérfanas, enlaces rotos, duplicadas, viejas…), de peor a menos malo. Solo candidatos: lee antes de escribir.
-  memoria escribir <nota> --razon <texto> (--archivo <f> | -) [--hash H]    La nota existente entera, reemplazada (sin --hash, el de ahora).
-  memoria mover <nota> <destino> --razon <texto> [--hash H]                Mueve o renombra (los [[enlaces]] se reescriben); a archive/ la retira.
-  memoria borrar <nota> --razon <texto> [--hash H]                         Borra (queda en el historial; falla mientras otras notas la enlacen).
-  memoria revertir <commit> --razon <texto> [--nota X]                     Deshace un commit de historial o recientes con otro commit.
-  memoria adjuntar <ruta> --archivo <f> --descripcion <texto> --razon <texto> [--titulo T] [--nombre N] [--alias A] [--confirmar-nueva]
-      Guarda un binario (PDF, imagen…) y crea al lado su nota con el texto. Hasta 6 MB.
-  Todos los que escriben aceptan --simular. Para cambios grandes o de varias notas, mejor la copia de trabajo (copia y publicar).
 
 Variables: MEMORIA_DIR (la ruta de solo lectura; si falta, todo va por el Badulaque), MEMORIA_COPIA, BADULAQUE_CLAVE.
 Códigos de salida: 0 bien, 1 error de la herramienta, 2 uso, 3 red o protocolo.
@@ -263,6 +271,106 @@ function seccionDeLinea(lineas, lista, linea) {
   return enUnaLinea(camino(mejor, lista), 70);
 }
 
+// git para leer el repositorio de las notas: safe.directory, porque es de otro usuario (my-memory) y git, si no, se niega a
+// leerlo; sin configuración global ni del sistema (dentro de srt, ~/.gitconfig es un /dev/null que git no puede abrir y
+// falla entero); y sin bloqueos opcionales, porque es de solo lectura.
+const ENTORNO_LECTURA = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_OPTIONAL_LOCKS: "0" };
+
+/** git sobre el repositorio de las notas, para leer; null si git no está o falla. */
+function gitLectura(args) {
+  try {
+    const r = correr("git", ["-c", "safe.directory=*", "-c", "core.quotePath=false", "-C", MEMORIA_DIR, ...args], { env: ENTORNO_LECTURA });
+    return r.estado === 0 ? r.salida : null;
+  } catch {
+    return null;
+  }
+}
+
+/** El commit de HEAD del repositorio de las notas, leyendo .git sin lanzar git (es lo que se mira en cada orden); null si no se sabe. */
+function cabezaDelRepo() {
+  try {
+    const dir = join(MEMORIA_DIR, ".git");
+    const head = readFileSync(join(dir, "HEAD"), "utf8").trim();
+    if (/^[0-9a-f]{40,64}$/.test(head)) return head;
+    const ref = /^ref: (refs\/[^\s]+)$/.exec(head)?.[1];
+    if (!ref || ref.split("/").includes("..")) return null;
+    if (existsSync(join(dir, ref))) return readFileSync(join(dir, ref), "utf8").trim() || null;
+    const empaquetada = readFileSync(join(dir, "packed-refs"), "utf8").split("\n").find(l => l.endsWith(` ${ref}`));
+    return empaquetada ? empaquetada.split(" ")[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Las fechas de una salida de git log --format=%x1e%as --name-only (del más nuevo al más viejo): la primera de cada ruta. */
+function leerFechas(salida, fechas, pisar) {
+  const vistas = new Set();
+  for (const bloque of salida.split("\x1e")) {
+    const [fecha, ...rutas] = bloque.split("\n");
+    for (const ruta of rutas) {
+      if (!ruta || vistas.has(ruta)) continue;
+      vistas.add(ruta);
+      if (pisar || !fechas.has(ruta)) fechas.set(ruta, fecha.trim());
+    }
+  }
+}
+
+const CACHE_FECHAS = join(process.env.HOME ?? "", ".cache", "memoria", "fechas.json");
+let fechas = null;
+/**
+ * La fecha (AAAA-MM-DD) del último cambio de cada archivo del repositorio de las notas, según su historial: una sola
+ * pasada de git log para todas (unos 30 ms con 2.200 commits; lo mismo que hace el servidor al indexar, sin seguir
+ * renombrados). Se guarda en ~/.cache/memoria/fechas.json con el HEAD del que sale: mientras HEAD no cambie, no se lanza
+ * git; si avanza, solo se leen los commits nuevos. Se calcula una vez por orden y solo si hay algo que enseñar. Sin git o
+ * sin historial, un Map vacío: los resultados salen sin fecha.
+ */
+function fechasDeNotas() {
+  if (fechas) return fechas;
+  fechas = new Map();
+  const cabeza = cabezaDelRepo();
+  let guardada = null;
+  try {
+    guardada = JSON.parse(readFileSync(CACHE_FECHAS, "utf8"));
+  } catch {
+    /* sin caché: se calcula */
+  }
+  const valida = cabeza && guardada?.dir === MEMORIA_DIR && typeof guardada.cabeza === "string" && guardada.fechas && typeof guardada.fechas === "object";
+  if (valida && guardada.cabeza === cabeza) {
+    fechas = new Map(Object.entries(guardada.fechas));
+    return fechas;
+  }
+  // HEAD avanzó desde la caché (la historia no se reescribió): solo los commits nuevos, que pisan las fechas viejas.
+  if (valida && gitLectura(["merge-base", "--is-ancestor", guardada.cabeza, cabeza]) !== null) {
+    const nuevas = gitLectura(["log", "--no-renames", "--format=%x1e%as", "--name-only", `${guardada.cabeza}..${cabeza}`]);
+    if (nuevas !== null) {
+      fechas = new Map(Object.entries(guardada.fechas));
+      leerFechas(nuevas, fechas, true);
+    }
+  }
+  if (!fechas.size) {
+    const todas = gitLectura(["log", "--no-renames", "--format=%x1e%as", "--name-only", cabeza ?? "HEAD"]);
+    if (todas === null) return fechas;
+    leerFechas(todas, fechas, false);
+  }
+  // La caché es una comodidad: si no se puede escribir (HOME de solo lectura…), no pasa nada.
+  if (cabeza && fechas.size) {
+    try {
+      mkdirSync(dirname(CACHE_FECHAS), { recursive: true });
+      const temporal = `${CACHE_FECHAS}.${process.pid}`;
+      writeFileSync(temporal, JSON.stringify({ dir: MEMORIA_DIR, cabeza, fechas: Object.fromEntries(fechas) }));
+      renameSync(temporal, CACHE_FECHAS);
+    } catch {
+      /* sin caché */
+    }
+  }
+  return fechas;
+}
+
+/** La línea `↳` de una nota en los resultados: «(cambiada el AAAA-MM-DD) su description», o lo que haya de las dos. */
+function resumenDeNota(cambiada, descripcion) {
+  return [cambiada ? `(cambiada el ${cambiada})` : "", descripcion].filter(Boolean).join(" ");
+}
+
 /** El hash de una nota: el blob de git, el mismo `hash` que usa el servidor de la memoria. */
 function hashDeNota(contenido) {
   const cuerpo = Buffer.from(contenido, "utf8");
@@ -273,7 +381,7 @@ function hashDeNota(contenido) {
  * Lo que `memoria leer` saca de una nota, local o por el Badulaque:
  * corta → entera; larga → cabecera + índice de secciones + aviso; con --seccion, --lineas o --pagina, ese trozo en ventanas.
  */
-function mostrarNota({ ruta, contenido, hash }, op) {
+function mostrarNota({ ruta, contenido, hash, cambiada }, op) {
   if (op.seccion !== undefined && op.lineas !== undefined) throw new Fallo("--seccion y --lineas no se combinan: elige una", 2);
   if (op.todo && op.pagina !== undefined) throw new Fallo("--todo y --pagina no se combinan: --todo da la nota entera sin ventanas", 2);
   const lineas = contenido.replace(/\n$/, "").split("\n");
@@ -300,7 +408,7 @@ function mostrarNota({ ruta, contenido, hash }, op) {
       sale(contenido);
       return 0;
     }
-    return indiceDeNota({ ruta, contenido, hash }, lineas, lista, sale);
+    return indiceDeNota({ ruta, contenido, hash, cambiada }, lineas, lista, sale);
   }
   if (op.todo) {
     // Sin ventanas, pero diciendo dónde está lo que se ve.
@@ -312,13 +420,14 @@ function mostrarNota({ ruta, contenido, hash }, op) {
   return 0;
 }
 
-/** El índice de una nota larga: cabecera, secciones (línea, caracteres, título) y cómo seguir. */
-function indiceDeNota({ ruta, contenido, hash }, lineas, lista, sale) {
+/** El índice de una nota larga: cabecera, secciones (línea, caracteres, título) y cómo seguir. `cambiada`, si la hay, da la fecha de su último cambio. */
+function indiceDeNota({ ruta, contenido, hash, cambiada }, lineas, lista, sale) {
   const f = frontmatter(contenido);
   const salida = [];
   salida.push(`${ruta}${f.name ? ` · ${f.name}` : ""}`);
   if (f.description) salida.push(`descripción: ${enUnaLinea(f.description, 200)}`);
-  salida.push(`hash: ${hash ?? hashDeNota(contenido)} · ${lineas.length} líneas · ${miles(contenido.length)} caracteres`);
+  const fecha = cambiada?.();
+  salida.push(`hash: ${hash ?? hashDeNota(contenido)}${fecha ? ` · cambiada el ${fecha}` : ""} · ${lineas.length} líneas · ${miles(contenido.length)} caracteres`);
   if (lista.length) {
     // Un índice enorme tampoco sirve: si hay muchos encabezados, solo los niveles de arriba (y lo dice).
     const nivelMin = Math.min(...lista.map(h => h.nivel));
@@ -349,6 +458,34 @@ const CLASES = { a: "aáàäâã", e: "eéèëê", i: "iíìïî", o: "oóòöô
 function regexSinAcentos(texto) {
   const escapado = plano(texto).replace(/[.*+?^${}()|[\]\\\/-]/g, "\\$&");
   return escapado.replace(/[aeiounc]/g, c => `[${CLASES[c]}]`);
+}
+
+/** Lo mismo para una RegExp de JavaScript con la bandera u, que no admite escapar «-» fuera de una clase. */
+function regexSinAcentosJs(texto) {
+  const escapado = plano(texto).replace(/[.*+?^${}()|[\]\\\/]/g, "\\$&");
+  return escapado.replace(/[aeiounc]/g, c => `[${CLASES[c]}]`);
+}
+
+/**
+ * El patrón de una línea en JavaScript, el mismo que buscar le da a rg: sin acentos ni mayúsculas, un término de 3 letras
+ * o menos solo entero y, con varios términos, todos en la misma línea en cualquier orden. Con --regex, la expresión tal cual.
+ */
+function patronDeLinea(terminos, op) {
+  if (op.regex) {
+    try {
+      return new RegExp(terminos.join(" "), "iu");
+    } catch (e) {
+      throw new Fallo(`--regex: la expresión no vale (${e.message})`, 2);
+    }
+  }
+  const parte = t => plano(t).length <= 3 ? `(?<![\\p{L}\\p{N}])${regexSinAcentosJs(t)}(?![\\p{L}\\p{N}])` : regexSinAcentosJs(t);
+  return new RegExp(terminos.length === 1 ? parte(terminos[0]) : `^${terminos.map(t => `(?=.*${parte(t)})`).join("")}`, "iu");
+}
+
+/** El trozo de una línea que se enseña: entera si es corta; si es larga, desde un poco antes del primer término. */
+function fragmentoDe(texto, primero, op) {
+  const i = op.regex || texto.trim().length <= 160 ? 0 : Math.max(0, plano(texto).indexOf(primero) - 40);
+  return enUnaLinea(texto.slice(i), 160);
 }
 
 // --- comandos de lectura locales ----------------------------------------------
@@ -414,9 +551,94 @@ function buscarPorPalabras(palabras, op) {
   return { vistas, todas: vistas.filter(n => n.con === palabras.length).length };
 }
 
-function buscarLocal(pos, op) {
+/**
+ * `buscar --en <nota>`: las líneas de esa nota que coinciden, cada una con su número y su sección, y el total, con la misma
+ * salida que buscar. Si la frase no está y son varias palabras, las líneas con más de ellas primero. Vale en local y por el
+ * Badulaque: recibe la nota ya leída. `cambiada` es una función (la fecha solo se busca si hay algo que enseñar).
+ */
+function buscarEnNota({ ruta, contenido, descripcion, cambiada }, terminos, op) {
+  const lineas = contenido.replace(/\n$/, "").split("\n");
+  const patron = patronDeLinea(terminos, op);
+  let aciertos = [];
+  lineas.forEach((texto, i) => {
+    if (patron.test(texto)) aciertos.push({ i, texto });
+  });
+  let sueltas = null;
+  if (!aciertos.length && !op.regex) {
+    const palabras = palabrasDe(terminos);
+    if (palabras.length >= 2) {
+      const contadas = [];
+      lineas.forEach((texto, i) => {
+        const plana = plano(texto);
+        const n = palabras.filter(w => tienePalabra(plana, w)).length;
+        if (n) contadas.push({ i, texto, n });
+      });
+      const mejor = Math.max(0, ...contadas.map(l => l.n));
+      const minimo = mejor === palabras.length ? palabras.length : Math.max(1, Math.ceil(palabras.length / 2));
+      aciertos = contadas.filter(l => l.n >= minimo).sort((a, b) => b.n - a.n || a.i - b.i);
+      sueltas = { palabras, todas: contadas.filter(l => l.n === palabras.length).length };
+    }
+  }
+  const { desde, hasta, pie } = trozoDeListado(aciertos.length, op.limite ?? 20, op.pagina ?? 1);
+  const lista = secciones(lineas);
+  const primero = plano(terminos[0]);
+  const vistos = aciertos.slice(desde, hasta);
+  const fecha = vistos.length ? cambiada() : null;
+  const desc = enUnaLinea(descripcion ?? "", 110);
+  const filas = vistos.map(a => ({ ruta, linea: a.i + 1, seccion: seccionDeLinea(lineas, lista, a.i), texto: fragmentoDe(a.texto, primero, op), descripcion: desc, cambiada: fecha }));
+  // El pie dice en qué nota: «3 resultados en projects/x.md», o por palabras sueltas, cuántas líneas y cuántas con todas.
+  const cuantos = aciertos.length;
+  const total = sueltas
+    ? cuantos
+      ? `${cuantos} ${cuantos === 1 ? "línea" : "líneas"} por palabras sueltas en ${ruta} (${sueltas.todas} con todas: ${sueltas.palabras.join(", ")})`
+      : `0 resultados en ${ruta}, ni con las palabras sueltas: ${sueltas.palabras.join(", ")}`
+    : `${cuantos} ${cuantos === 1 ? "resultado" : "resultados"} en ${ruta}`;
+  const resto = pie.replace(/^\d+ resultados?/, "");
+  if (op.json) {
+    imprimirJson(filas);
+    process.stderr.write(`memoria: ${total}${resto}\n`);
+    return 0;
+  }
+  if (sueltas && cuantos) console.log(`sin «${terminos.join(" ")}» exacto en ${ruta}; por palabras sueltas, primero las líneas con más:`);
+  filas.forEach((a, n) => {
+    console.log(`${a.ruta}:${a.linea} · ${a.seccion} · ${a.texto}`);
+    const resumen = resumenDeNota(a.cambiada, a.descripcion);
+    if (n === 0 && resumen) console.log(`  ↳ ${resumen}`);
+  });
+  console.log(`(${total}${resto})`);
+  return 0;
+}
+
+/** `--en X`: la nota X (nombre o ruta) o, si X es una carpeta y no una nota, esa carpeta (como en `archivos buscar --en`). */
+function notaOCarpeta(en) {
+  try {
+    return { nota: resolverNota(en) };
+  } catch (error) {
+    const carpeta = String(en).trim().replace(/\/+$/, "");
+    let absoluta = null;
+    try {
+      absoluta = carpeta ? dentro(carpeta).absoluta : null;
+    } catch {
+      throw error;
+    }
+    if (absoluta && existsSync(absoluta) && statSync(absoluta).isDirectory()) return { carpeta };
+    throw error;
+  }
+}
+
+function buscarLocal(pos, opciones) {
+  let op = opciones;
   const terminos = pos.map(t => t.trim()).filter(Boolean);
   if (!terminos.length) throw new Fallo("dime qué buscas: memoria buscar <texto…>", 2);
+  if (op.en !== undefined) {
+    if (op.carpeta) throw new Fallo("--en y --carpeta no se combinan: --en busca dentro de una nota; --carpeta, en una carpeta", 2);
+    const destino = notaOCarpeta(op.en);
+    if (destino.nota) {
+      const contenido = readFileSync(resolve(MEMORIA_DIR, destino.nota), "utf8");
+      return buscarEnNota({ ruta: destino.nota, contenido, descripcion: frontmatter(contenido).description, cambiada: () => fechasDeNotas().get(destino.nota) ?? null }, terminos, op);
+    }
+    op = { ...op, carpeta: destino.carpeta };
+  }
   const limite = op.limite ?? 20;
   // --sort path: el orden es siempre el mismo, para que las páginas no se mezclen.
   const rgArgs = ["--no-heading", "--with-filename", "--line-number", "--color", "never", "--no-messages", "--ignore-case", "--sort", "path", "-g", "*.md"];
@@ -446,11 +668,6 @@ function buscarLocal(pos, op) {
     if (palabras.length >= 2) return mostrarPorPalabras(palabras, terminos, op, op.limite ?? 10);
   }
   const primero = plano(terminos[0]);
-  const fragmento = texto => {
-    // Una línea corta se da entera; una larga, desde un poco antes del acierto.
-    const i = op.regex || texto.trim().length <= 160 ? 0 : Math.max(0, plano(texto).indexOf(primero) - 40);
-    return enUnaLinea(texto.slice(i), 160);
-  };
   const { desde, hasta, pie } = trozoDeListado(aciertos.length, limite, op.pagina ?? 1);
   // La sección de cada resultado visible (se lee cada nota una sola vez).
   const notas = new Map();
@@ -462,13 +679,17 @@ function buscarLocal(pos, op) {
     const n = notas.get(a.ruta);
     return seccionDeLinea(n.lineas, n.lista, a.linea - 1);
   };
-  // La `description` de cada nota, una vez, bajo su primer resultado: dice de qué va la nota sin tener que abrirla.
+  // La `description` de cada nota y la fecha de su último cambio, una vez, bajo su primer resultado: dicen de qué va la
+  // nota y si está al día sin tener que abrirla.
   const descripciones = new Map();
   const descripcionDe = ruta => {
     if (!descripciones.has(ruta)) descripciones.set(ruta, enUnaLinea(frontmatter(notas.get(ruta).lineas.join("\n")).description ?? "", 110));
     return descripciones.get(ruta);
   };
-  const vistos = aciertos.slice(desde, hasta).map(a => ({ ruta: a.ruta, linea: a.linea, seccion: seccionDe(a), texto: fragmento(a.texto), descripcion: descripcionDe(a.ruta) }));
+  const vistos = aciertos.slice(desde, hasta).map(a => ({
+    ruta: a.ruta, linea: a.linea, seccion: seccionDe(a), texto: fragmentoDe(a.texto, primero, op), descripcion: descripcionDe(a.ruta),
+    cambiada: fechasDeNotas().get(a.ruta) ?? null
+  }));
   if (op.json) {
     imprimirJson(vistos);
     process.stderr.write(`memoria: ${pie}\n`);
@@ -476,7 +697,8 @@ function buscarLocal(pos, op) {
     const dichas = new Set();
     for (const a of vistos) {
       console.log(`${a.ruta}:${a.linea} · ${a.seccion} · ${a.texto}`);
-      if (a.descripcion && !dichas.has(a.ruta)) console.log(`  ↳ ${a.descripcion}`);
+      const resumen = resumenDeNota(a.cambiada, a.descripcion);
+      if (resumen && !dichas.has(a.ruta)) console.log(`  ↳ ${resumen}`);
       dichas.add(a.ruta);
     }
     console.log(`(${pie})`);
@@ -503,7 +725,7 @@ function mostrarPorPalabras(palabras, terminos, op, limite) {
     });
     return {
       ruta: n.ruta, linea: mejor + 1, seccion: seccionDeLinea(n.lineas, n.lista, mejor), texto: enUnaLinea(n.lineas[mejor], 160),
-      palabras: n.con, descripcion: enUnaLinea(n.descripcion, 110)
+      palabras: n.con, descripcion: enUnaLinea(n.descripcion, 110), cambiada: fechasDeNotas().get(n.ruta) ?? null
     };
   });
   const resumen = `${vistas.length} ${vistas.length === 1 ? "nota" : "notas"} por palabras sueltas (${todas} con todas: ${palabras.join(", ")})`;
@@ -515,7 +737,8 @@ function mostrarPorPalabras(palabras, terminos, op, limite) {
   console.log(`sin «${terminos.join(" ")}» exacto; por palabras sueltas, primero las notas con todas:`);
   for (const a of filas) {
     console.log(`${a.ruta}:${a.linea} · ${a.seccion} · ${a.texto}`);
-    if (a.descripcion) console.log(`  ↳ ${a.descripcion}`);
+    const resumen = resumenDeNota(a.cambiada, a.descripcion);
+    if (resumen) console.log(`  ↳ ${resumen}`);
   }
   console.log(`(${resumen}${pie.includes("mostrando") ? `; ${pie.replace(/^\d+ resultados?; /, "")}` : ""})`);
   return 0;
@@ -524,7 +747,7 @@ function mostrarPorPalabras(palabras, terminos, op, limite) {
 function leerLocal(pos, op) {
   if (pos.length !== 1) throw new Fallo(USO_LEER, 2);
   const ruta = resolverNota(pos[0]);
-  return mostrarNota({ ruta, contenido: readFileSync(resolve(MEMORIA_DIR, ruta), "utf8") }, op);
+  return mostrarNota({ ruta, contenido: readFileSync(resolve(MEMORIA_DIR, ruta), "utf8"), cambiada: () => fechasDeNotas().get(ruta) ?? null }, op);
 }
 
 function listaLocal(pos, op) {
@@ -593,9 +816,24 @@ function recientesLocal(pos, op) {
 
 // --- lectura por el Badulaque (sin MEMORIA_DIR: el Mac) -------------------------
 
-const lineaDeHit = h => `${h.path}:${h.section?.line_start ?? 1}: ${enUnaLinea(h.snippet ?? h.description ?? "", 160)}`;
+/** La fecha (AAAA-MM-DD) de un `updated_at` del servidor, o null si no la da. */
+const fechaDelServidor = valor => (typeof valor === "string" && /^\d{4}-\d{2}-\d{2}/.test(valor) ? valor.slice(0, 10) : null);
+
+/** `buscar --en <nota>` sin MEMORIA_DIR: se lee la nota por el Badulaque y se busca en ella aquí, igual que en local. */
+async function buscarEnNotaRemota(pos, op) {
+  const terminos = pos.map(t => t.trim()).filter(Boolean);
+  if (!terminos.length) throw new Fallo("dime qué buscas: memoria buscar <texto…> --en <nota>", 2);
+  if (op.carpeta) throw new Fallo("--en y --carpeta no se combinan: --en busca dentro de una nota; --carpeta, en una carpeta", 2);
+  // Una carpeta («projects/») vale como --carpeta, como en local.
+  if (/\/$/.test(op.en.trim())) return buscarRemoto(pos, { ...op, en: undefined, carpeta: op.en.trim() });
+  const r = await conBadulaque(ctx => usarOFallar(ctx, "memoria_read", dondeDe(op.en)));
+  const contenido = typeof r.json?.content === "string" ? r.json.content : r.texto;
+  const descripcion = frontmatter(contenido).description ?? r.json?.frontmatter?.description;
+  return buscarEnNota({ ruta: r.json?.path ?? op.en, contenido, descripcion, cambiada: () => fechaDelServidor(r.json?.updated_at) }, terminos, op);
+}
 
 async function buscarRemoto(pos, op) {
+  if (op.en !== undefined) return buscarEnNotaRemota(pos, op);
   const consulta = pos.join(" ").trim();
   if (!consulta) throw new Fallo("dime qué buscas: memoria buscar <texto…>", 2);
   const limite = op.limite ?? 20;
@@ -611,7 +849,11 @@ async function buscarRemoto(pos, op) {
   const desde = (pagina - 1) * limite;
   const vistos = todos.slice(desde, desde + limite);
   const titulo = h => h.section?.heading ?? h.section?.title ?? h.section?.name ?? h.section?.path ?? "";
-  const filas = vistos.map(h => ({ ruta: h.path, linea: h.section?.line_start ?? 1, seccion: titulo(h) || "?", texto: enUnaLinea(h.snippet ?? h.description ?? "", 160) }));
+  // Como en local, la description de cada nota y la fecha de su último cambio; la fecha, solo si el servidor la da.
+  const filas = vistos.map(h => ({
+    ruta: h.path, linea: h.section?.line_start ?? 1, seccion: titulo(h) || "?", texto: enUnaLinea(h.snippet ?? h.description ?? "", 160),
+    descripcion: enUnaLinea(h.description ?? "", 110), cambiada: fechaDelServidor(h.updated_at)
+  }));
   let pie;
   if (!total) pie = "0 resultados";
   else if (!vistos.length) throw new Fallo(`la página ${pagina} no existe: ${total} resultados, ${limite} por página`, 2);
@@ -624,7 +866,13 @@ async function buscarRemoto(pos, op) {
     imprimirJson(filas);
     process.stderr.write(`memoria: ${pie}\n`);
   } else {
-    for (const a of filas) console.log(`${a.ruta}:${a.linea} · ${a.seccion} · ${a.texto}`);
+    const dichas = new Set();
+    for (const a of filas) {
+      console.log(`${a.ruta}:${a.linea} · ${a.seccion} · ${a.texto}`);
+      const resumen = resumenDeNota(a.cambiada, a.descripcion);
+      if (resumen && !dichas.has(a.ruta)) console.log(`  ↳ ${resumen}`);
+      dichas.add(a.ruta);
+    }
     console.log(`(${pie})`);
   }
   return 0;
@@ -637,7 +885,7 @@ async function leerRemoto(pos, op) {
   // Se pide la nota entera y el recorte (índice, sección, rango, página) se hace aquí, igual que en local.
   const r = await conBadulaque(ctx => usarOFallar(ctx, "memoria_read", argumentos));
   const contenido = typeof r.json?.content === "string" ? r.json.content : r.texto;
-  return mostrarNota({ ruta: r.json?.path ?? argumentos.path ?? ref, contenido, hash: typeof r.json?.hash === "string" ? r.json.hash : undefined }, op);
+  return mostrarNota({ ruta: r.json?.path ?? argumentos.path ?? ref, contenido, hash: typeof r.json?.hash === "string" ? r.json.hash : undefined, cambiada: () => fechaDelServidor(r.json?.updated_at) }, op);
 }
 
 async function listaRemota(pos, op) {
@@ -815,10 +1063,12 @@ async function moverNota(pos, op) {
 }
 
 async function borrarNota(pos, op) {
-  if (pos.length !== 1) throw new Fallo("uso: memoria borrar <nota> --razon <texto> [--hash H]", 2);
+  if (pos.length !== 1) throw new Fallo("uso: memoria borrar <nota> --razon <texto> --si [--hash H]", 2);
   exigirRazon(op);
   const donde = dondeDe(pos[0]);
   if (simular(op, "memoria_delete", { ...donde, hash: op.hash ?? "(el de ahora)", reason: op.razon })) return 0;
+  // Borrar es destructivo: como en las demás CLIs, solo con --si (queda en el historial y memoria revertir lo deshace).
+  if (!op.si) throw new Fallo(`esto borra la nota «${pos[0]}» (queda en el historial: memoria revertir lo deshace). Si Pablo lo pidió, repite con --si`, 2);
   const r = await conBadulaque(async ctx => usarOFallar(ctx, "memoria_delete", { ...donde, hash: op.hash ?? await hashActual(ctx, donde), reason: op.razon }));
   console.log(r.texto);
   return 0;
@@ -888,7 +1138,7 @@ const blobEn = (rev, ruta) => {
 
 function requerirLocal() {
   if (!LOCAL) {
-    throw new Fallo("esto trabaja sobre el repositorio de las notas (MEMORIA_DIR), que aquí no está. Sin él (el Mac) usa memoria crear y memoria editar", 2);
+    throw new Fallo("esto trabaja sobre el repositorio de las notas (MEMORIA_DIR), que aquí no está. Sin él (el Mac), una nota cada vez: memoria crear, editar, escribir, mover o borrar", 2);
   }
 }
 
@@ -1039,7 +1289,7 @@ function comprobar(commits) {
       for (const ruta of x.estado === "R" ? [x.de, x.ruta] : [x.ruta]) {
         const mal = porque => problemas.push(`${donde}: ${ruta}: ${porque}`);
         const partes = ruta.split("/");
-        if (!/\.md$/i.test(ruta)) mal("no es una nota .md (los adjuntos y el resto de archivos no se publican así: badulaque memoria attach)");
+        if (!/\.md$/i.test(ruta)) mal("no es una nota .md (los adjuntos y el resto de archivos no se publican así: memoria adjuntar)");
         else if (partes.some(p => p.startsWith("."))) mal("las rutas ocultas no valen");
         else if (partes.length === 1 && !reglas.raiz.includes(ruta)) mal(`en la raíz solo puede haber ${reglas.raiz.join(", ")}; ponla en una carpeta`);
         else if (partes.length > 1 && reglas.carpetas && !reglas.carpetas.includes(partes[0])) {
@@ -1174,6 +1424,104 @@ function explicar(json, texto) {
   return `${codigo}: ${mensaje}${consejos[codigo] ? `. ${consejos[codigo]}` : ""}`;
 }
 
+// --- publicar en un solo envío, con `publish` (si el servidor la tiene) ---------------------------------------------------
+
+/** Los cambios que admite un `publish` (el servidor rechaza más; entonces se publica nota a nota). */
+const MAX_PUBLISH = 500;
+
+/**
+ * ¿Tiene el servidor la herramienta `publish` (varios commits en un solo envío, todo o nada)? Se mira en su lista de
+ * herramientas, la que da la pasarela con `buscador_buscar` (un nombre exacto sale el primero). Si la pasarela no sabe
+ * buscar o no la tiene, no: se publica nota a nota, como siempre.
+ */
+async function tienePublish(ctx) {
+  let r;
+  try {
+    r = await ctx.pasarela.llamar("buscador_buscar", { consulta: "memoria_publish", limite: 1 });
+  } catch {
+    return false;
+  }
+  if (r?.isError) return false;
+  let encontradas = r?.structuredContent?.encontradas;
+  if (!Array.isArray(encontradas)) {
+    try {
+      encontradas = JSON.parse((r?.content ?? []).map(c => c?.text ?? "").join("")).encontradas;
+    } catch {
+      return false;
+    }
+  }
+  return Array.isArray(encontradas) && encontradas.some(h => h?.nombre === "memoria_publish");
+}
+
+/**
+ * Los cambios de un commit como los pide `publish`: create, write, move (con un write detrás si además cambió el
+ * contenido) y delete, cada uno con el hash de la versión de la que parte: la del commit anterior de la copia, cuyos
+ * blobs son los del servidor (choques() ya comprobó que nadie tocó esas notas desde la base).
+ */
+function cambiosParaPublish(commit, cambios, padre) {
+  const lista = [];
+  for (const x of cambios) {
+    const contenido = () => git(["show", `${commit}:${x.ruta}`]).salida;
+    if (x.estado === "A") lista.push({ op: "create", path: x.ruta, content: contenido() });
+    else if (x.estado === "M") lista.push({ op: "write", path: x.ruta, content: contenido(), hash: blobEn(padre, x.ruta) });
+    else if (x.estado === "D") lista.push({ op: "delete", path: x.ruta, hash: blobEn(padre, x.ruta) });
+    else {
+      const antes = blobEn(padre, x.de);
+      lista.push({ op: "move", from: x.de, to: x.ruta, hash: antes });
+      if (blobEn(commit, x.ruta) !== antes) lista.push({ op: "write", path: x.ruta, content: contenido(), hash: antes });
+    }
+  }
+  return lista;
+}
+
+/**
+ * Publica con `publish`: un commit del servidor por commit de la copia, con su asunto como razón (con --aplanar, uno por
+ * nota, con la razón de esa nota). Devuelve { r, envio } con lo que contestó el servidor.
+ */
+async function publicarDeUnaVez(ctx, base, commits, op) {
+  const envio = op.aplanar
+    ? commits[0].cambios.map(x => ({ reason: x.razon, changes: cambiosParaPublish(commits[0].commit, [x], base), local: commits[0], cambios: [x] }))
+    : commits.map(c => ({ reason: c.razon, changes: cambiosParaPublish(c.commit, c.cambios, `${c.commit}^`), local: c, cambios: c.cambios }));
+  const r = await usar(ctx, "memoria_publish", {
+    commits: envio.map(e => ({ reason: e.reason, changes: e.changes })), ...(op.confirmar_nueva ? { confirm_new: true } : {})
+  });
+  return { r, envio };
+}
+
+/** Después de `publish`: si falló, no se publicó nada y la copia queda igual; si fue bien, la copia pasa a ser el servidor. */
+function terminarDeUnaVez({ r, envio }, commits, cabeza, op) {
+  if (r.error) {
+    // El servidor dice en qué commit y qué cambio del envío falló (sus índices, desde 0).
+    const i = Number.isInteger(r.json?.commit) ? r.json.commit : null;
+    const donde = i !== null && envio[i] ? ` (commit ${corto(envio[i].local.commit)} «${enUnaLinea(envio[i].reason, 60)}»)` : "";
+    const movio = envio.some(e => e.changes.some(c => c.op === "move"));
+    const pistaMover = r.json?.code === "CONFLICT" && movio
+      ? "\nAl mover una nota, el servidor reescribe sus [[enlaces]] en las demás: si luego cambias una de esas, reescríbelos tú en el commit del movimiento."
+      : "";
+    const pista = commits.length > 1 && !op.aplanar ? "\nSi un commit posterior arregla el problema, memoria publicar --aplanar publica el resultado final en vez de commit a commit." : "";
+    throw new Fallo(`no he publicado nada (va todo en un solo envío: todo o nada)${donde}: ${explicar(r.json, r.texto)}.\nTu copia queda como estaba.${pistaMover}${pista}`, 1);
+  }
+  const servidor = Array.isArray(r.json?.commits) && r.json.commits.length === envio.length ? r.json.commits : [];
+  const hechos = envio.flatMap((e, i) => e.cambios.map(x => ({
+    commit: corto(e.local.commit), razon: e.reason, operacion: VERBOS[x.estado], ruta: x.ruta, ...(x.de ? { de: x.de } : {}),
+    servidor: servidor[i]?.commit ? corto(servidor[i].commit) : null
+  })));
+  const avisos = (Array.isArray(r.json?.warnings) ? r.json.warnings : []).map(w => enUnaLinea(w?.message ?? JSON.stringify(w), 200));
+  git(["update-ref", "refs/memoria/publicado", cabeza]);
+  traerServidor();
+  git(["reset", "--hard", "--quiet", SERVIDOR]);
+  if (op.json) {
+    imprimirJson({ publicado: true, envio: "publish", commits: commits.length, operaciones: hechos, avisos });
+    return 0;
+  }
+  console.log(`publicado: ${commits.length} commits, ${hechos.length} notas en el servidor, firmadas por ti (en un solo envío)`);
+  for (const h of hechos) console.log(`  ${h.operacion} ${h.de ? `${h.de} → ` : ""}${h.ruta} — ${enUnaLinea(h.razon, 80)}`);
+  for (const a of avisos.slice(0, 5)) console.log(`  aviso: ${a}`);
+  if (avisos.length > 5) console.log(`  … y ${avisos.length - 5} avisos más (--json los da todos)`);
+  console.log("tu copia queda igual que el servidor (tus commits locales siguen en refs/memoria/publicado)");
+  return 0;
+}
+
 async function publicar(pos, op) {
   if (pos.length) throw new Fallo("uso: memoria publicar [--razon <texto>] [--simular] [--confirmar-nueva]", 2);
   requerirCopia();
@@ -1224,7 +1572,14 @@ async function publicar(pos, op) {
   const hechos = [];
   const cabeza = git(["rev-parse", "HEAD"]).salida.trim();
   let fallo = null;
+  let deUnaVez = null; // lo que devolvió `publish`, si el servidor la tiene
   await conBadulaque(async ctx => {
+    // Si el servidor tiene `publish`, todo va en un solo envío: todo o nada, con las reglas juzgadas sobre el envío entero.
+    if (commits.reduce((n, c) => n + c.cambios.length, 0) <= MAX_PUBLISH && await tienePublish(ctx)) {
+      deUnaVez = await publicarDeUnaVez(ctx, base, commits, op);
+      return;
+    }
+    // Si no, como siempre: nota a nota, cada una con su herramienta (create, write, move, delete).
     for (const [i, c] of commits.entries()) {
       for (const x of c.cambios) {
         const hashDe = ruta => hashes.get(ruta) ?? blobEn(SERVIDOR, ruta);
@@ -1261,6 +1616,8 @@ async function publicar(pos, op) {
     }
   });
 
+  if (deUnaVez) return terminarDeUnaVez(deUnaVez, commits, cabeza, op);
+
   if (fallo) {
     let estadoCopia = "no he tocado tu copia";
     if (hechos.length) {
@@ -1296,26 +1653,30 @@ async function publicar(pos, op) {
 
 // --- entrada --------------------------------------------------------------------
 
+// En el orden en que los presenta la ayuda (y el error de un comando que no existe): leer, escribir una nota, el resto.
 const OPCIONES = {
-  buscar: { carpeta: "valor", limite: "entero", pagina: "entero", archivo: "bool", regex: "bool", json: "bool" },
+  buscar: { carpeta: "valor", en: "valor", limite: "entero", pagina: "entero", archivo: "bool", regex: "bool", json: "bool" },
   leer: { seccion: "valor", lineas: "valor", pagina: "entero", todo: "bool" },
   lista: { carpeta: "valor", limite: "entero", pagina: "entero", json: "bool" },
   recientes: { json: "bool" },
-  copia: {},
-  estado: { json: "bool" },
-  actualizar: {},
-  publicar: { razon: "valor", simular: "bool", confirmar_nueva: "bool", aplanar: "bool", json: "bool" },
   crear: { razon: "valor", archivo: "valor", confirmar_nueva: "bool", simular: "bool" },
   editar: { razon: "valor", viejo: "valor", nuevo: "valor", todas: "bool", hash: "valor", ediciones: "valor", simular: "bool" },
+  escribir: { razon: "valor", archivo: "valor", hash: "valor", simular: "bool" },
+  mover: { razon: "valor", hash: "valor", simular: "bool" },
+  borrar: { razon: "valor", hash: "valor", si: "bool", simular: "bool" },
+  adjuntar: { razon: "valor", archivo: "valor", descripcion: "valor", titulo: "valor", nombre: "valor", alias: "lista", confirmar_nueva: "bool", simular: "bool" },
+  revertir: { razon: "valor", nota: "valor", simular: "bool" },
   historial: { limite: "entero", json: "bool" },
   enlaces: { entrantes: "bool", salientes: "bool", relacion: "valor", json: "bool" },
   revisar: { tipos: "lista", carpeta: "valor", limite: "entero", json: "bool" },
-  escribir: { razon: "valor", archivo: "valor", hash: "valor", simular: "bool" },
-  mover: { razon: "valor", hash: "valor", simular: "bool" },
-  borrar: { razon: "valor", hash: "valor", simular: "bool" },
-  revertir: { razon: "valor", nota: "valor", simular: "bool" },
-  adjuntar: { razon: "valor", archivo: "valor", descripcion: "valor", titulo: "valor", nombre: "valor", alias: "lista", confirmar_nueva: "bool", simular: "bool" }
+  copia: {},
+  estado: { json: "bool" },
+  publicar: { razon: "valor", simular: "bool", confirmar_nueva: "bool", aplanar: "bool", json: "bool" },
+  actualizar: {}
 };
+
+// Sin alias para borrar (lo comparten todas las CLIs nativas: kit/badulaque/nativa.mjs de lisa), pero el error dice cómo se hace.
+const BORRAR_EN_INGLES = ["delete", "remove", "rm", "del", "erase"];
 
 async function principal(argv) {
   const [dado, ...resto] = argv;
@@ -1326,6 +1687,9 @@ async function principal(argv) {
   if (dado === "--version") {
     console.log(VERSION);
     return 0;
+  }
+  if (BORRAR_EN_INGLES.includes(String(dado).toLowerCase())) {
+    throw new Fallo(`no existe «${dado}»: para borrar una nota, memoria borrar <nota> --razon <texto> --si (solo si Pablo lo pidió)`, 2);
   }
   const orden = resolverOrden("memoria", dado, OPCIONES);
   const def = OPCIONES[orden];

@@ -16,7 +16,7 @@
 
 stdenvNoCC.mkDerivation {
   pname = "memoria";
-  version = "2.2.0"; # la VERSION de cli/memoria.mjs
+  version = "2.3.0"; # la VERSION de cli/memoria.mjs
 
   src = lib.fileset.toSource {
     root = ../cli;
