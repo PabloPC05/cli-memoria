@@ -1,7 +1,7 @@
 import { parse as parseYaml } from "yaml";
 import type { Conventions } from "./conventions.js";
 import { lenientYaml, splitFrontmatter } from "./frontmatter.js";
-import { maskCode } from "./markdown.js";
+import { maskCode, sectionsMatching } from "./markdown.js";
 import { looksPending, parsePendingLine, PENDING_SECTION } from "./pending.js";
 import { normalizeWords, topFolder } from "./util.js";
 
@@ -316,23 +316,24 @@ function hashes(level: number): string {
 	return "#".repeat(level);
 }
 
-/** Lines (trimmed, non-blank) of the sections with one of these names, and the line of each such heading. */
+/** Lines (trimmed, non-blank) of the sections with one of these names (including subsections), and the first matching heading. */
 function sectionLines(p: Parsed, names: string[]): { lines: string[]; headingLine: number | null; heading: string | null } {
-	const wanted = new Set(names.map(normalizeWords));
+	const spans = p.headings.map((h, i) => ({
+		heading: h.text,
+		level: h.level,
+		line: h.index + 1,
+		start: h.index + 1,
+		end: p.headings[i + 1]?.index ?? p.lines.length,
+	}));
+	const { matched, first } = sectionsMatching(spans, names);
 	const out: string[] = [];
-	let headingLine: number | null = null;
-	let heading: string | null = null;
-	p.headings.forEach((h, i) => {
-		if (!wanted.has(h.norm)) return;
-		headingLine ??= h.index + 1;
-		heading ??= `${hashes(h.level)} ${h.text}`;
-		const next = p.headings.slice(i + 1).find((n) => n.level <= h.level);
-		for (let l = h.index + 1; l < (next ? next.index : p.lines.length); l++) {
+	for (const s of matched) {
+		for (let l = s.start; l < s.end; l++) {
 			const t = (p.lines[l] as string).trim();
 			if (t) out.push(t);
 		}
-	});
-	return { lines: out, headingLine, heading };
+	}
+	return { lines: out, headingLine: first ? first.line : null, heading: first ? `${hashes(first.level)} ${first.heading}` : null };
 }
 
 function fieldLine(p: Parsed, field: string): number | null {

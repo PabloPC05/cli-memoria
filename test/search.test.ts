@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.js";
+import { noteViolations, type Rules } from "../src/rules.js";
 import { makeMemory, note, writer } from "./helpers.js";
 import { writeFile } from "node:fs/promises";
 import { tempDir } from "./helpers.js";
@@ -193,6 +194,85 @@ describe("deadlines", () => {
 		);
 		expect(env.memory.deadlines({}).items.map((i) => i.text)).toEqual(["Regar el huerto"]);
 		expect(env.memory.conventions.rules?.pending.sections).toEqual(["Tareas"]);
+	});
+
+	it("collects pending lines from ### subsections inside ## Pendiente and stops at the next ##", async () => {
+		env = await makeMemory({
+			"proyectos/grande.md": note(
+				"Proyecto grande",
+				"Con subsecciones",
+				[
+					"## Pendiente",
+					"",
+					"- [ ] Directa · Ana · 2026-04-02",
+					"",
+					"### Urgente",
+					"",
+					"- [ ] En subsección · Luis · 2026-04-01",
+					"",
+					"#### Detalle",
+					"",
+					"- [ ] Bajo nivel 4 · Marta · 2026-04-03",
+					"",
+					"### Otra cola",
+					"",
+					"- [ ] Segunda subsección · Ana · 2026-04-04",
+					"",
+					"## Hecho",
+					"",
+					"- [ ] Fuera de pendiente · Ana · 2026-03-01",
+					"",
+					"### Subsección fuera",
+					"",
+					"- [ ] Tampoco cuenta · Ana · 2026-03-02",
+				].join("\n"),
+			),
+		});
+		expect(env.memory.deadlines({}).items.map((i) => ({ text: i.text, line: i.line }))).toEqual([
+			{ text: "En subsección", line: 13 },
+			{ text: "Directa", line: 9 },
+			{ text: "Bajo nivel 4", line: 17 },
+			{ text: "Segunda subsección", line: 21 },
+		]);
+	});
+
+	it("matches the exact same sections and subsections in deadlines and rules validation, including # Pendiente (level 1) and ### subsections", async () => {
+		const conH1Pendiente = [
+			"---",
+			"name: Pendiente",
+			"description: Nota titulada Pendiente",
+			"---",
+			"# Pendiente",
+			"",
+			"- [ ] En nivel 1 · Ana · 2026-04-01",
+			"- [ ] Rota nivel 1",
+			"",
+			"## Pendiente",
+			"",
+			"- [ ] En nivel 2 · Ana · 2026-04-02",
+			"- [ ] Rota nivel 2",
+			"",
+			"### Cola",
+			"",
+			"- [ ] En cola h3 · Ana · 2026-04-03",
+			"- [ ] Rota h3",
+			"",
+			"## Hecho",
+			"",
+			"- [ ] En hecho · Ana · 2026-04-04",
+			"- [ ] Rota hecho",
+		].join("\n");
+		env = await makeMemory({
+			"memory.toml": `[folders]\nallowed = ["yo", "personas", "temas", "proyectos", "archivo"]\narchive = "archivo"\nindex_full = ["yo"]\n\n[notes]\nsuperseded_field = "sustituida_por"\n\n[attachments]\npage_heading = "Página {n}"\n\n[rules.pending]\nsection = "Pendiente"\naction = "warn"\n`,
+			"proyectos/pendiente.md": conH1Pendiente,
+		});
+		expect(env.memory.deadlines({}).items.map((i) => ({ path: i.path, line: i.line, text: i.text }))).toEqual([
+			{ path: "proyectos/pendiente.md", line: 12, text: "En nivel 2" },
+			{ path: "proyectos/pendiente.md", line: 17, text: "En cola h3" },
+		]);
+		const rules = env.memory.conventions.rules as Rules;
+		const violations = noteViolations(rules, "proyectos/pendiente.md", conH1Pendiente, ["pending"]);
+		expect(violations.map((v) => v.line)).toEqual([13, 18]);
 	});
 });
 

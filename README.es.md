@@ -190,7 +190,7 @@ El servidor guarda el repo de notas en `data_dir/repo` y es su único escritor: 
 }
 ```
 
-Tras `cli-memoria token add … --file <tokensFile>`, ejecuta `systemctl reload cli-memoria`. El paquete trae `pdftotext`, `pdftoppm` y `tesseract`; el módulo instala los datos de los idiomas de `ocr.languages` (por defecto español e inglés), y solo compila ese tesseract con `ocr.enable` activado. `user`, `group` y `dataDir` son configurables (y se mantiene compatibilidad con `services.my-memory` y `listen.private` para instalaciones existentes). El módulo todavía tiene `remote`, `webhookSecretFile` y `fetchIntervalSeconds`, que este servidor ya no usa: acaban en el archivo de configuración como claves ignoradas (mira `config.ignored_keys` en el log).
+Tras `cli-memoria token add … --file <tokensFile>`, ejecuta `systemctl reload cli-memoria`. El paquete trae `pdftotext`, `pdftoppm` y `tesseract`; el módulo instala los datos de los idiomas de `ocr.languages` (por defecto español e inglés), y solo compila ese tesseract con `ocr.enable` activado. Consulta [`nix/module.nix`](nix/module.nix) para ver todas las opciones (se mantiene la compatibilidad con `services.my-memory` y `listen.private` para instalaciones existentes). `remote`, `webhookSecretFile` y `fetchIntervalSeconds` se han eliminado del módulo NixOS: retíralos al actualizar si una configuración existente aún los definía.
 
 ### Conectar clientes
 

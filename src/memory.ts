@@ -11,7 +11,7 @@ import { parseNote, splitFrontmatter } from "./frontmatter.js";
 import { Git } from "./git.js";
 import { type LintArgs, lint } from "./lint.js";
 import { type Logger, silentLogger } from "./log.js";
-import { firstH1, rewriteWikiLinks, splitSections, targetNameOf } from "./markdown.js";
+import { firstH1, rewriteWikiLinks, sectionsMatching, splitSections, targetNameOf } from "./markdown.js";
 import type { OcrRunner } from "./ocr.js";
 import { deadlineKey, parsePendingLine, PENDING_SECTION } from "./pending.js";
 import { parseTypedLinks } from "./relations.js";
@@ -861,30 +861,41 @@ export class MemoryService {
 		const limit = Math.min(Math.max(args.limit ?? 200, 1), 1000);
 		// The validation rule is off by default (no sections); the deadlines are still read from «Pendiente».
 		const configured = this.conventions.rules?.pending.sections;
-		const sections = new Set((configured?.length ? configured : [PENDING_SECTION]).map(normalizeWords));
+		const sectionNames = configured?.length ? configured : [PENDING_SECTION];
 		const notes = new Map(this.index.allNotes().map((n) => [n.path, n]));
-		const items: DeadlineItem[] = [];
+		const byNote = new Map<string, ReturnType<SearchIndex["sectionTexts"]>>();
 		for (const section of this.index.sectionTexts()) {
 			const note = notes.get(section.path);
 			if (!note || note.archived || (folder !== null && note.folder !== folder)) continue;
-			if (!sections.has(normalizeWords(section.heading))) continue;
-			section.text.split("\n").forEach((line, i) => {
-				const pending = parsePendingLine(line);
-				if (!pending) return;
-				if (pending.done && !args.include_done) return;
-				if (pending.date === null && !args.include_undated) return;
-				items.push({
-					path: note.path,
-					name: note.name,
-					line: section.lineStart + i,
-					done: pending.done,
-					text: pending.text,
-					owner: pending.owner,
-					date: pending.date,
-					date_precision: pending.precision,
-					origin: pending.origin,
+			let list = byNote.get(section.path);
+			if (!list) {
+				list = [];
+				byNote.set(section.path, list);
+			}
+			list.push(section);
+		}
+		const items: DeadlineItem[] = [];
+		for (const [path, noteSections] of byNote) {
+			const note = notes.get(path) as NoteRow;
+			for (const section of sectionsMatching(noteSections, sectionNames).matched) {
+				section.text.split("\n").forEach((line, i) => {
+					const pending = parsePendingLine(line);
+					if (!pending) return;
+					if (pending.done && !args.include_done) return;
+					if (pending.date === null && !args.include_undated) return;
+					items.push({
+						path: note.path,
+						name: note.name,
+						line: section.lineStart + i,
+						done: pending.done,
+						text: pending.text,
+						owner: pending.owner,
+						date: pending.date,
+						date_precision: pending.precision,
+						origin: pending.origin,
+					});
 				});
-			});
+			}
 		}
 		items.sort((a, b) => deadlineKey(a).localeCompare(deadlineKey(b)) || a.path.localeCompare(b.path) || a.line - b.line);
 		return { items: items.slice(0, limit), total: items.length, ...(items.length > limit ? { truncated: true } : {}) };

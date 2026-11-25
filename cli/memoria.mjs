@@ -45,10 +45,11 @@ Lectura (${LOCAL ? `las notas del disco, en ${MEMORIA_DIR}; buscar y plazos, por
       mira dentro de una nota sin leerla entera, y luego se lee lo que haga falta con leer --lineas A-B o --seccion S.
       Va con rg y el disco si hay MEMORIA_DIR; si no, se lee la nota por el servidor y se busca aquí.
       --regex: una expresión de rg, en la copia local (necesita MEMORIA_DIR).
-  memoria plazos [--carpeta X] [--sin-plazo] [--hechas] [--json]      (alias: deadlines)
+  memoria plazos [--carpeta X] [--sin-plazo] [--hechas] [--limite N] [--json]      (alias: deadlines)
       Las tareas de las secciones «Pendiente» del servidor (deadlines), una línea por tarea y por fecha:
       «fecha · qué · responsable · nota». La fecha es AAAA-MM-DD o AAAA-MM (si es de todo el mes); «sin plazo», si no
-      tiene. --sin-plazo añade las que no tienen fecha; --hechas, las ya hechas (marcadas «(hecha)» al final).
+      tiene. --sin-plazo añade las que no tienen fecha; --hechas, las ya hechas (marcadas «(hecha)» al final);
+      --limite N cambia el máximo de tareas devueltas (200 por defecto, hasta 1000).
   memoria leer <nombre|ruta> [--seccion X | --lineas A-B] [--pagina N] [--todo]
       Una nota corta (hasta ~${miles(NOTA_LARGA)} caracteres) sale entera, con su frontmatter. Una larga da su cabecera (nombre,
       descripción, hash), el índice de sus secciones (línea de inicio y caracteres de cada una) y cómo seguir.
@@ -561,7 +562,7 @@ function buscarEnNota({ ruta, contenido, descripcion, cambiada }, terminos, op) 
   const primero = plano(terminos[0]);
   const vistos = aciertos.slice(desde, hasta);
   const fecha = vistos.length ? cambiada() : null;
-  const desc = enUnaLinea(descripcion ?? "", 110);
+  const desc = enUnaLinea(descripcion ?? "", 200);
   const filas = vistos.map(a => ({ ruta, linea: a.i + 1, seccion: seccionDeLinea(lineas, lista, a.i), texto: fragmentoDe(a.texto, primero, op), descripcion: desc, cambiada: fecha }));
   // El pie dice en qué nota: «3 resultados en projects/x.md», o por palabras sueltas, cuántas líneas y cuántas con todas.
   const cuantos = aciertos.length;
@@ -651,8 +652,8 @@ async function buscarEnServidor(pos, op) {
     ...(op.estado?.length ? { status: op.estado.length === 1 ? op.estado[0] : op.estado } : {})
   }));
   const hits = Array.isArray(r.json?.hits) ? r.json.hits : [];
-  const sabido = Number(r.json?.total);
-  const total = Number.isFinite(sabido) && sabido >= desde + hits.length ? sabido : desde + hits.length;
+  const tieneTotal = typeof r.json?.total === "number" && Number.isFinite(r.json.total) && r.json.total >= 0;
+  const total = tieneTotal ? Math.max(r.json.total, hits.length ? desde + hits.length : 0) : desde + hits.length;
   // El total lo da el servidor: el trozo de la página y el pie salen de él, como cuando se buscaba con rg.
   const { hasta, pie } = trozoDeListado(total, limite, pagina);
   const titulo = h => h.section?.heading ?? h.section?.title ?? h.section?.name ?? h.section?.path ?? "";
@@ -809,25 +810,37 @@ function recientesLocal(pos, op) {
 
 // --- plazos: la herramienta deadlines, una línea por tarea -----------------------------
 
-const USO_PLAZOS = "uso: memoria plazos [--carpeta X] [--sin-plazo] [--hechas] [--json]";
+const USO_PLAZOS = "uso: memoria plazos [--carpeta X] [--sin-plazo] [--hechas] [--limite N] [--json]";
 
 /** `memoria plazos`: las tareas de las secciones «Pendiente», del servidor, por fecha. */
 async function plazos(pos, op) {
   if (pos.length) throw new Fallo(USO_PLAZOS, 2);
+  if (op.limite !== undefined && (op.limite < 1 || op.limite > 1000)) throw new Fallo("--limite tiene que estar entre 1 y 1000", 2);
   const r = await conServidor(ctx => usarOFallar(ctx, "deadlines", {
     ...(op.carpeta ? { folder: op.carpeta.replace(/\/+$/, "") } : {}),
     ...(op.sin_plazo ? { include_undated: true } : {}),
-    ...(op.hechas ? { include_done: true } : {})
+    ...(op.hechas ? { include_done: true } : {}),
+    ...(op.limite !== undefined ? { limit: op.limite } : {})
   }));
   const items = Array.isArray(r.json?.items) ? r.json.items : [];
-  if (op.json) return imprimirJson(items);
+  const total = typeof r.json?.total === "number" ? r.json.total : items.length;
+  const truncado = Boolean(r.json?.truncated) || items.length < total;
+  if (op.json) {
+    if (truncado) process.stderr.write(`memoria: mostrando ${items.length} de ${total} tareas (truncado; usa --limite N hasta 1000)\n`);
+    return imprimirJson(items);
+  }
   // fecha · qué · responsable · nota; y «(hecha)» al final de las que ya están hechas.
   for (const t of items) {
     const campos = [t.date ?? "sin plazo", enUnaLinea(t.text ?? "", 200), t.owner || "-", t.path];
     console.log(`${campos.join(" · ")}${t.done ? " (hecha)" : ""}`);
   }
   const pistas = [op.sin_plazo ? "" : "sin plazo: --sin-plazo", op.hechas ? "" : "hechas: --hechas"].filter(Boolean);
-  console.log(`(${items.length} ${items.length === 1 ? "tarea" : "tareas"}${pistas.length ? ` · ${pistas.join(" · ")}` : ""})`);
+  if (truncado) {
+    const resumen = total > items.length ? `${total} tareas; mostrando ${items.length}` : `${items.length} tareas (lista truncada)`;
+    console.log(`(${resumen}: usa --limite N hasta 1000${pistas.length ? ` · ${pistas.join(" · ")}` : ""})`);
+  } else {
+    console.log(`(${items.length} ${items.length === 1 ? "tarea" : "tareas"}${pistas.length ? ` · ${pistas.join(" · ")}` : ""})`);
+  }
   return 0;
 }
 
@@ -1369,7 +1382,6 @@ function explicar(json, texto) {
   const mensaje = json?.message ?? enUnaLinea(texto, 300);
   const consejos = {
     CONFLICT: "la nota cambió en el servidor: memoria actualizar y vuelve a publicar",
-    REMOTE_CONFLICT: "alguien cambió la memoria a la vez: memoria actualizar y vuelve a publicar",
     DUPLICATE_CANDIDATES: `se parece a ${(json?.candidates ?? []).map(c => c.path).join(", ") || "otra nota"}: léelas; si de verdad es nueva, memoria publicar --confirmar-nueva`,
     HAS_BACKLINKS: `otras notas la enlazan (${(json?.backlinks ?? []).map(b => b.src_path).join(", ")}): quita esos enlaces en un commit anterior`,
     NAME_TAKEN: "los nombres de nota son únicos en toda la memoria: elige otro",
@@ -1597,7 +1609,7 @@ async function publicar(pos, op) {
 // En el orden en que los presenta la ayuda (y el error de un comando que no existe): leer, escribir una nota, el resto.
 const OPCIONES = {
   buscar: { carpeta: "valor", en: "valor", tipo: "lista", estado: "lista", limite: "entero", pagina: "entero", archivo: "bool", regex: "bool", json: "bool" },
-  plazos: { carpeta: "valor", sin_plazo: "bool", hechas: "bool", json: "bool" },
+  plazos: { carpeta: "valor", sin_plazo: "bool", hechas: "bool", limite: "entero", json: "bool" },
   leer: { seccion: "valor", lineas: "valor", pagina: "entero", todo: "bool" },
   lista: { carpeta: "valor", limite: "entero", pagina: "entero", json: "bool" },
   recientes: { json: "bool" },

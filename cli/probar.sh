@@ -535,6 +535,10 @@ espera "projects/alfa.md:" "buscar: una nota de esa carpeta"
 espera "  ↳ (cambiada el $ALTA) Proyecto alfa de juguete" "buscar: la description va en la línea ↳"
 corre m1 buscar nadadenada
 espera "(0 resultados)" "buscar: sin resultados, lo dice"
+corre m1 buscar nadadenada --pagina 2
+rc_es 0 "buscar --pagina > 1 con 0 hits: sale con 0"
+espera "(0 resultados)" "buscar --pagina > 1 con 0 hits: dice 0 resultados"
+no_espera "20 resultados" "buscar --pagina > 1 con 0 hits: no inventa un total falso"
 corre m1 lista --carpeta projects
 espera "projects/alfa.md" "lista --carpeta X es lista X (el error más común: no hace fallar)"
 
@@ -552,6 +556,9 @@ no_espera "--pagina 4" "buscar: …y no ofrece más porque no hay"
 corre m1 buscar zeta --limite 2 --pagina 4
 rc_es 2 "buscar: una página que no existe falla (rc 2)"
 espera "hay 3 (6 resultados, 2 por página)" "buscar: …y dice cuántas hay"
+corre m1 buscar zeta --limite 2 --pagina 5
+rc_es 2 "buscar: página muy por encima del total falla (rc 2)"
+espera "hay 3 (6 resultados, 2 por página)" "buscar: …y conserva el total real"
 corre m1 buscar zeta --limite 60
 rc_es 2 "buscar: --limite por encima de 50 falla (rc 2)"
 espera "para ver más, --pagina" "buscar: …y dice cómo ver más"
@@ -633,6 +640,13 @@ corre m1 plazos --carpeta tareas
 espera "(3 tareas" "plazos --carpeta X: solo esa carpeta"
 corre m1 plazos --carpeta projects
 espera "(0 tareas" "plazos --carpeta sin tareas: ninguna"
+corre m1 plazos --limite 2
+espera "(3 tareas; mostrando 2: usa --limite N hasta 1000" "plazos --limite N: recorta y avisa de que está truncado"
+[ "$(m1 plazos --limite 2 | grep -c '^2026-')" = 2 ] && ok "plazos --limite 2: solo dos tareas" || mal "plazos --limite 2: solo dos tareas" "$(m1 plazos --limite 2)"
+corre m1 plazos --limite 0
+rc_es 2 "plazos --limite 0: error de uso"
+corre m1 plazos --limite 1001
+rc_es 2 "plazos --limite 1001: error de uso"
 corre m1 deadlines
 espera "2026-02 · Pagar la luz" "alias: deadlines es plazos"
 corre m1 plazos --json
@@ -676,6 +690,9 @@ rc_es 2 "--en con una nota que no existe: error de uso"
 espera "no hay ninguna nota llamada «nohaytal»" "--en con una nota que no existe: lo dice"
 corre m1 search zorro-azul --en largo
 espera "(1 resultado en projects/largo.md)" "alias: search … --en también vale"
+corre m1 buscar zumbido --en larga-descripcion
+espera "mediados" "--en: la línea ↳ lleva la description hasta 200 caracteres"
+no_espera "finalisimo" "--en: …y se corta antes del final"
 # Una ruta con la carpeta equivocada: si el nombre es el de una sola nota, es esa, y se dice dónde está.
 corre m1 leer topics/largo.md
 espera "nota larga: lee una sección" "leer con la carpeta equivocada: lee la nota de ese nombre"
@@ -721,7 +738,7 @@ corre m1 --help
 espera "memoria borrar <nota> --razon <texto> --si" "ayuda: borrar pide --si"
 espera "--en <nota>" "ayuda: buscar --en"
 espera "--tipo T" "ayuda: buscar --tipo"
-espera "memoria plazos [--carpeta X] [--sin-plazo] [--hechas] [--json]" "ayuda: plazos"
+espera "memoria plazos [--carpeta X] [--sin-plazo] [--hechas] [--limite N] [--json]" "ayuda: plazos"
 no_espera "BADULAQUE" "ayuda: no queda nada de la pasarela"
 espera 'Las notas en bruto están en $MEMORIA_DIR' "ayuda: las notas en bruto, para rg -n"
 no_espera "badulaque memoria" "ayuda: nada pasa por «badulaque memoria»"

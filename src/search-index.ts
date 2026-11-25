@@ -408,11 +408,11 @@ export class SearchIndex {
 		return (this.db.prepare("SELECT * FROM links ORDER BY src_path, line").all() as Row[]).map(toLink);
 	}
 
-	/** Every section with its indexed body text (the FTS table keeps it), in note order. For lint. */
-	sectionTexts(): { path: string; heading: string; lineStart: number; text: string }[] {
+	/** Every section with its indexed body text (the FTS table keeps it), in note order. For lint and deadlines. */
+	sectionTexts(): { path: string; heading: string; level: number; lineStart: number; text: string }[] {
 		return (
-			this.db.prepare("SELECT s.path, s.heading, s.line_start, f.body FROM sections s JOIN sections_fts f ON f.rowid = s.id ORDER BY s.path, s.ord").all() as Row[]
-		).map((r) => ({ path: r.path as string, heading: r.heading as string, lineStart: r.line_start as number, text: r.body as string }));
+			this.db.prepare("SELECT s.path, s.heading, s.level, s.line_start, f.body FROM sections s JOIN sections_fts f ON f.rowid = s.id ORDER BY s.path, s.ord").all() as Row[]
+		).map((r) => ({ path: r.path as string, heading: r.heading as string, level: r.level as number, lineStart: r.line_start as number, text: r.body as string }));
 	}
 
 	/** Number of sections per note. */
