@@ -5,7 +5,7 @@ import { MemoryError } from "../src/errors.js";
 import { Git } from "../src/git.js";
 import { MemoryService } from "../src/memory.js";
 import { SearchIndex } from "../src/search-index.js";
-import { CONVENTIONS, makeMemory, note, otherClone, reader, writer } from "./helpers.js";
+import { commitByHand, CONVENTIONS, makeMemory, note, reader, writer } from "./helpers.js";
 
 const SEED = {
 	"AGENTS.md": "# Normas\n\nEnlaza con [[nombre]].\n",
@@ -126,9 +126,9 @@ describe("writing", () => {
 		const r = await env.memory.create({ ...writer, session: "chat-42" }, { path: "personas/sara.md", content: note("Sara", "Amiga de Alex", "Ver [[perfil]] y [[inexistente]]."), reason: "Nueva persona" });
 		expect(r.warnings.map((w) => w.code)).toEqual(["BROKEN_LINKS"]);
 		expect(r.hash).toBe((await env.memory.read({ path: "personas/sara.md" })).hash);
-		const remoteLog = await new Git(env.root).out(["--git-dir", env.bare as string, "log", "-1", "--format=%an <%ae>|%B"]);
-		expect(remoteLog).toContain("Test Writer <test-writer@cli-memoria.invalid>|Nueva persona");
-		expect(remoteLog).toContain("Session: chat-42");
+		const log = await env.memory.git.out(["log", "-1", "--format=%an <%ae>|%B"]);
+		expect(log).toContain("Test Writer <test-writer@cli-memoria.invalid>|Nueva persona");
+		expect(log).toContain("Session: chat-42");
 		expect(env.memory.search({ query: "amiga" }).hits[0]?.path).toBe("personas/sara.md");
 		const back = (await env.memory.links({ name: "perfil", direction: "in" })) as { in: unknown[] };
 		expect(back.in).toHaveLength(1);
@@ -260,10 +260,10 @@ describe("recent and revert", () => {
 		expect(text).toContain("Cinco asignaturas");
 		expect(text).toContain("En enero y junio.");
 		expect(r.hash).toBe((await m.read({ name: "universidad" })).hash);
-		const remoteLog = await new Git(env.root).out(["--git-dir", env.bare as string, "log", "-1", "--format=%an|%B"]);
-		expect(remoteLog).toContain("Test Writer|Eran cinco");
-		expect(remoteLog).toContain(`Reverts: ${first.commit}`);
-		expect(remoteLog).toContain("Session: s-2");
+		const log = await env.memory.git.out(["log", "-1", "--format=%an|%B"]);
+		expect(log).toContain("Test Writer|Eran cinco");
+		expect(log).toContain(`Reverts: ${first.commit}`);
+		expect(log).toContain("Session: s-2");
 		expect((await m.recent({ limit: 1 })).commits[0]).toMatchObject({ tool: "revert", reverts: first.commit });
 		expect(m.search({ query: "cinco" }).hits[0]?.path).toBe("temas/universidad.md");
 		// Done already: nothing to change.
@@ -344,14 +344,10 @@ describe("recent and revert", () => {
 		expect((await m.revert(writer, { commit: eva.commit as string, reason: "Sin Eva" })).warnings.map((w) => w.code)).toEqual(["NO_CHANGES"]);
 
 		// Two notes created in one commit, one of them moved later: nothing is reverted, not even the other one.
-		const other = await otherClone(env.root, env.bare as string);
-		await other.write("temas/bea.md", note("Bea", "Amiga"));
-		await other.write("temas/carla.md", note("Carla", "Amiga"));
-		await other.commitPush("Bea y Carla");
-		const both = (await other.git.out(["rev-parse", "HEAD"])).trim();
-		m.requestSync("webhook");
-		await new Promise((r) => setTimeout(r, 400));
-		await m.idle();
+		const bothNotes = await m.publish(writer, {
+			commits: [{ reason: "Bea y Carla", changes: [{ op: "create", path: "temas/bea.md", content: note("Bea", "Amiga") }, { op: "create", path: "temas/carla.md", content: note("Carla", "Amiga") }] }],
+		});
+		const both = bothNotes.commits[0]?.commit as string;
 		const mv2 = await m.move(writer, { from: "temas/bea.md", to: "personas/bea.md", hash: (await m.read({ name: "bea" })).hash, reason: "Bea a personas" });
 		const e2 = await expectCode(m.revert(writer, { commit: both, reason: "Sin las dos" }), "REVERT_CONFLICT");
 		expect(e2.details.path).toBe("temas/bea.md");
@@ -364,17 +360,16 @@ describe("recent and revert", () => {
 	it("brings a file back byte for byte, and refuses paths the other writes refuse", async () => {
 		env = await makeMemory(SEED);
 		const m = env.memory;
-		const other = await otherClone(env.root, env.bare as string);
 		// Latin-1 «é» and CRLF: not valid UTF-8, so a round trip through a string would change the bytes.
 		const latin = Buffer.concat([Buffer.from(note("Latin", "Codificación antigua").replace("# Latin", "# Latin\r\nCaf")), Buffer.from([0xe9]), Buffer.from(" con leche\r\n")]);
-		await writeFile(join(other.dir, "temas/latin.md"), latin);
-		await other.write(".gitignore", "*.tmp\n");
-		await other.write("temas/nueva.md", note("Nueva", "Con gitignore"));
-		await other.commitPush("Latin, nueva y gitignore");
-		const added = (await other.git.out(["rev-parse", "HEAD"])).trim();
-		m.requestSync("webhook");
-		await new Promise((r) => setTimeout(r, 400));
-		await m.idle();
+		// A commit made by hand on the server (no tool can write bytes that are not UTF-8): the index catches up.
+		await writeFile(join(env.root, "data/repo/temas/latin.md"), latin);
+		await writeFile(join(env.root, "data/repo/.gitignore"), "*.tmp\n");
+		await writeFile(join(env.root, "data/repo/temas/nueva.md"), note("Nueva", "Con gitignore"));
+		await m.git.run(["add", "-A"]);
+		await m.git.run(["commit", "-q", "-m", "Latin, nueva y gitignore"]);
+		await m.rebuildIndex();
+		const added = (await m.git.out(["rev-parse", "HEAD"])).trim();
 		const file = join(env.root, "data/repo/temas/latin.md");
 		expect(await readFile(file)).toEqual(latin);
 		const ed = await m.edit(writer, { name: "latin", edits: [{ old_string: "con leche", new_string: "solo" }], reason: "Solo" });
@@ -426,52 +421,6 @@ describe("recent and revert", () => {
 	});
 });
 
-describe("remote sync", () => {
-	it("integrates pushes from elsewhere (webhook) and rebases local writes on top", async () => {
-		env = await makeMemory(SEED);
-		const other = await otherClone(env.root, env.bare as string);
-		await other.write("temas/coche.md", note("Coche", "Camión de mudanza", "Revisión en marzo."));
-		await other.commitPush("Coche desde el PC");
-		env.memory.requestSync("webhook");
-		await new Promise((r) => setTimeout(r, 400));
-		await env.memory.idle();
-		expect(env.memory.search({ query: "camion" }).hits[0]?.path).toBe("temas/coche.md");
-		// Remote moves again without telling us; our write gets rejected, rebased, and pushed.
-		await other.write("temas/telefono.md", note("Teléfono", "Líneas", "Fibra óptica."));
-		await other.commitPush("Teléfono");
-		const r = await env.memory.edit(writer, { name: "universidad", edits: [{ old_string: "Cinco", new_string: "Seis" }], reason: "Seis" });
-		expect(r.warnings).toEqual([]);
-		const remoteLog = await new Git(env.root).out(["--git-dir", env.bare as string, "log", "--format=%s", "-3"]);
-		expect(remoteLog.trim().split("\n")).toEqual(["Seis", "Teléfono", "Coche desde el PC"]);
-		expect(env.memory.search({ query: "optica" }).hits[0]?.path).toBe("temas/telefono.md");
-	});
-
-	it("drops the local change when it collides with the remote (remote wins)", async () => {
-		env = await makeMemory(SEED);
-		const other = await otherClone(env.root, env.bare as string);
-		const text = await readFile(join(other.dir, "temas/universidad.md"), "utf8");
-		await other.write("temas/universidad.md", text.replace("Cinco", "Ocho"));
-		await other.commitPush("Ocho");
-		const e = await expectCode(env.memory.edit(writer, { name: "universidad", edits: [{ old_string: "Cinco", new_string: "Seis" }], reason: "Seis" }), "REMOTE_CONFLICT");
-		expect(e.details.content).toContain("Ocho asignaturas");
-		expect((await env.memory.read({ name: "universidad" })).content).toContain("Ocho asignaturas");
-		expect(env.memory.search({ query: "ocho" }).hits).toHaveLength(1);
-	});
-
-	it("keeps working when the remote is down and pushes later", async () => {
-		env = await makeMemory(SEED);
-		const repo = new Git(join(env.root, "data/repo"));
-		await repo.run(["remote", "set-url", "origin", join(env.root, "missing.git")]);
-		const r = await env.memory.edit(writer, { name: "universidad", edits: [{ old_string: "Cinco", new_string: "Seis" }], reason: "Seis" });
-		expect(r.warnings.map((w) => w.code)).toEqual(["PUSH_PENDING"]);
-		await repo.run(["remote", "set-url", "origin", env.bare as string]);
-		await new Promise((res) => setTimeout(res, 300));
-		await env.memory.idle();
-		const remoteLog = await new Git(env.root).out(["--git-dir", env.bare as string, "log", "--format=%s", "-1"]);
-		expect(remoteLog.trim()).toBe("Seis");
-	});
-});
-
 describe("index lifecycle", () => {
 	it("incremental index equals a full rebuild after a run of operations", async () => {
 		env = await makeMemory(SEED);
@@ -500,9 +449,8 @@ describe("index lifecycle", () => {
 		const repo = join(env.root, "data/repo");
 		await writeFile(join(repo, "temas/universidad.md"), "half written");
 		await writeFile(join(repo, "temas/basura.md"), "untracked");
-		const other = await otherClone(env.root, env.bare as string);
-		await other.write("temas/nueva.md", note("Nueva", "Hecha mientras estaba apagado"));
-		await other.commitPush("nueva");
+		// Committed on the server while it was stopped: the index is behind HEAD when it starts again.
+		await commitByHand(new Git(repo), repo, "temas/nueva.md", note("Nueva", "Hecha mientras estaba apagado"));
 		const memory = new MemoryService({ ...env.memory.opts });
 		await memory.start();
 		env.memory = memory;

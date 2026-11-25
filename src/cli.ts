@@ -11,7 +11,6 @@ import { CONVENTIONS_FILE, defaultConventions, parseConventions } from "./conven
 import { lint, renderLint } from "./lint.js";
 import { jsonLogger } from "./log.js";
 import { MemoryService } from "./memory.js";
-import { applyMigration, planMigration, renderPlan } from "./migrate.js";
 import { SearchIndex } from "./search-index.js";
 import { startServer } from "./server.js";
 
@@ -31,7 +30,6 @@ Usage:
                                                  (exit 1 if it adds a problem that blocks: usable as a git hook);
                                                  --each judges every commit of the range on its own
   cli-memoria reindex --config <file>            full rebuild of the FTS5 index (stop the service first)
-  cli-memoria migrate <repo-dir> [--apply] [--conventions <memory.toml>]
 
 The config file is TOML; see the README for every key.
 `;
@@ -39,7 +37,7 @@ The config file is TOML; see the README for every key.
 function tokensFile(values: { config?: string; file?: string }): string {
 	if (values.file) return values.file;
 	if (!values.config) throw new Error("give --config or --file");
-	const config = loadConfig(values.config, { secrets: false });
+	const config = loadConfig(values.config);
 	if (!config.tokensFile) throw new Error("the config has no tokens_file");
 	return config.tokensFile;
 }
@@ -53,7 +51,6 @@ export async function main(argv: string[]): Promise<number> {
 			file: { type: "string" },
 			name: { type: "string" },
 			scope: { type: "string" },
-			apply: { type: "boolean" },
 			conventions: { type: "string" },
 			json: { type: "boolean" },
 			each: { type: "boolean" },
@@ -114,7 +111,7 @@ export async function main(argv: string[]): Promise<number> {
 		}
 		if (command === "clients") {
 			if (!values.config) throw new Error("clients needs --config");
-			const config = loadConfig(values.config, { secrets: false });
+			const config = loadConfig(values.config);
 			const repoDir = join(config.dataDir, "repo");
 			const report = await buildClientsReport({
 				git: new Git(repoDir),
@@ -127,7 +124,7 @@ export async function main(argv: string[]): Promise<number> {
 		}
 		if (command === "lint") {
 			if (!values.config) throw new Error("lint needs --config");
-			const config = loadConfig(values.config, { secrets: false });
+			const config = loadConfig(values.config);
 			const repoDir = join(config.dataDir, "repo");
 			const conventionsText = await readFile(join(repoDir, CONVENTIONS_FILE), "utf8").catch(() => null);
 			const conventions = conventionsText === null ? defaultConventions() : parseConventions(conventionsText);
@@ -189,12 +186,11 @@ export async function main(argv: string[]): Promise<number> {
 		}
 		if (command === "reindex") {
 			if (!values.config) throw new Error("reindex needs --config");
-			const config = loadConfig(values.config, { secrets: false });
+			const config = loadConfig(values.config);
 			const memory = new MemoryService({
 				repoDir: join(config.dataDir, "repo"),
 				indexPath: join(config.dataDir, "index.sqlite"),
 				branch: config.branch,
-				remote: null,
 				log: jsonLogger(),
 			});
 			await memory.start();
@@ -203,19 +199,6 @@ export async function main(argv: string[]): Promise<number> {
 			} finally {
 				await memory.stop();
 			}
-			return 0;
-		}
-		if (command === "migrate") {
-			if (!sub) throw new Error("migrate needs the path of a clone of the notes repo");
-			const plan = await planMigration(sub);
-			process.stdout.write(`${renderPlan(plan)}\n`);
-			if (!values.apply) {
-				process.stdout.write("\nDry run: nothing was written. Run again with --apply to commit.\n");
-				return 0;
-			}
-			const conventions = values.conventions ? await readFile(values.conventions, "utf8") : null;
-			const commit = await applyMigration(sub, plan, { conventions });
-			process.stdout.write(`\nCommitted ${commit}. Push it when you have checked it.\n`);
 			return 0;
 		}
 		throw new Error(`unknown command «${command}»`);

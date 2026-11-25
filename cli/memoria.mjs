@@ -1,17 +1,16 @@
 #!/usr/bin/env node
 // memoria: notas Markdown en un repositorio git como comandos de terminal.
 //
-// - Leer (buscar, leer, lista, recientes): directamente en una copia local de solo lectura del repositorio (MEMORIA_DIR).
-//   Con rg y git, sin pasar por MCP: filtra con rg, jq o head. `buscar --en <nota>` busca dentro de una sola nota;
-//   cada nota de los resultados lleva su description y la fecha de su último cambio (del historial de git, en una sola
-//   pasada de git log).
-// - Sin MEMORIA_DIR (acceso remoto): las mismas lecturas por la pasarela (memoria_search, read, list, recent).
-// - Escribir una nota: `crear`, `editar`, `escribir`, `mover` y `borrar --si`, cada uno una herramienta del servidor por
-//   la pasarela. El servidor es el único que escribe en el repositorio real: firma con la clave del agente y aplica sus reglas.
+// - Leer: `buscar` y `plazos` preguntan al servidor (`search` y `deadlines`, por MCP). `leer`, `lista` y `recientes` van
+//   directamente a una copia local de solo lectura del repositorio (MEMORIA_DIR), con rg y git; sin MEMORIA_DIR, también
+//   al servidor. `buscar --en <nota>` busca dentro de una sola nota (con rg si hay copia, leyéndola del servidor si no) y
+//   `--regex` sigue en rg, en la copia local.
+// - Escribir una nota: `crear`, `editar`, `escribir`, `mover` y `borrar --si`, cada uno una herramienta del servidor. El
+//   servidor es el único que escribe en el repositorio real: firma con la clave del agente y aplica sus reglas.
 // - Cambios de varias notas a la vez, en nativo (fase 4): una copia de trabajo (`memoria copia`, un git clone del
 //   repositorio de solo lectura) que se edita con las herramientas de siempre y se commitea con git; `memoria publicar`
-//   lleva esos commits al servidor nota a nota (create, write, move, delete), con el hash de cada nota para no pisar
-//   cambios ajenos.
+//   lleva esos commits al servidor (con publish, en un solo envío; si no, nota a nota: create, write, move, delete), con
+//   el hash de cada nota para no pisar cambios ajenos.
 //
 // Uso: memoria --help. Sin dependencias (sus módulos van en cli/lib/). Ver cli/README.md.
 
@@ -19,7 +18,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
-  Fallo, analizar, conServidor, correr, ejecutarCli, enUnaLinea, esAyuda, fechaCorta, imprimirJson, nombreHerramienta, plano, resolverOrden, simular, textoDe, usar, usarOFallar
+  Fallo, analizar, conServidor, correr, ejecutarCli, enUnaLinea, esAyuda, fechaCorta, imprimirJson, plano, resolverOrden, simular, textoDe, usar, usarOFallar
 } from "./lib/nativa.mjs";
 import { VENTANA_CARACTERES, VENTANA_LINEAS, miles, paginaDe, rangoDe, trozoDeListado } from "./lib/paginas.mjs";
 
@@ -33,15 +32,23 @@ const SERVIDOR = "refs/memoria/servidor";
 
 const AYUDA = `memoria: notas Markdown en git como comandos (versión ${VERSION}).
 
-Lectura (${LOCAL ? `local, en ${MEMORIA_DIR}` : "por la pasarela: no hay MEMORIA_DIR"}):
-  memoria buscar <texto…> [--carpeta X | --en <nota>] [--limite N] [--pagina N] [--archivo] [--regex] [--json]
-      Una línea por resultado: ruta:línea · sección · fragmento (la sección sirve para ir luego con leer --seccion) y,
-      bajo el primer resultado de cada nota, «↳ (cambiada el AAAA-MM-DD) su description». Varias palabras: todas en la
-      misma línea, sin acentos ni mayúsculas (si ninguna línea las tiene todas, por palabras sueltas). Un texto entre
-      comillas con espacios es una frase. --archivo incluye archive/. Acaba con el total («12 resultados; mostrando
-      1-5: --pagina 2»): --limite da los de cada página (20 por defecto).
+Lectura (${LOCAL ? `las notas del disco, en ${MEMORIA_DIR}; buscar y plazos, por el servidor` : "por el servidor: no hay MEMORIA_DIR"}):
+  memoria buscar <texto…> [--carpeta X | --en <nota>] [--tipo T] [--estado S] [--limite N] [--pagina N] [--archivo] [--regex] [--json]
+      Lo pregunta a search, del servidor (MEMORIA_URL y MEMORIA_TOKEN): una línea por resultado, «ruta:línea · sección ·
+      fragmento» (la sección sirve para ir luego con leer --seccion) y, bajo el primer resultado de cada nota, «↳ (cambiada
+      el AAAA-MM-DD) su description», de hasta 200 caracteres. Varias palabras se buscan como una frase; un texto entre
+      comillas, tal cual. --tipo y --estado filtran por esos campos del frontmatter (repetidos o separados por comas).
+      --archivo incluye archive/. Acaba con el total («12 resultados; mostrando 1-5: --pagina 2 (o --limite N)»):
+      --limite da los de cada página (20 por defecto, 50 como mucho) y --pagina pasa de página. Si el servidor no
+      responde, falla y lo dice: no busca en el disco por su cuenta.
       --en <nota>: solo dentro de esa nota (nombre o ruta), cada línea que coincide con su número y su sección: así se
       mira dentro de una nota sin leerla entera, y luego se lee lo que haga falta con leer --lineas A-B o --seccion S.
+      Va con rg y el disco si hay MEMORIA_DIR; si no, se lee la nota por el servidor y se busca aquí.
+      --regex: una expresión de rg, en la copia local (necesita MEMORIA_DIR).
+  memoria plazos [--carpeta X] [--sin-plazo] [--hechas] [--json]      (alias: deadlines)
+      Las tareas de las secciones «Pendiente» del servidor (deadlines), una línea por tarea y por fecha:
+      «fecha · qué · responsable · nota». La fecha es AAAA-MM-DD o AAAA-MM (si es de todo el mes); «sin plazo», si no
+      tiene. --sin-plazo añade las que no tienen fecha; --hechas, las ya hechas (marcadas «(hecha)» al final).
   memoria leer <nombre|ruta> [--seccion X | --lineas A-B] [--pagina N] [--todo]
       Una nota corta (hasta ~${miles(NOTA_LARGA)} caracteres) sale entera, con su frontmatter. Una larga da su cabecera (nombre,
       descripción, hash), el índice de sus secciones (línea de inicio y caracteres de cada una) y cómo seguir.
@@ -98,10 +105,9 @@ Lo demás del servidor de la memoria (cada comando llama a la herramienta corres
       Candidatos de mantenimiento (huérfanas, enlaces rotos, duplicadas, viejas…), de peor a menos malo. Solo candidatos: lee antes de escribir.
 
 Variables:
-  MEMORIA_DIR                  Carpeta local del repositorio (solo lectura; si falta, también las lecturas van al servidor).
+  MEMORIA_URL / MEMORIA_TOKEN  La dirección /mcp del servidor cli-memoria y el token del agente: buscar, plazos y todo lo que escribe.
+  MEMORIA_DIR                  Carpeta local del repositorio (solo lectura): con ella, leer, lista y recientes van al disco.
   MEMORIA_COPIA                Carpeta de la copia de trabajo de memoria copia (por defecto ~/memoria).
-  MEMORIA_URL / MEMORIA_TOKEN  Conexión directa al endpoint /mcp del servidor cli-memoria (recomendado).
-  BADULAQUE_URL / BADULAQUE_CLAVE  Alternativa a través de una pasarela MCP compatible.
 Códigos de salida: 0 bien, 1 error de la herramienta, 2 uso, 3 red o protocolo.
 `;
 
@@ -393,7 +399,7 @@ function hashDeNota(contenido) {
 }
 
 /**
- * Lo que `memoria leer` saca de una nota, local o por el Badulaque:
+ * Lo que `memoria leer` saca de una nota, leída del disco o del servidor:
  * corta → entera; larga → cabecera + índice de secciones + aviso; con --seccion, --lineas o --pagina, ese trozo en ventanas.
  */
 function mostrarNota({ ruta, contenido, hash, cambiada }, op) {
@@ -469,12 +475,6 @@ function indiceDeNota({ ruta, contenido, hash, cambiada }, lineas, lista, sale) 
 
 const CLASES = { a: "aáàäâã", e: "eéèëê", i: "iíìïî", o: "oóòöôõ", u: "uúùüû", n: "nñ", c: "cç" };
 
-/** Un texto literal como regex que ignora acentos (las mayúsculas las ignora rg con -i). */
-function regexSinAcentos(texto) {
-  const escapado = plano(texto).replace(/[.*+?^${}()|[\]\\\/-]/g, "\\$&");
-  return escapado.replace(/[aeiounc]/g, c => `[${CLASES[c]}]`);
-}
-
 /** Lo mismo para una RegExp de JavaScript con la bandera u, que no admite escapar «-» fuera de una clase. */
 function regexSinAcentosJs(texto) {
   const escapado = plano(texto).replace(/[.*+?^${}()|[\]\\\/]/g, "\\$&");
@@ -482,7 +482,7 @@ function regexSinAcentosJs(texto) {
 }
 
 /**
- * El patrón de una línea en JavaScript, el mismo que buscar le da a rg: sin acentos ni mayúsculas, un término de 3 letras
+ * El patrón de las líneas de una nota (`buscar --en`): sin acentos ni mayúsculas, un término de 3 letras
  * o menos solo entero y, con varios términos, todos en la misma línea en cualquier orden. Con --regex, la expresión tal cual.
  */
 function patronDeLinea(terminos, op) {
@@ -529,47 +529,9 @@ const tienePalabra = (texto, w) => {
 };
 
 /**
- * Búsqueda por palabras sueltas, para cuando la frase exacta no da nada: cada nota puntúa por palabra según dónde la tiene (nombre 8,
- * descripción 5, títulos 3, cuerpo 1) y salen primero las que las tienen todas. Una línea por nota, con su `description` debajo.
- */
-function buscarPorPalabras(palabras, op) {
-  const notas = [];
-  for (const ruta of todasLasNotas(op.carpeta ? op.carpeta.replace(/\/+$/, "") : "")) {
-    if (!op.archivo && ruta.startsWith("archive/")) continue;
-    let texto;
-    try {
-      texto = readFileSync(resolve(MEMORIA_DIR, ruta), "utf8");
-    } catch {
-      continue;
-    }
-    const lineas = texto.replace(/\n$/, "").split("\n");
-    const lista = secciones(lineas);
-    const f = frontmatter(texto);
-    const nombre = plano(ruta.replace(/\.md$/, ""));
-    const descripcion = plano(f.description ?? "");
-    const titulos = plano(lista.map(h => h.texto).join("\n"));
-    const planas = lineas.map(plano);
-    let puntos = 0;
-    let con = 0;
-    for (const w of palabras) {
-      const peso = tienePalabra(nombre, w) ? 8 : tienePalabra(descripcion, w) ? 5 : tienePalabra(titulos, w) ? 3 : planas.some(l => tienePalabra(l, w)) ? 1 : 0;
-      if (peso) {
-        con++;
-        puntos += peso;
-      }
-    }
-    if (con) notas.push({ ruta, lineas, lista, descripcion: f.description ?? "", planas, puntos, con });
-  }
-  const mejor = Math.max(0, ...notas.map(n => n.con));
-  const minimo = mejor === palabras.length ? palabras.length : Math.max(1, Math.ceil(palabras.length / 2));
-  const vistas = notas.filter(n => n.con >= minimo).sort((a, b) => b.con - a.con || b.puntos - a.puntos || a.ruta.localeCompare(b.ruta));
-  return { vistas, todas: vistas.filter(n => n.con === palabras.length).length };
-}
-
-/**
  * `buscar --en <nota>`: las líneas de esa nota que coinciden, cada una con su número y su sección, y el total, con la misma
- * salida que buscar. Si la frase no está y son varias palabras, las líneas con más de ellas primero. Vale en local y por el
- * Badulaque: recibe la nota ya leída. `cambiada` es una función (la fecha solo se busca si hay algo que enseñar).
+ * salida que buscar. Si la frase no está y son varias palabras, las líneas con más de ellas primero. Recibe la nota ya
+ * leída (del disco o del servidor). `cambiada` es una función (la fecha solo se busca si hay algo que enseñar).
  */
 function buscarEnNota({ ruta, contenido, descripcion, cambiada }, terminos, op) {
   const lineas = contenido.replace(/\n$/, "").split("\n");
@@ -641,33 +603,76 @@ function notaOCarpeta(en) {
   }
 }
 
-function buscarLocal(pos, opciones) {
-  let op = opciones;
-  const terminos = pos.map(t => t.trim()).filter(Boolean);
-  if (!terminos.length) throw new Fallo("dime qué buscas: memoria buscar <texto…>", 2);
-  if (op.en !== undefined) {
-    if (op.carpeta) throw new Fallo("--en y --carpeta no se combinan: --en busca dentro de una nota; --carpeta, en una carpeta", 2);
-    const destino = notaOCarpeta(op.en);
-    if (destino.nota) {
-      const contenido = readFileSync(resolve(MEMORIA_DIR, destino.nota), "utf8");
-      return buscarEnNota({ ruta: destino.nota, contenido, descripcion: frontmatter(contenido).description, cambiada: () => fechasDeNotas().get(destino.nota) ?? null }, terminos, op);
-    }
-    op = { ...op, carpeta: destino.carpeta };
+// --- buscar: por el servidor; --en <nota> y --regex, en la copia local -------------------
+
+const TOPE_BUSQUEDA = 50;
+
+/** La fecha (AAAA-MM-DD) de un `updated_at` del servidor, o null si no la da. */
+const fechaDelServidor = valor => (typeof valor === "string" && /^\d{4}-\d{2}-\d{2}/.test(valor) ? valor.slice(0, 10) : null);
+
+/**
+ * La salida de `buscar` (del servidor o con rg): una línea por resultado, «ruta:línea · sección · fragmento», la línea
+ * `↳` de cada nota bajo su primer resultado y el pie con el total. Con --json, las filas y el pie por stderr.
+ */
+function imprimirBusqueda(filas, pie, op) {
+  if (op.json) {
+    imprimirJson(filas);
+    process.stderr.write(`memoria: ${pie}\n`);
+    return 0;
   }
+  const dichas = new Set();
+  for (const a of filas) {
+    console.log(`${a.ruta}:${a.linea} · ${a.seccion} · ${a.texto}`);
+    const resumen = resumenDeNota(a.cambiada, a.descripcion);
+    if (resumen && !dichas.has(a.ruta)) console.log(`  ↳ ${resumen}`);
+    dichas.add(a.ruta);
+  }
+  console.log(`(${pie})`);
+  return 0;
+}
+
+/** Los aciertos de `search` en el servidor, una página, con la salida de siempre. */
+async function buscarEnServidor(pos, op) {
+  const consulta = pos.join(" ").trim();
+  if (!consulta) throw new Fallo("dime qué buscas: memoria buscar <texto…>", 2);
   const limite = op.limite ?? 20;
+  if (limite < 1) throw new Fallo("--limite tiene que ser 1 o más", 2);
+  if (limite > TOPE_BUSQUEDA) throw new Fallo(`--limite ${limite} pasa de lo que da search en una página (${TOPE_BUSQUEDA}): para ver más, --pagina`, 2);
+  const pagina = op.pagina ?? 1;
+  const desde = (pagina - 1) * limite;
+  const r = await conServidor(ctx => usarOFallar(ctx, "search", {
+    query: consulta,
+    limit: limite,
+    offset: desde,
+    highlight: false,
+    ...(op.carpeta ? { folder: op.carpeta.replace(/\/+$/, "") } : {}),
+    ...(op.archivo ? { include_archive: true } : {}),
+    ...(op.tipo?.length ? { type: op.tipo.length === 1 ? op.tipo[0] : op.tipo } : {}),
+    ...(op.estado?.length ? { status: op.estado.length === 1 ? op.estado[0] : op.estado } : {})
+  }));
+  const hits = Array.isArray(r.json?.hits) ? r.json.hits : [];
+  const sabido = Number(r.json?.total);
+  const total = Number.isFinite(sabido) && sabido >= desde + hits.length ? sabido : desde + hits.length;
+  // El total lo da el servidor: el trozo de la página y el pie salen de él, como cuando se buscaba con rg.
+  const { hasta, pie } = trozoDeListado(total, limite, pagina);
+  const titulo = h => h.section?.heading ?? h.section?.title ?? h.section?.name ?? h.section?.path ?? "";
+  const filas = hits.slice(0, hasta - desde).map(h => ({
+    ruta: h.path, linea: h.section?.line_start ?? 1, seccion: titulo(h) || "?",
+    texto: enUnaLinea(h.snippet ?? h.description ?? "", 160), descripcion: enUnaLinea(h.description ?? "", 200),
+    cambiada: fechaDelServidor(h.updated_at), tipo: h.type ?? null, estado: h.status ?? null
+  }));
+  return imprimirBusqueda(filas, pie, op);
+}
+
+/** `buscar --regex`: la expresión tal cual la entiende rg, en una copia local de las notas. */
+function buscarConRegex(pos, op) {
+  if (!LOCAL) throw new Fallo("--regex busca con rg en la copia local de las notas: define MEMORIA_DIR (o busca sin --regex, por el servidor)", 2);
+  const terminos = pos.map(t => t.trim()).filter(Boolean);
+  if (!terminos.length) throw new Fallo("dime qué buscas: memoria buscar <texto…> --regex", 2);
   // --sort path: el orden es siempre el mismo, para que las páginas no se mezclen.
   const rgArgs = ["--no-heading", "--with-filename", "--line-number", "--color", "never", "--no-messages", "--ignore-case", "--sort", "path", "-g", "*.md"];
   if (!op.archivo) rgArgs.push("-g", "!archive/**");
-  if (op.regex) {
-    rgArgs.push("-e", terminos.join(" "));
-  } else {
-    // Un término de 3 letras o menos solo cuenta entero («usa» no es «causa» ni «usando»): 483 resultados no sirven a nadie.
-    const parte = t => plano(t).length <= 3 ? `(?<![\\p{L}\\p{N}])${regexSinAcentos(t)}(?![\\p{L}\\p{N}])` : regexSinAcentos(t);
-    if (terminos.length === 1 && plano(terminos[0]).length > 3) rgArgs.push("-e", regexSinAcentos(terminos[0]));
-    else if (terminos.length === 1) rgArgs.push("-P", "-e", parte(terminos[0]));
-    // Todas las palabras en la misma línea, en cualquier orden (PCRE2: miradas hacia delante).
-    else rgArgs.push("-P", "-e", `^${terminos.map(t => `(?=.*${parte(t)})`).join("")}.*$`);
-  }
+  rgArgs.push("-e", terminos.join(" "));
   const donde = op.carpeta ? dentro(op.carpeta.replace(/\/+$/, "")).relativa || "." : ".";
   const r = correr("rg", [...rgArgs, "--", donde], { cwd: MEMORIA_DIR });
   if (r.estado === 2 && !r.salida) throw new Fallo(`rg falló: ${enUnaLinea(r.error, 300)}`, 1);
@@ -677,13 +682,7 @@ function buscarLocal(pos, opciones) {
     if (!m) continue;
     aciertos.push({ ruta: m[1].replace(/^\.\//, ""), linea: Number(m[2]), texto: m[3] });
   }
-  // Sin nada con la frase exacta: las palabras por separado (si son dos o más), con las notas que las tienen todas primero.
-  if (!aciertos.length && !op.regex) {
-    const palabras = palabrasDe(terminos);
-    if (palabras.length >= 2) return mostrarPorPalabras(palabras, terminos, op, op.limite ?? 10);
-  }
-  const primero = plano(terminos[0]);
-  const { desde, hasta, pie } = trozoDeListado(aciertos.length, limite, op.pagina ?? 1);
+  const { desde, hasta, pie } = trozoDeListado(aciertos.length, op.limite ?? 20, op.pagina ?? 1);
   // La sección de cada resultado visible (se lee cada nota una sola vez).
   const notas = new Map();
   const seccionDe = a => {
@@ -694,69 +693,47 @@ function buscarLocal(pos, opciones) {
     const n = notas.get(a.ruta);
     return seccionDeLinea(n.lineas, n.lista, a.linea - 1);
   };
-  // La `description` de cada nota y la fecha de su último cambio, una vez, bajo su primer resultado: dicen de qué va la
-  // nota y si está al día sin tener que abrirla.
+  // La `description` de cada nota y la fecha de su último cambio, una vez, bajo su primer resultado.
   const descripciones = new Map();
   const descripcionDe = ruta => {
-    if (!descripciones.has(ruta)) descripciones.set(ruta, enUnaLinea(frontmatter(notas.get(ruta).lineas.join("\n")).description ?? "", 110));
+    if (!descripciones.has(ruta)) descripciones.set(ruta, enUnaLinea(frontmatter(notas.get(ruta).lineas.join("\n")).description ?? "", 200));
     return descripciones.get(ruta);
   };
+  const primero = plano(terminos[0]);
   const vistos = aciertos.slice(desde, hasta).map(a => ({
     ruta: a.ruta, linea: a.linea, seccion: seccionDe(a), texto: fragmentoDe(a.texto, primero, op), descripcion: descripcionDe(a.ruta),
     cambiada: fechasDeNotas().get(a.ruta) ?? null
   }));
-  if (op.json) {
-    imprimirJson(vistos);
-    process.stderr.write(`memoria: ${pie}\n`);
-  } else {
-    const dichas = new Set();
-    for (const a of vistos) {
-      console.log(`${a.ruta}:${a.linea} · ${a.seccion} · ${a.texto}`);
-      const resumen = resumenDeNota(a.cambiada, a.descripcion);
-      if (resumen && !dichas.has(a.ruta)) console.log(`  ↳ ${resumen}`);
-      dichas.add(a.ruta);
-    }
-    console.log(`(${pie})`);
-  }
-  return 0;
+  return imprimirBusqueda(vistos, pie, op);
 }
 
-function mostrarPorPalabras(palabras, terminos, op, limite) {
-  const { vistas, todas } = buscarPorPalabras(palabras, op);
-  const pagina = op.pagina ?? 1;
-  if (!vistas.length) {
-    if (op.json) imprimirJson([]);
-    else console.log(`(0 resultados, ni con las palabras sueltas: ${palabras.join(", ")})`);
-    return 0;
+/** `buscar --en <nota>`: la nota del disco o del servidor, y en ella las líneas que coinciden. */
+async function buscarEnUnaNota(pos, op) {
+  const terminos = pos.map(t => t.trim()).filter(Boolean);
+  if (!terminos.length) throw new Fallo("dime qué buscas: memoria buscar <texto…> --en <nota>", 2);
+  if (op.carpeta) throw new Fallo("--en y --carpeta no se combinan: --en busca dentro de una nota; --carpeta, en una carpeta", 2);
+  if (op.tipo?.length || op.estado?.length) throw new Fallo("--tipo y --estado filtran notas: no se combinan con --en, que busca dentro de una", 2);
+  if (!LOCAL) {
+    // Sin copia local: una carpeta («projects/») vale como --carpeta y, si no, la nota se lee por el servidor.
+    if (/\/$/.test(String(op.en).trim())) return buscarEnServidor(pos, { ...op, en: undefined, carpeta: String(op.en).trim() });
+    const r = await conServidor(ctx => usarOFallar(ctx, "read", dondeDe(op.en)));
+    const contenido = typeof r.json?.content === "string" ? r.json.content : r.texto;
+    const descripcion = frontmatter(contenido).description ?? r.json?.frontmatter?.description;
+    return buscarEnNota({ ruta: r.json?.path ?? op.en, contenido, descripcion, cambiada: () => fechaDelServidor(r.json?.updated_at) }, terminos, op);
   }
-  const { desde, hasta, pie } = trozoDeListado(vistas.length, limite, pagina);
-  const filas = vistas.slice(desde, hasta).map(n => {
-    // La línea con más de las palabras (la primera, si hay empate): ahí se ve por qué sale la nota.
-    let mejor = 0;
-    let cuenta = -1;
-    n.planas.forEach((l, i) => {
-      const c = palabras.filter(w => tienePalabra(l, w)).length;
-      if (c > cuenta) { cuenta = c; mejor = i; }
-    });
-    return {
-      ruta: n.ruta, linea: mejor + 1, seccion: seccionDeLinea(n.lineas, n.lista, mejor), texto: enUnaLinea(n.lineas[mejor], 160),
-      palabras: n.con, descripcion: enUnaLinea(n.descripcion, 110), cambiada: fechasDeNotas().get(n.ruta) ?? null
-    };
-  });
-  const resumen = `${vistas.length} ${vistas.length === 1 ? "nota" : "notas"} por palabras sueltas (${todas} con todas: ${palabras.join(", ")})`;
-  if (op.json) {
-    imprimirJson(filas);
-    process.stderr.write(`memoria: ${resumen}\n`);
-    return 0;
-  }
-  console.log(`sin «${terminos.join(" ")}» exacto; por palabras sueltas, primero las notas con todas:`);
-  for (const a of filas) {
-    console.log(`${a.ruta}:${a.linea} · ${a.seccion} · ${a.texto}`);
-    const resumen = resumenDeNota(a.cambiada, a.descripcion);
-    if (resumen) console.log(`  ↳ ${resumen}`);
-  }
-  console.log(`(${resumen}${pie.includes("mostrando") ? `; ${pie.replace(/^\d+ resultados?; /, "")}` : ""})`);
-  return 0;
+  const destino = notaOCarpeta(op.en);
+  if (destino.carpeta !== undefined) return buscarEnServidor(pos, { ...op, en: undefined, carpeta: destino.carpeta });
+  const contenido = readFileSync(resolve(MEMORIA_DIR, destino.nota), "utf8");
+  return buscarEnNota({ ruta: destino.nota, contenido, descripcion: frontmatter(contenido).description, cambiada: () => fechasDeNotas().get(destino.nota) ?? null }, terminos, op);
+}
+
+/** `buscar`: la herramienta `search` del servidor; `--en <nota>` y `--regex`, con rg y el disco. */
+async function buscar(pos, op) {
+  const terminos = pos.map(t => t.trim()).filter(Boolean);
+  if (!terminos.length) throw new Fallo("dime qué buscas: memoria buscar <texto…>", 2);
+  if (op.en !== undefined) return buscarEnUnaNota(pos, op);
+  if (op.regex) return buscarConRegex(pos, op);
+  return buscarEnServidor(pos, op);
 }
 
 function leerLocal(pos, op) {
@@ -830,69 +807,31 @@ function recientesLocal(pos, op) {
   return 0;
 }
 
-// --- lectura remota por pasarela (sin MEMORIA_DIR) ------------------------------
+// --- plazos: la herramienta deadlines, una línea por tarea -----------------------------
 
-/** La fecha (AAAA-MM-DD) de un `updated_at` del servidor, o null si no la da. */
-const fechaDelServidor = valor => (typeof valor === "string" && /^\d{4}-\d{2}-\d{2}/.test(valor) ? valor.slice(0, 10) : null);
+const USO_PLAZOS = "uso: memoria plazos [--carpeta X] [--sin-plazo] [--hechas] [--json]";
 
-/** `buscar --en <nota>` sin MEMORIA_DIR: se lee la nota por el Badulaque y se busca en ella aquí, igual que en local. */
-async function buscarEnNotaRemota(pos, op) {
-  const terminos = pos.map(t => t.trim()).filter(Boolean);
-  if (!terminos.length) throw new Fallo("dime qué buscas: memoria buscar <texto…> --en <nota>", 2);
-  if (op.carpeta) throw new Fallo("--en y --carpeta no se combinan: --en busca dentro de una nota; --carpeta, en una carpeta", 2);
-  // Una carpeta («projects/») vale como --carpeta, como en local.
-  if (/\/$/.test(op.en.trim())) return buscarRemoto(pos, { ...op, en: undefined, carpeta: op.en.trim() });
-  const r = await conServidor(ctx => usarOFallar(ctx, "read", dondeDe(op.en)));
-  const contenido = typeof r.json?.content === "string" ? r.json.content : r.texto;
-  const descripcion = frontmatter(contenido).description ?? r.json?.frontmatter?.description;
-  return buscarEnNota({ ruta: r.json?.path ?? op.en, contenido, descripcion, cambiada: () => fechaDelServidor(r.json?.updated_at) }, terminos, op);
-}
-
-async function buscarRemoto(pos, op) {
-  if (op.en !== undefined) return buscarEnNotaRemota(pos, op);
-  const consulta = pos.join(" ").trim();
-  if (!consulta) throw new Fallo("dime qué buscas: memoria buscar <texto…>", 2);
-  const limite = op.limite ?? 20;
-  const pagina = op.pagina ?? 1;
-  // El servidor no pagina: se piden los de las páginas anteriores y la actual, y se corta aquí.
-  const r = await conServidor(ctx => usarOFallar(ctx, "search", {
-    query: consulta, limit: limite * pagina,
-    ...(op.carpeta ? { folder: op.carpeta.replace(/\/+$/, "") } : {}), ...(op.archivo ? { include_archive: true } : {})
+/** `memoria plazos`: las tareas de las secciones «Pendiente», del servidor, por fecha. */
+async function plazos(pos, op) {
+  if (pos.length) throw new Fallo(USO_PLAZOS, 2);
+  const r = await conServidor(ctx => usarOFallar(ctx, "deadlines", {
+    ...(op.carpeta ? { folder: op.carpeta.replace(/\/+$/, "") } : {}),
+    ...(op.sin_plazo ? { include_undated: true } : {}),
+    ...(op.hechas ? { include_done: true } : {})
   }));
-  const todos = r.json?.hits ?? [];
-  const sabido = Number(r.json?.total ?? r.json?.count);
-  const total = Number.isFinite(sabido) && sabido >= todos.length ? sabido : todos.length;
-  const desde = (pagina - 1) * limite;
-  const vistos = todos.slice(desde, desde + limite);
-  const titulo = h => h.section?.heading ?? h.section?.title ?? h.section?.name ?? h.section?.path ?? "";
-  // Como en local, la description de cada nota y la fecha de su último cambio; la fecha, solo si el servidor la da.
-  const filas = vistos.map(h => ({
-    ruta: h.path, linea: h.section?.line_start ?? 1, seccion: titulo(h) || "?", texto: enUnaLinea(h.snippet ?? h.description ?? "", 160),
-    descripcion: enUnaLinea(h.description ?? "", 110), cambiada: fechaDelServidor(h.updated_at)
-  }));
-  let pie;
-  if (!total) pie = "0 resultados";
-  else if (!vistos.length) throw new Fallo(`la página ${pagina} no existe: ${total} resultados, ${limite} por página`, 2);
-  else {
-    pie = `${total} ${total === 1 ? "resultado" : "resultados"}`;
-    if (total > vistos.length) pie += `; mostrando ${desde + 1}-${desde + vistos.length}`;
-    if (desde + vistos.length < total) pie += `: --pagina ${pagina + 1} (o --limite N)`;
+  const items = Array.isArray(r.json?.items) ? r.json.items : [];
+  if (op.json) return imprimirJson(items);
+  // fecha · qué · responsable · nota; y «(hecha)» al final de las que ya están hechas.
+  for (const t of items) {
+    const campos = [t.date ?? "sin plazo", enUnaLinea(t.text ?? "", 200), t.owner || "-", t.path];
+    console.log(`${campos.join(" · ")}${t.done ? " (hecha)" : ""}`);
   }
-  if (op.json) {
-    imprimirJson(filas);
-    process.stderr.write(`memoria: ${pie}\n`);
-  } else {
-    const dichas = new Set();
-    for (const a of filas) {
-      console.log(`${a.ruta}:${a.linea} · ${a.seccion} · ${a.texto}`);
-      const resumen = resumenDeNota(a.cambiada, a.descripcion);
-      if (resumen && !dichas.has(a.ruta)) console.log(`  ↳ ${resumen}`);
-      dichas.add(a.ruta);
-    }
-    console.log(`(${pie})`);
-  }
+  const pistas = [op.sin_plazo ? "" : "sin plazo: --sin-plazo", op.hechas ? "" : "hechas: --hechas"].filter(Boolean);
+  console.log(`(${items.length} ${items.length === 1 ? "tarea" : "tareas"}${pistas.length ? ` · ${pistas.join(" · ")}` : ""})`);
   return 0;
 }
+
+// --- lectura de las notas por el servidor (sin MEMORIA_DIR) ---------------------
 
 async function leerRemoto(pos, op) {
   if (pos.length !== 1) throw new Fallo(USO_LEER, 2);
@@ -1445,35 +1384,14 @@ function explicar(json, texto) {
 /** Los cambios que admite un `publish` (el servidor rechaza más; entonces se publica nota a nota). */
 const MAX_PUBLISH = 500;
 
-/**
- * ¿Tiene el servidor la herramienta `publish` (varios commits en un solo envío, todo o nada)?
- * En modo directo, mira `tools/list`; en modo pasarela, `buscador_buscar` (`memoria_publish`).
- */
+/** ¿Tiene el servidor la herramienta `publish` (varios commits en un solo envío, todo o nada)? */
 async function tienePublish(ctx) {
-  if (ctx.modo === "directo") {
-    try {
-      const r = await ctx.pasarela.pedir("tools/list", {});
-      return Array.isArray(r?.tools) && r.tools.some(t => t?.name === "publish");
-    } catch {
-      return false;
-    }
-  }
-  let r;
   try {
-    r = await ctx.pasarela.llamar("buscador_buscar", { consulta: "memoria_publish", limite: 1 });
+    const r = await ctx.cliente.pedir("tools/list", {});
+    return Array.isArray(r?.tools) && r.tools.some(t => t?.name === "publish");
   } catch {
     return false;
   }
-  if (r?.isError) return false;
-  let encontradas = r?.structuredContent?.encontradas;
-  if (!Array.isArray(encontradas)) {
-    try {
-      encontradas = JSON.parse((r?.content ?? []).map(c => c?.text ?? "").join("")).encontradas;
-    } catch {
-      return false;
-    }
-  }
-  return Array.isArray(encontradas) && encontradas.some(h => h?.nombre === "memoria_publish");
 }
 
 /**
@@ -1570,13 +1488,13 @@ async function publicar(pos, op) {
     if (op.json) {
       imprimirJson({
         simulado: true, problemas, chocan,
-        commits: commits.map(c => ({ commit: corto(c.commit), razon: c.razon, llamadas: c.cambios.map(x => ({ herramienta: nombreHerramienta(HERRAMIENTAS[x.estado]), ruta: x.ruta, ...(x.de ? { de: x.de } : {}) })) }))
+        commits: commits.map(c => ({ commit: corto(c.commit), razon: c.razon, llamadas: c.cambios.map(x => ({ herramienta: HERRAMIENTAS[x.estado], ruta: x.ruta, ...(x.de ? { de: x.de } : {}) })) }))
       });
       return 0;
     }
     for (const c of commits) {
       console.log(`${corto(c.commit)} ${enUnaLinea(c.razon, 100)}`);
-      for (const x of c.cambios) console.log(`  ${nombreHerramienta(HERRAMIENTAS[x.estado])} ${x.de ? `${x.de} → ` : ""}${x.ruta}`);
+      for (const x of c.cambios) console.log(`  ${HERRAMIENTAS[x.estado]} ${x.de ? `${x.de} → ` : ""}${x.ruta}`);
     }
     for (const p of problemas) console.log(`NO PASARÍA: ${p}`);
     for (const c of chocan) console.log(`CHOCA: ${c.ruta} la cambió ${c.quien} (${c.commit} ${c.motivo})`);
@@ -1678,7 +1596,8 @@ async function publicar(pos, op) {
 
 // En el orden en que los presenta la ayuda (y el error de un comando que no existe): leer, escribir una nota, el resto.
 const OPCIONES = {
-  buscar: { carpeta: "valor", en: "valor", limite: "entero", pagina: "entero", archivo: "bool", regex: "bool", json: "bool" },
+  buscar: { carpeta: "valor", en: "valor", tipo: "lista", estado: "lista", limite: "entero", pagina: "entero", archivo: "bool", regex: "bool", json: "bool" },
+  plazos: { carpeta: "valor", sin_plazo: "bool", hechas: "bool", json: "bool" },
   leer: { seccion: "valor", lineas: "valor", pagina: "entero", todo: "bool" },
   lista: { carpeta: "valor", limite: "entero", pagina: "entero", json: "bool" },
   recientes: { json: "bool" },
@@ -1722,7 +1641,8 @@ async function principal(argv) {
   }
   const { pos, op } = analizar(resto, def, "Mira memoria --help");
   switch (orden) {
-    case "buscar": return LOCAL ? buscarLocal(pos, op) : buscarRemoto(pos, op);
+    case "buscar": return buscar(pos, op);
+    case "plazos": return plazos(pos, op);
     case "leer": return LOCAL ? leerLocal(pos, op) : leerRemoto(pos, op);
     case "lista": if (op.carpeta && !pos.length) pos.push(op.carpeta); return LOCAL ? listaLocal(pos, op) : listaRemota(pos, op);
     case "recientes": return LOCAL ? recientesLocal(pos, op) : recientesRemoto(pos, op);

@@ -4,12 +4,13 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.js";
 import { defaultConventions, parseConventions } from "../src/conventions.js";
-import { parseNote, splitFrontmatter } from "../src/frontmatter.js";
+import { lenientYaml, parseNote, splitFrontmatter } from "../src/frontmatter.js";
 import { maskCode, parseWikiLinks, rewriteWikiLinks, splitSections } from "../src/markdown.js";
 import { parseTypedLinks } from "../src/relations.js";
 import { buildFtsQuery, SCHEMA_VERSION, SearchIndex } from "../src/search-index.js";
+import { deadlineKey, parsePendingLine } from "../src/pending.js";
 import { blobHash, checkNewFilename, checkPath, looksLikeSame, parseNameStatus, parseSince } from "../src/util.js";
-import { CONVENTIONS, tempDir } from "./helpers.js";
+import { CONVENTIONS, makeMemory, tempDir, writer } from "./helpers.js";
 
 const conv = parseConventions(CONVENTIONS);
 
@@ -123,6 +124,50 @@ describe("search query", () => {
 		expect(buildFtsQuery("¿?¡!")).toBeNull();
 		expect(buildFtsQuery('a"b')?.and).toBe('"a" AND "b"');
 	});
+
+	it("searches the singular of a Spanish plural, keeping the word itself", () => {
+		// Ending in -s: the word without it; the exact one stays.
+		expect(buildFtsQuery("hipotecas")?.and).toBe('("hipotecas"* OR "hipoteca"*)');
+		// Ending in -es: both the -s and the -es forms.
+		expect(buildFtsQuery("universidades")?.and).toBe('("universidades"* OR "universidad"* OR "universidade"*)');
+		// Words under four letters are not expanded (they are still prefix terms).
+		expect(buildFtsQuery("gas")?.and).toBe('"gas"*');
+		expect(buildFtsQuery("tos")?.and).toBe('"tos"*');
+		expect(buildFtsQuery("hipoteca")?.and).toBe('"hipoteca"*');
+		// A phrase stays a phrase: its words are not expanded.
+		expect(buildFtsQuery('"las hipotecas"')).toEqual({ and: '"las hipotecas"', or: '"las hipotecas"' });
+		// The alternatives stay together as one term of an AND query.
+		expect(buildFtsQuery("hipotecas piso")?.and).toBe('("hipotecas"* OR "hipoteca"*) AND "piso"*');
+	});
+});
+
+describe("pending lines", () => {
+	it("reads the shape the memory agrees on and rejects everything else", () => {
+		expect(parsePendingLine("- [ ] Pedir presupuesto · Ana · 2026-03-14 [llamada]")).toEqual({
+			done: false,
+			text: "Pedir presupuesto",
+			owner: "Ana",
+			date: "2026-03-14",
+			precision: "day",
+			origin: "llamada",
+		});
+		expect(parsePendingLine("- [x] Elegir azulejos · Ana · 2026-03")).toEqual({ done: true, text: "Elegir azulejos", owner: "Ana", date: "2026-03", precision: "month", origin: null });
+		expect(parsePendingLine("* [ ] Llamar · - · sin plazo")?.owner).toBeNull();
+		expect(parsePendingLine("- [ ] Llamar · Ana · sin plazo")?.date).toBeNull();
+		// A «·» inside the text is kept: the parts are read from the right.
+		expect(parsePendingLine("- [ ] Comprar pan · leche · Ana · 2026-04-01")?.text).toBe("Comprar pan · leche");
+		for (const bad of ["- Pedir presupuesto", "- [ ] Solo el texto", "- [ ] Texto · Ana", "- [ ] Texto · Ana · mañana", "- [ ] Texto · Ana · 2026-02-31", "- [ ] Texto · Ana · 2026-13", "  prosa suelta"]) {
+			expect(parsePendingLine(bad), bad).toBeNull();
+		}
+	});
+
+	it("orders deadlines with the month-only ones opening their month and the undated ones last", () => {
+		const key = (date: string | null, precision: "day" | "month" | null) => deadlineKey({ date, date_precision: precision });
+		expect(key("2026-03", "month")).toBe("2026-03-00");
+		expect(key("2026-03-01", "day")).toBe("2026-03-01");
+		expect(key(null, null)).toBe("9999-99-99");
+		expect([key(null, null), key("2026-03-14", "day"), key("2026-03", "month")].sort()).toEqual(["2026-03-00", "2026-03-14", "9999-99-99"]);
+	});
 });
 
 describe("paths and names", () => {
@@ -144,7 +189,11 @@ describe("paths and names", () => {
 
 	it("detects look-alike labels", () => {
 		expect(looksLikeSame("Seguro del Hogar", "seguro del hogar")).toBe(true);
-		expect(looksLikeSame("Universidad", "universidad de verano")).toBe(true);
+		// A single word is not enough: «universidad» is a topic of «universidad de verano», not the same note.
+		expect(looksLikeSame("Universidad", "universidad de verano")).toBe(false);
+		expect(looksLikeSame("lentejas", "receta de lentejas")).toBe(false);
+		// Several words, all of them contained: the same thing with a longer title.
+		expect(looksLikeSame("piso de oviedo", "el piso de oviedo")).toBe(true);
 		expect(looksLikeSame("piso de oviedo", "piso de toledo")).toBe(false);
 		expect(looksLikeSame("coche", "coches")).toBe(true);
 		expect(looksLikeSame("ana", "eva")).toBe(false);
@@ -227,5 +276,31 @@ describe("index schema and config", () => {
 		expect(loadConfig(file).listen).toEqual({ address: "127.0.0.1", port: 8782 });
 		await writeFile(file, 'data_dir = "data"\n[listen.private]\nport = 8783\n');
 		expect(loadConfig(file).listen).toEqual({ address: "127.0.0.1", port: 8783 });
+	});
+});
+
+describe("legacy frontmatter", () => {
+	const LEGACY = '---\nname: Telefonía\ndescription: Líneas de casa: móvil y fibra\naliases: [móvil, internet]\n---\n# Telefonía\n\nVer [Universidad](../temas/universidad.md).\n';
+
+	it("is read leniently but reported", () => {
+		const conv = parseConventions(CONVENTIONS);
+		const n = parseNote(LEGACY, conv);
+		expect(n.meta.description).toBe("Líneas de casa: móvil y fibra");
+		expect(n.meta.aliases).toEqual(["móvil", "internet"]);
+		expect(n.problems).toHaveLength(1);
+		expect(n.problems[0]).toMatch(/not valid YAML/);
+		expect(lenientYaml("a: x\nb: >\n  uno\n  dos\nc:\n  - p\n  - q")).toEqual({ a: "x", b: "uno dos", c: ["p", "q"] });
+	});
+
+	it("still lets agents edit the body of a note with old frontmatter", async () => {
+		const env = await makeMemory({ "temas/telefonia.md": LEGACY.replace("../temas/universidad.md", "x") });
+		try {
+			expect((env.memory.list({ folder: "temas" }) as { notes: { problems?: string[] }[] }).notes[0]?.problems).toHaveLength(1);
+			const r = await env.memory.edit(writer, { name: "telefonia", edits: [{ old_string: "# Telefonía", new_string: "# Telefonía y fibra" }], reason: "x" });
+			expect(r.warnings.map((w) => w.code)).toContain("FRONTMATTER_PROBLEMS");
+			await expect(env.memory.edit(writer, { name: "telefonia", edits: [{ old_string: "aliases: [móvil, internet]", new_string: "aliases: [móvil]" }], reason: "x" })).rejects.toMatchObject({ code: "INVALID_FRONTMATTER" });
+		} finally {
+			await env.cleanup();
+		}
 	});
 });

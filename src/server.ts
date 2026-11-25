@@ -26,6 +26,7 @@ function listen(app: ReturnType<typeof createApp>, address: string, port: number
 }
 
 export async function startServer(config: ServerConfig, log: Logger = jsonLogger(undefined, config.logLevel)): Promise<RunningServer> {
+	if (config.ignoredKeys.length) log("warn", "config.ignored_keys", { keys: config.ignoredKeys, why: "this server no longer syncs with a git remote nor accepts a push webhook; the notes repo lives in data_dir" });
 	const uploads = new UploadStore(join(config.dataDir, "uploads"));
 	await uploads.init();
 	const ocr = await detectOcr(config.ocr, log);
@@ -33,13 +34,11 @@ export async function startServer(config: ServerConfig, log: Logger = jsonLogger
 		repoDir: join(config.dataDir, "repo"),
 		indexPath: join(config.dataDir, "index.sqlite"),
 		branch: config.branch,
-		remote: config.remote ? { url: config.remote.url, username: config.remote.username, token: config.remote.token ?? undefined } : null,
 		authorDomain: config.authorDomain,
 		uploads,
 		pdftotext: config.pdftotext,
 		ocr,
 		log,
-		fetchIntervalMs: config.fetchIntervalSeconds > 0 ? config.fetchIntervalSeconds * 1000 : undefined,
 	});
 	await memory.start();
 	const tokens = new TokenStore(config.tokensFile);
@@ -62,7 +61,7 @@ export async function startServer(config: ServerConfig, log: Logger = jsonLogger
 		}
 	}, 60_000);
 	flushActivity.unref();
-	const server = await listen(createApp({ memory, tokens, uploads, webhookSecret: config.webhookSecret, log, clients }), config.listen.address, config.listen.port);
+	const server = await listen(createApp({ memory, tokens, uploads, log, clients }), config.listen.address, config.listen.port);
 	const sweep = setInterval(() => uploads.sweep().catch(() => undefined), 60 * 60 * 1000);
 	sweep.unref();
 	log("info", "server.started", {

@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Prueba de escribir en nativo (memoria copia, estado, actualizar y publicar) contra un servidor cli-memoria DE VERDAD
-# (el binario real, con su índice, sus reglas, sus firmas por token y su cola de escritura), pero de juguete: una carpeta
-# temporal que crea y borra este script, un repositorio de notas inventado y dos agentes de juguete. No toca ninguna
-# memoria real ni ningún servicio externo.
+# Prueba la CLI memoria contra un servidor cli-memoria DE VERDAD (el binario real, con su índice, sus reglas, sus firmas por
+# token y su cola de escritura), pero de juguete: una carpeta temporal que crea y borra este script, un repositorio de notas
+# inventado y dos agentes de juguete. No toca ninguna memoria real ni ningún servicio externo.
 #
-# Prueba tanto el modo directo (MEMORIA_URL + MEMORIA_TOKEN contra /mcp) como una pasarela mínima
-# (buscador_usar con «memoria_<herramienta>»), con una clave por agente traducida a su token.
+# Todo va en modo directo (MEMORIA_URL + MEMORIA_TOKEN contra /mcp), con un token por agente. `memoria buscar` y `memoria
+# plazos` llaman a `search` y `deadlines`: si el servidor que se prueba todavía no las tiene (las está cambiando otro a la
+# vez), las sirve un servidor MCP de juguete que sigue la interfaz común y pasa lo demás al servidor de verdad. El script
+# dice al empezar en cuál de los dos casos está.
 #
 # Uso:  NODE=<node 22 o más> CLI_MEMORIA=<cli-memoria> [MEMORIA=<memoria>] cli/probar.sh
 #   CLI_MEMORIA (o MY_MEMORY): el servidor (bin/cli-memoria del paquete por defecto, o el instalado).
 #   MEMORIA: la CLI que se prueba, ya empaquetada (p. ej. result/bin/memoria de `nix build .#memoria`).
-#   Sin MEMORIA, se prueba cli/memoria.mjs de este repositorio con NODE. NODE corre también la pasarela de juguete.
+#   Sin MEMORIA, se prueba cli/memoria.mjs de este repositorio con NODE. NODE corre también el servidor MCP de juguete.
 # Requiere git, curl y jq. Imprime OK o FALLO por prueba y sale con 1 si alguna falla.
 #
 # Vale con un cli-memoria que tenga la herramienta `publish` (varios commits en un solo envío, todo o nada) y con uno que no:
@@ -28,7 +29,7 @@ for h in git curl jq; do command -v "$h" >/dev/null || { echo "Falta $h" >&2; ex
 T="$(mktemp -d "${TMPDIR:-/tmp}/probar-memoria.XXXXXX")"
 PIDS=()
 limpiar() {
-  for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null; done
+  for p in ${PIDS[@]+"${PIDS[@]}"}; do kill "$p" 2>/dev/null; wait "$p" 2>/dev/null; done
   # solo se borra lo que este script creó
   case "$T" in "${TMPDIR:-/tmp}"/probar-memoria.*) rm -rf "$T" ;; esac
 }
@@ -47,13 +48,13 @@ lineas() { wc -l | tr -d ' '; }
 
 DATOS="$T/datos"
 REPO="$DATOS/repo"
-mkdir -p "$REPO/people" "$REPO/projects" "$REPO/topics" "$REPO/archive"
+mkdir -p "$REPO/people" "$REPO/projects" "$REPO/topics" "$REPO/archive" "$REPO/tareas" "$REPO/pruebas"
 (
   cd "$REPO" || exit 1
   git init -q -b main . && git config user.email t@t && git config user.name t
   cat > memory.toml <<'TOML'
 [folders]
-allowed = ["people", "projects", "topics", "archive"]
+allowed = ["people", "projects", "topics", "archive", "tareas", "pruebas"]
 archive = "archive"
 
 [notes]
@@ -69,6 +70,23 @@ TOML
   printf -- '---\nname: Alfa\ndescription: Proyecto alfa de juguete\n---\n# Alfa\nPrimera línea.\n\n## Estado\nTodo va bien.\n\n## Pendiente\nComprar pan.\n' > projects/alfa.md
   printf -- '---\nname: Café\ndescription: Notas sobre el café\n---\n# Café\nEspresso, filtrado y moka.\n' > topics/cafe.md
   printf -- '---\nname: Vieja\ndescription: Nota de juguete para borrar\n---\n# Vieja\nYa no sirve. Una causa perdida.\n' > topics/vieja.md
+  printf -- '---\nname: Guardada\ndescription: Nota archivada de juguete\n---\n# Guardada\n\n## Zeta\nzeta en el archivo\n' > archive/guardada.md
+  # Una description de casi 300 caracteres: la línea ↳ la corta a 200 (antes, 110), así que «mediados» sale y «finalisimo» no.
+  DESC_LARGA="$(printf 'x%.0s' $(seq 1 120)) mediados $(printf 'y%.0s' $(seq 1 150)) finalisimo"
+  printf -- '---\nname: Larga descripción\ndescription: %s\n---\n# Larga\n\n## Zumbido\nun zumbido\n' "$DESC_LARGA" > topics/larga-descripcion.md
+  # Seis notas con un solo acierto cada una (y su type/status), para probar las páginas de buscar y sus filtros sin
+  # depender del orden que le dé el servidor a las secciones de una misma nota.
+  for n in a b c d e f; do
+    case "$n" in
+      a) TIPO=proyecto ESTADO=activo ;;
+      b) TIPO=proyecto ESTADO=inactivo ;;
+      *) TIPO=nota ESTADO=inactivo ;;
+    esac
+    printf -- '---\nname: Prueba %s\ndescription: Nota de juguete %s\ntype: %s\nstatus: %s\n---\n# Nota %s\n\n## Zeta\nla palabra zeta %s\n' \
+      "$n" "$n" "$TIPO" "$ESTADO" "$n" "$n" > "pruebas/$n.md"
+  done
+  # Las tareas de las secciones «Pendiente», en el formato de la interfaz común: - [ ] Qué · responsable · fecha [origen].
+  printf -- '---\nname: Pendientes\ndescription: Tareas de juguete con plazo\ntype: lista\nstatus: activo\n---\n# Pendientes\nCosas por hacer.\n\n## Pendiente\n- [ ] Comprar pan · ana · 2026-03-10\n- [ ] Pagar la luz · ana · 2026-02\n- [x] Llamar al fontanero · beto · 2026-03-01\n- [ ] Revisar el tejado · marta · sin plazo\n- [ ] Ensayar la canción · marta · 2026-03-05 [aviso]\n' > tareas/pendientes.md
   # Una nota larga para probar la lectura navegable: secciones y subsecciones, una sección enorme (Pendiente, con cinco
   # colas de 40 líneas: pasa de 8.000 caracteres), un prefijo ambiguo (Pendiente / Pendiente de pago), acentos y un
   # «# encabezado» dentro de un bloque de código que no cuenta.
@@ -90,7 +108,6 @@ TOML
 ALTA=2026-01-02
 
 PUERTO_MM=$(( 20000 + RANDOM % 10000 ))
-PUERTO_PA=$(( 30000 + RANDOM % 10000 ))
 cat > "$T/config.toml" <<TOML
 data_dir = "$DATOS"
 tokens_file = "$T/tokens.toml"
@@ -105,48 +122,8 @@ TOK2=$("$SERVIDOR" token add agente2 --name "Agente Dos" --scope write --file "$
 "$SERVIDOR" serve --config "$T/config.toml" > "$T/mm.log" 2>&1 &
 PIDS+=($!)
 
-# La pasarela de juguete: clave de agente -> token de cli-memoria; buscador_usar{nombre:"memoria_x"} -> tools/call x;
-# buscador_buscar{consulta} -> las herramientas de cli-memoria (su tools/list) como «memoria_x», con la de nombre exacto primero.
-cat > "$T/pasarela.mjs" <<'JS'
-import { createServer } from "node:http";
-const tokens = Object.fromEntries(process.env.CLAVES.split(",").map(p => p.split("=")));
-const destino = `http://127.0.0.1:${process.env.PUERTO_MM}/mcp`;
-const leer = req => new Promise(r => { let b = ""; req.on("data", c => (b += c)); req.on("end", () => r(b)); });
-createServer(async (req, res) => {
-  const clave = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
-  if (!tokens[clave]) { res.writeHead(401).end(); return; }
-  if (req.method === "DELETE") { res.writeHead(200).end(); return; }
-  const m = JSON.parse((await leer(req)) || "{}");
-  const json = (o, h = {}) => { res.writeHead(200, { "content-type": "application/json", ...h }).end(JSON.stringify(o)); };
-  if (m.method === "initialize") return json({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "pasarela-de-juguete", version: "0" } } }, { "mcp-session-id": "s1" });
-  if (m.method === "notifications/initialized") { res.writeHead(202).end(); return; }
-  const mm = async (method, params) => {
-    const r = await fetch(destino, {
-      method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${tokens[clave]}` },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params })
-    });
-    const texto = await r.text();
-    const linea = texto.startsWith("{") ? texto : texto.split("\n").find(l => l.startsWith("data:"))?.slice(5);
-    return JSON.parse(linea).result;
-  };
-  if (m.method === "tools/call" && m.params.name === "buscador_usar") {
-    const { nombre, argumentos } = m.params.arguments;
-    return json({ jsonrpc: "2.0", id: m.id, result: await mm("tools/call", { name: nombre.replace(/^memoria_/, ""), arguments: argumentos }) });
-  }
-  if (m.method === "tools/call" && m.params.name === "buscador_buscar") {
-    const { consulta = "", limite = 5 } = m.params.arguments ?? {};
-    const todas = ((await mm("tools/list", {})).tools ?? []).map(t => ({ nombre: `memoria_${t.name}`, de: "memoria", descripcion: t.description }));
-    const encontradas = [...todas.filter(t => t.nombre === consulta), ...todas.filter(t => t.nombre !== consulta)].slice(0, limite);
-    return json({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: JSON.stringify({ encontradas }) }], structuredContent: { encontradas } } });
-  }
-  json({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: "no" } });
-}).listen(Number(process.env.PUERTO_PA), "127.0.0.1");
-JS
-CLAVES="clave-uno=$TOK1,clave-dos=$TOK2" PUERTO_MM="$PUERTO_MM" PUERTO_PA="$PUERTO_PA" "$NODE" "$T/pasarela.mjs" > "$T/pasarela.log" 2>&1 &
-PIDS+=($!)
 for _ in $(seq 1 60); do
-  curl -s -o /dev/null "http://127.0.0.1:$PUERTO_MM/mcp" && curl -s -o /dev/null "http://127.0.0.1:$PUERTO_PA/" && break
+  curl -s -o /dev/null "http://127.0.0.1:$PUERTO_MM/mcp" && break
   sleep 0.2
 done
 grep -q "listening\|started\|serve" "$T/mm.log" 2>/dev/null || sleep 1
@@ -157,13 +134,311 @@ curl -s -XPOST "http://127.0.0.1:$PUERTO_MM/mcp" -H 'content-type: application/j
   -H "authorization: Bearer $TOK1" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | sed 's/^data://' | grep -q '"name":"publish"' && CON_PUBLISH=1
 if [ "$CON_PUBLISH" = 1 ]; then echo "(este cli-memoria tiene publish: memoria publicar va en un solo envío)"; else echo "(este cli-memoria no tiene publish: memoria publicar va nota a nota)"; fi
 
+# ¿Tiene ya este cli-memoria `search` con offset y `deadlines` (la interfaz común)? Si no, las sirve delante un servidor MCP
+# de juguete que las lee de la carpeta de notas y pasa todo lo demás al servidor de verdad.
+MM_URL="http://127.0.0.1:$PUERTO_MM/mcp"
+TOOLS=$(curl -s -XPOST "http://127.0.0.1:$PUERTO_MM/mcp" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+  -H "authorization: Bearer $TOK1" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | sed 's/^data://')
+if jq -e '.result.tools[] | select(.name == "deadlines")' <<<"$TOOLS" >/dev/null 2>&1 \
+  && jq -e '.result.tools[] | select(.name == "search") | .inputSchema.properties.offset' <<<"$TOOLS" >/dev/null 2>&1; then
+  echo "(este cli-memoria ya tiene search con offset y deadlines: se prueban contra él)"
+else
+  echo "(este cli-memoria todavía no tiene search con offset ni deadlines: las sirve un servidor MCP de juguete de la interfaz común, y lo demás va al servidor de verdad)"
+  cat > "$T/mcp-juguete.mjs" <<'JS'
+// Servidor MCP de juguete para cli/probar.sh: sirve `search` y `deadlines` como manda la interfaz común (leídas de la
+// carpeta de notas) y pasa todo lo demás al servidor cli-memoria de verdad. Sin dependencias de npm.
+//
+// Entorno: REPO (la carpeta de notas), DESTINO (la URL /mcp del cli-memoria), PUERTO, TOKENS (separados por comas).
+import { createServer } from "node:http";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+
+const REPO = process.env.REPO;
+const DESTINO = process.env.DESTINO;
+const PUERTO = Number(process.env.PUERTO);
+const TOKENS = new Set((process.env.TOKENS ?? "").split(",").filter(Boolean));
+
+const plano = texto => String(texto).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+const nombreDe = ruta => ruta.replace(/^.*\//, "").replace(/\.md$/, "");
+
+/** Las palabras de una consulta, sin acentos ni mayúsculas. */
+const palabrasDe = consulta => plano(consulta).split(/[^a-z0-9ñ]+/).filter(Boolean);
+
+/** ¿Está la palabra en el texto? Las de 3 letras o menos, solo enteras («usa» no es «causa»). */
+function entera(texto, palabra) {
+  if (palabra.length > 3) return texto.includes(palabra);
+  return new RegExp(`(^|[^a-z0-9])${palabra}([^a-z0-9]|$)`).test(texto);
+}
+
+/** Las rutas de las notas (sin .git), ordenadas. */
+function notas() {
+  const salida = [];
+  const andar = (dir) => {
+    for (const entrada of readdirSync(join(REPO, dir), { withFileTypes: true })) {
+      if (entrada.name.startsWith(".")) continue;
+      const rel = dir ? `${dir}/${entrada.name}` : entrada.name;
+      if (entrada.isDirectory()) andar(rel);
+      else if (entrada.name.endsWith(".md")) salida.push(rel);
+    }
+  };
+  andar("");
+  return salida.sort();
+}
+
+/** La fecha del último commit de cada nota (AAAA-MM-DD), en una sola pasada de git log. */
+function fechasDeNotas() {
+  const fechas = new Map();
+  try {
+    const salida = execFileSync("git", ["-C", REPO, "log", "--format=%x01%aI", "--name-only"], { encoding: "utf8" });
+    let fecha = null;
+    for (const linea of salida.split("\n")) {
+      if (linea.startsWith("\x01")) fecha = linea.slice(1, 11);
+      else if (linea.trim() && fecha && !fechas.has(linea.trim())) fechas.set(linea.trim(), fecha);
+    }
+  } catch {
+    // Sin historial de git: las notas salen sin fecha.
+  }
+  return fechas;
+}
+
+/** Una nota: sus campos del frontmatter y sus secciones (la cabecera cuenta como una, «cabecera»). */
+function leerNota(ruta) {
+  const lineas = readFileSync(join(REPO, ruta), "utf8").replace(/\n$/, "").split("\n");
+  const meta = {};
+  let i = 0;
+  if (lineas[0] === "---") {
+    for (i = 1; i < lineas.length && lineas[i] !== "---"; i++) {
+      const campo = /^([A-Za-z_][\w-]*):\s*(.*)$/.exec(lineas[i]);
+      if (campo) meta[campo[1]] = campo[2].trim();
+    }
+    i++;
+  }
+  const secciones = [];
+  if (i > 0) secciones.push({ heading: "cabecera", line_start: 1, lineas: lineas.slice(0, i) });
+  let actual = { heading: "", line_start: i + 1, lineas: [] };
+  for (let n = i; n < lineas.length; n++) {
+    const encabezado = /^(#{1,6})\s+(.*)$/.exec(lineas[n]);
+    if (encabezado) {
+      if (actual.heading || actual.lineas.some((l) => l.trim())) secciones.push(actual);
+      actual = { heading: encabezado[2].trim(), line_start: n + 1, lineas: [lineas[n]] };
+    } else {
+      actual.lineas.push(lineas[n]);
+    }
+  }
+  if (actual.heading || actual.lineas.some((l) => l.trim())) secciones.push(actual);
+  return { path: ruta, name: meta.name ?? nombreDe(ruta), description: meta.description ?? null, type: meta.type ?? null, status: meta.status ?? null, secciones };
+}
+
+/** `search`: las secciones que tienen todas las palabras, como mucho dos por nota (group_by_note). */
+function buscar(args) {
+  const palabras = palabrasDe(args.query ?? "");
+  if (!palabras.length) throw new Error("la consulta no tiene palabras que buscar");
+  const tipos = args.type === undefined ? null : [args.type].flat().map(plano);
+  const estados = args.status === undefined ? null : [args.status].flat().map(plano);
+  const carpeta = String(args.folder ?? "").replace(/\/+$/, "");
+  const fechas = fechasDeNotas();
+  const hits = [];
+  for (const ruta of notas()) {
+    if (!args.include_archive && ruta.startsWith("archive/")) continue;
+    if (carpeta && !ruta.startsWith(`${carpeta}/`)) continue;
+    const nota = leerNota(ruta);
+    if (tipos && !tipos.includes(plano(nota.type ?? ""))) continue;
+    if (estados && !estados.includes(plano(nota.status ?? ""))) continue;
+    const deNota = [];
+    for (const seccion of nota.secciones) {
+      const cuerpo = plano(seccion.lineas.join("\n"));
+      const cabecera = plano(seccion.heading);
+      let puntos = 0;
+      let todas = true;
+      for (const palabra of palabras) {
+        if (entera(cuerpo, palabra) || entera(cabecera, palabra)) puntos += entera(cabecera, palabra) ? 10 : 1;
+        else {
+          todas = false;
+          break;
+        }
+      }
+      if (!todas) continue;
+      const i = seccion.lineas.findIndex((l) => palabras.some((p) => plano(l).includes(p)));
+      deNota.push({
+        path: ruta,
+        name: nota.name,
+        description: nota.description,
+        ...(fechas.has(ruta) ? { updated_at: fechas.get(ruta) } : {}),
+        section: { heading: seccion.heading, level: 1, line_start: seccion.line_start, line_end: seccion.line_start + seccion.lineas.length - 1 },
+        snippet: (seccion.lineas[Math.max(0, i)] ?? "").trim().slice(0, 200),
+        score: -puntos,
+        type: nota.type,
+        status: nota.status
+      });
+    }
+    deNota.sort((a, b) => a.score - b.score || a.section.line_start - b.section.line_start);
+    hits.push(...(args.group_by_note === false ? deNota : deNota.slice(0, 2)));
+  }
+  hits.sort((a, b) => a.score - b.score || a.path.localeCompare(b.path) || a.section.line_start - b.section.line_start);
+  const total = hits.length;
+  const offset = Math.max(0, Number(args.offset ?? 0));
+  const limit = Math.min(Math.max(Number(args.limit ?? 10), 1), 50);
+  const pagina = hits.slice(offset, offset + limit);
+  return { mode: "all", hits: pagina, total, ...(offset + pagina.length < total ? { next_offset: offset + pagina.length } : {}) };
+}
+
+/** Las tareas de las secciones «Pendiente» de una nota: `- [ ] Qué · responsable · fecha [origen]`. */
+function tareasDe(ruta) {
+  const nota = leerNota(ruta);
+  const items = [];
+  for (const seccion of nota.secciones) {
+    if (!plano(seccion.heading).startsWith("pendiente")) continue;
+    seccion.lineas.forEach((linea, i) => {
+      const tarea = /^\s*-\s*\[([ xX])\]\s*(.+)$/.exec(linea);
+      if (!tarea) return;
+      const origen = /\[([^\]]+)\]\s*$/.exec(tarea[2]);
+      const cuerpo = (origen ? tarea[2].slice(0, origen.index) : tarea[2]).trim();
+      const [texto = "", responsable = null, fecha = ""] = cuerpo.split("·").map((x) => x.trim());
+      const dia = /^(\d{4}-\d{2}-\d{2})$/.exec(fecha);
+      const mes = /^(\d{4}-\d{2})$/.exec(fecha);
+      items.push({
+        path: ruta,
+        name: nota.name,
+        line: seccion.line_start + i,
+        done: tarea[1] !== " ",
+        text: texto,
+        owner: responsable,
+        date: dia ? dia[1] : mes ? mes[1] : null,
+        date_precision: dia ? "day" : mes ? "month" : null,
+        origin: origen ? origen[1] : null
+      });
+    });
+  }
+  return items;
+}
+
+/** `deadlines`: las tareas por fecha (las de solo mes, al principio de su mes; sin fecha, al final). */
+function plazos(args) {
+  const carpeta = String(args.folder ?? "").replace(/\/+$/, "");
+  let items = [];
+  for (const ruta of notas()) {
+    if (carpeta && !ruta.startsWith(`${carpeta}/`)) continue;
+    if (!args.include_archive && ruta.startsWith("archive/")) continue;
+    items.push(...tareasDe(ruta));
+  }
+  if (!args.include_done) items = items.filter((t) => !t.done);
+  if (!args.include_undated) items = items.filter((t) => t.date);
+  const clave = (t) => (t.date ? `${t.date}${t.date_precision === "month" ? "-00" : ""}` : "9999-99-99");
+  items.sort((a, b) => clave(a).localeCompare(clave(b)) || a.path.localeCompare(b.path) || a.line - b.line);
+  if (args.limit) items = items.slice(0, Number(args.limit));
+  return { items };
+}
+
+// --- MCP ------------------------------------------------------------------------------------------------
+
+const leerCuerpo = (req) => new Promise((r) => {
+  let cuerpo = "";
+  req.on("data", (c) => (cuerpo += c));
+  req.on("end", () => r(cuerpo));
+});
+
+const respuesta = (res, mensaje, cabeceras = {}) => {
+  res.writeHead(200, { "content-type": "application/json", ...cabeceras }).end(JSON.stringify(mensaje));
+};
+
+/** Una llamada al servidor de verdad, con el token del agente que llama: devuelve el `result` (en JSON o en SSE). */
+async function remoto(metodo, params, token) {
+  const r = await fetch(DESTINO, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: metodo, params })
+  });
+  const texto = await r.text();
+  const datos = texto.startsWith("{") ? texto : texto.split("\n").find((l) => l.startsWith("data:"))?.slice(5);
+  const mensaje = JSON.parse(datos);
+  if (mensaje.error) throw new Error(mensaje.error.message ?? "error del servidor");
+  return mensaje.result;
+}
+
+const ESQUEMA_SEARCH = {
+  type: "object",
+  properties: {
+    query: { type: "string" },
+    folder: { type: "string" },
+    include_archive: { type: "boolean" },
+    limit: { type: "integer", minimum: 1, maximum: 50 },
+    offset: { type: "integer", minimum: 0 },
+    type: {},
+    status: {},
+    group_by_note: { type: "boolean" }
+  },
+  required: ["query"]
+};
+
+createServer(async (req, res) => {
+  const token = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+  if (!TOKENS.has(token)) {
+    res.writeHead(401).end();
+    return;
+  }
+  if (req.method === "DELETE") {
+    res.writeHead(200).end();
+    return;
+  }
+  let cuerpo;
+  try {
+    cuerpo = JSON.parse((await leerCuerpo(req)) || "{}");
+  } catch {
+    res.writeHead(400).end();
+    return;
+  }
+  if (cuerpo.method === "initialize") {
+    return respuesta(res, { jsonrpc: "2.0", id: cuerpo.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "mcp-de-juguete", version: "0" } } });
+  }
+  if (cuerpo.method === "notifications/initialized") {
+    res.writeHead(202).end();
+    return;
+  }
+  if (cuerpo.method === "tools/list") {
+    const real = await remoto("tools/list", {}, token);
+    const herramientas = (real.tools ?? []).filter((t) => t.name !== "search" && t.name !== "deadlines");
+    herramientas.unshift(
+      { name: "deadlines", description: "De juguete: tareas de las secciones «Pendiente» de la interfaz común.", inputSchema: { type: "object", properties: { folder: { type: "string" }, include_undated: { type: "boolean" }, include_done: { type: "boolean" }, limit: { type: "integer" } } } },
+      { name: "search", description: "De juguete: search con offset, type, status y group_by_note de la interfaz común.", inputSchema: ESQUEMA_SEARCH }
+    );
+    return respuesta(res, { jsonrpc: "2.0", id: cuerpo.id, result: { tools: herramientas } });
+  }
+  if (cuerpo.method === "tools/call") {
+    const { name, arguments: args = {} } = cuerpo.params ?? {};
+    if (name === "search" || name === "deadlines") {
+      try {
+        const salida = name === "search" ? buscar(args) : plazos(args);
+        return respuesta(res, { jsonrpc: "2.0", id: cuerpo.id, result: { content: [{ type: "text", text: JSON.stringify(salida) }], structuredContent: salida } });
+      } catch (error) {
+        return respuesta(res, { jsonrpc: "2.0", id: cuerpo.id, result: { isError: true, content: [{ type: "text", text: String(error?.message ?? error) }] } });
+      }
+    }
+    return respuesta(res, { jsonrpc: "2.0", id: cuerpo.id, result: await remoto("tools/call", cuerpo.params, token) });
+  }
+  respuesta(res, { jsonrpc: "2.0", id: cuerpo.id, error: { code: -32601, message: "método no soportado por el servidor de juguete" } });
+}).listen(PUERTO, "127.0.0.1");
+JS
+  PUERTO_J=$(( 30000 + RANDOM % 10000 ))
+  REPO="$REPO" DESTINO="http://127.0.0.1:$PUERTO_MM/mcp" PUERTO="$PUERTO_J" TOKENS="$TOK1,$TOK2" "$NODE" "$T/mcp-juguete.mjs" > "$T/juguete.log" 2>&1 &
+  PIDS+=($!)
+  for _ in $(seq 1 60); do
+    curl -s -o /dev/null "http://127.0.0.1:$PUERTO_J/" && break
+    sleep 0.2
+  done
+  curl -s -o /dev/null "http://127.0.0.1:$PUERTO_J/" || { echo "el servidor MCP de juguete no arrancó:"; cat "$T/juguete.log"; exit 2; }
+  MM_URL="http://127.0.0.1:$PUERTO_J/"
+fi
+
 # --- cómo se llama a la CLI -------------------------------------------------------------------------------------
 
-# m1 y m2: los agentes uno y dos, cada uno con su copia de trabajo y su clave.
-m1() { MEMORIA_DIR="$REPO" MEMORIA_COPIA="$T/copia1" HOME="$T/h1" BADULAQUE_CLAVE=clave-uno BADULAQUE_URL="http://127.0.0.1:$PUERTO_PA/" "${CLI[@]}" "$@"; }
-m2() { MEMORIA_DIR="$REPO" MEMORIA_COPIA="$T/copia2" HOME="$T/h2" BADULAQUE_CLAVE=clave-dos BADULAQUE_URL="http://127.0.0.1:$PUERTO_PA/" "${CLI[@]}" "$@"; }
-# mr1: lo mismo que m1 pero sin MEMORIA_DIR (modo remoto): la lectura va por la pasarela, no por el disco.
-mr1() { MEMORIA_DIR="" MEMORIA_COPIA="$T/copiar" HOME="$T/h1" BADULAQUE_CLAVE=clave-uno BADULAQUE_URL="http://127.0.0.1:$PUERTO_PA/" "${CLI[@]}" "$@"; }
+# m1 y m2: los agentes uno y dos, cada uno con su copia de trabajo y su token, contra el servidor (o su fachada de juguete).
+m1() { MEMORIA_DIR="$REPO" MEMORIA_COPIA="$T/copia1" HOME="$T/h1" MEMORIA_URL="$MM_URL" MEMORIA_TOKEN="$TOK1" "${CLI[@]}" "$@"; }
+m2() { MEMORIA_DIR="$REPO" MEMORIA_COPIA="$T/copia2" HOME="$T/h2" MEMORIA_URL="$MM_URL" MEMORIA_TOKEN="$TOK2" "${CLI[@]}" "$@"; }
+# mr1: lo mismo que m1 pero sin MEMORIA_DIR: leer, lista, recientes y buscar --en van al servidor, no al disco.
+mr1() { MEMORIA_DIR="" MEMORIA_COPIA="$T/copiar" HOME="$T/h1" MEMORIA_URL="$MM_URL" MEMORIA_TOKEN="$TOK1" "${CLI[@]}" "$@"; }
+# sin_servidor: con la dirección del servidor caída, para ver que no se busca en el disco por su cuenta.
+sin_servidor() { SAL=$(MEMORIA_DIR="$REPO" MEMORIA_COPIA="$T/copiar" HOME="$T/h1" MEMORIA_URL="http://127.0.0.1:1/mcp" MEMORIA_TOKEN="$TOK1" "${CLI[@]}" "$@" 2>&1); RC=$?; }
 mkdir -p "$T/h1" "$T/h2"
 c1() { git -C "$T/copia1" "$@"; }
 c2() { git -C "$T/copia2" "$@"; }
@@ -177,7 +452,7 @@ rc_es() { if [ "$RC" = "$1" ]; then ok "$2"; else mal "$2" "rc=$RC, se esperaba 
 srv() { git -C "$REPO" "$@"; }
 srv_head() { srv rev-parse HEAD; }
 
-# --- 0. leer y buscar con salida navegable ---------------------------------------------------------------------
+# --- 0. leer: local, con su índice, sus secciones y sus páginas -----------------------------------------------
 
 L="$REPO/projects/largo.md"
 linea_de() { grep -n -m1 -F -- "$1" "$L" | cut -d: -f1; }
@@ -245,69 +520,127 @@ espera "(página 2 de " "--pagina sin seccion: lee la nota seguida"
 corre m1 leer cafe --seccion inexistente
 rc_es 2 "seccion en una nota corta que no la tiene: rc 2"
 
+# --- 0a. buscar: la herramienta search del servidor, con --limite, --pagina y filtros ---------------------
+
 corre m1 buscar zorro-azul
-espera "projects/largo.md:$(linea_de zorro-azul) · Pendiente › Cola 5 · - zorro-azul" "buscar: ruta:línea · sección · fragmento"
+espera "projects/largo.md:" "buscar: la ruta del resultado"
+espera "zorro-azul" "buscar: el fragmento de la línea que coincide"
 espera "(1 resultado)" "buscar: dice el total (uno)"
+espera "  ↳ (cambiada el $ALTA) Nota larga de juguete" "buscar: bajo la nota, su último cambio y su description"
 corre m1 buscar CANCION --carpeta projects
-espera "· Acentuación · Café y canción." "buscar: sin acentos y con su sección"
-corre m1 buscar juguete --carpeta projects
-espera "projects/alfa.md:3 · cabecera · description: Proyecto alfa" "buscar: un acierto en el frontmatter dice «cabecera»"
-corre m1 buscar tarea --limite 5
-espera "(200 resultados; mostrando 1-5: --pagina 2 (o --limite N))" "buscar: total, lo que muestra y cómo seguir"
-[ "$(m1 buscar tarea --limite 5 | lineas)" = 7 ] && ok "buscar: cinco líneas, la description de la nota (una vez) y el aviso" || mal "buscar: cinco líneas, la description de la nota y el aviso"
-corre m1 buscar tarea --limite 5 --pagina 2
-espera "tarea 1.5:" "buscar: la página 2 sigue por donde iba"
-no_espera "tarea 1.4:" "buscar: …sin repetir"
-espera "mostrando 6-10" "buscar: …y dice dónde va"
-corre m1 buscar tarea --limite 5 --pagina 40
-espera "mostrando 196-200" "buscar: la última página no dice cómo seguir"
-no_espera "--pagina 41" "buscar: …porque no hay más"
-corre m1 buscar tarea --limite 5 --pagina 41
-rc_es 2 "buscar: una página que no existe falla (rc 2)"
+espera "canción" "buscar: sin acentos ni mayúsculas (lo hace el servidor)"
+no_espera "topics/" "buscar --carpeta: solo esa carpeta"
+corre m1 buscar alfa --carpeta projects
+espera "projects/alfa.md:" "buscar: una nota de esa carpeta"
+espera "  ↳ (cambiada el $ALTA) Proyecto alfa de juguete" "buscar: la description va en la línea ↳"
 corre m1 buscar nadadenada
 espera "(0 resultados)" "buscar: sin resultados, lo dice"
-corre m1 buscar juguete --carpeta projects
-espera "  ↳ (cambiada el $ALTA) Proyecto alfa de juguete" "buscar: cada nota lleva la fecha de su último cambio y su description, una línea corta bajo su primer resultado"
-# Varias palabras: si la frase exacta no da nada, por separado, con las notas que las tienen todas primero y su description.
-corre m1 buscar "cafe notas"
-espera "por palabras sueltas, primero las notas con todas:" "buscar por palabras: avisa de que la frase exacta no dio nada"
-[ "$(m1 buscar "cafe notas" | sed -n 2p | cut -d: -f1)" = "topics/cafe.md" ] && ok "buscar por palabras: la nota con todas (nombre y description) va primero" || mal "buscar por palabras: la nota con todas va primero"
-espera "  ↳ (cambiada el $ALTA) Notas sobre el café" "buscar por palabras: lleva la fecha y la description de la nota"
-espera "(1 nota por palabras sueltas (1 con todas: cafe, notas))" "buscar por palabras: el resumen"
-corre m1 buscar "el café de la nota"
-espera "topics/cafe.md" "buscar por palabras: las palabras vacías (el, de, la) no cuentan"
-corre m1 buscar "cafe zzzz"
-espera "topics/cafe.md" "buscar por palabras: sin ninguna con todas, salen las que tienen alguna"
-corre m1 buscar "nadadenada zzzz"
-espera "(0 resultados, ni con las palabras sueltas" "buscar por palabras: sin nada, lo dice"
-corre m1 buscar "cafe notas" --json
-espera '"descripcion": "Notas sobre el café"' "buscar por palabras --json: lleva la description"
 corre m1 lista --carpeta projects
 espera "projects/alfa.md" "lista --carpeta X es lista X (el error más común: no hace fallar)"
-corre m1 buscar usa
-espera "(0 resultados)" "buscar: un término de 3 letras o menos solo cuenta entero («usa» no es «causa»)"
-corre m1 buscar causa
-espera "topics/vieja.md" "buscar: …y uno largo sí es subcadena"
-corre m1 buscar zorro-azul --json
-espera '"seccion": "Pendiente › Cola 5"' "buscar --json: lleva la sección"
+
+# paginar: seis notas con un solo acierto (pruebas/a.md … pruebas/f.md), dos por página
+corre m1 buscar zeta --limite 2
+espera "(6 resultados; mostrando 1-2: --pagina 2 (o --limite N))" "buscar: el total y cómo pasar de página"
+[ "$(m1 buscar zeta --limite 2 | lineas)" = 5 ] && ok "buscar: dos resultados, sus dos ↳ y el aviso" || mal "buscar: dos resultados, sus dos ↳ y el aviso" "$(m1 buscar zeta --limite 2)"
+corre m1 buscar zeta --limite 2 --pagina 2
+espera "pruebas/c.md" "buscar: la página 2 sigue por donde iba"
+no_espera "pruebas/a.md" "buscar: …sin repetir la página 1"
+espera "mostrando 3-4" "buscar: …y dice dónde va"
+corre m1 buscar zeta --limite 2 --pagina 3
+espera "pruebas/f.md" "buscar: la última página"
+no_espera "--pagina 4" "buscar: …y no ofrece más porque no hay"
+corre m1 buscar zeta --limite 2 --pagina 4
+rc_es 2 "buscar: una página que no existe falla (rc 2)"
+espera "hay 3 (6 resultados, 2 por página)" "buscar: …y dice cuántas hay"
+corre m1 buscar zeta --limite 60
+rc_es 2 "buscar: --limite por encima de 50 falla (rc 2)"
+espera "para ver más, --pagina" "buscar: …y dice cómo ver más"
+
+# --tipo y --estado: los filtros del frontmatter
+corre m1 buscar zeta --tipo proyecto --limite 5
+espera "pruebas/a.md" "buscar --tipo: filtra por el campo type de la nota"
+espera "pruebas/b.md" "buscar --tipo: …las dos que lo tienen"
+no_espera "pruebas/c.md" "buscar --tipo: …y deja fuera las demás"
+corre m1 buscar zeta --estado activo --limite 5
+espera "(1 resultado)" "buscar --estado: filtra por el campo status"
+corre m1 buscar zeta --tipo nota,proyecto --limite 6
+espera "(6 resultados)" "buscar --tipo con comas: vale una lista"
+corre m1 buscar zeta --tipo noexiste
+espera "(0 resultados)" "buscar --tipo que no hay: sin resultados"
+
+# --archivo
+corre m1 buscar zeta --limite 50
+no_espera "archive/" "buscar: sin --archivo, el archivo no sale"
+corre m1 buscar zeta --archivo --limite 50
+espera "archive/guardada.md" "buscar --archivo: incluye archive/"
+
+# --json y el alias
+corre m1 buscar zeta --limite 6 --json
+espera '"seccion": "Zeta"' "buscar --json: lleva la sección"
+espera '"tipo": "proyecto"' "buscar --json: lleva el tipo de la nota"
+espera '"estado": "activo"' "buscar --json: lleva el estado"
 espera "\"cambiada\": \"$ALTA\"" "buscar --json: lleva la fecha del último cambio"
-corre m1 buscar zorro-azul
-espera "  ↳ (cambiada el $ALTA) Nota larga de juguete" "buscar: la fecha va en la línea ↳, delante de la description"
+corre m1 search zeta --limite 2
+espera "(6 resultados; mostrando 1-2" "alias: search vale para buscar"
+
+# la description se corta a 200 caracteres (antes, 110)
+corre m1 buscar zumbido
+espera "mediados" "buscar: la línea ↳ lleva la description más allá de 110 caracteres"
+no_espera "finalisimo" "buscar: …y se corta antes del final"
+[ "$(m1 buscar zumbido | sed -n 2p | wc -m)" -le 245 ] && ok "buscar: la description cortada no pasa de 200" || mal "buscar: la description cortada no pasa de 200"
+
+# el que manda es el servidor: si no está, no se busca en el disco por su cuenta
+sin_servidor buscar zorro-azul
+rc_es 3 "buscar con el servidor caído: falla (rc 3)"
+espera "no llego al servidor" "buscar con el servidor caído: lo dice"
+no_espera "projects/largo.md" "buscar con el servidor caído: no busca en el disco por su cuenta"
+sin_servidor plazos
+rc_es 3 "plazos con el servidor caído: falla (rc 3)"
+# --en y --regex siguen en el disco (rg): no necesitan el servidor
+sin_servidor buscar pan --en alfa
+rc_es 0 "--en con el servidor caído: sale del disco con rg"
+espera "Comprar pan." "--en: la línea de la nota"
+corre m1 buscar 'moka|filtrado' --regex
+espera "topics/cafe.md" "buscar --regex: una expresión de rg en la copia local"
+
+# la fecha de una nota sin tocar sale del historial de git, y se guarda en una caché (~/.cache/memoria): la usa leer
 CACHE="$T/h1/.cache/memoria/fechas.json"
 [ "$(jq -r .cabeza "$CACHE" 2>/dev/null)" = "$(srv_head)" ] && ok "fechas: se guardan en ~/.cache/memoria con el HEAD del que salen" || mal "fechas: la caché" "$(head -c 200 "$CACHE" 2>&1)"
 # Con la caché al día no se lanza git log: una fecha falsa en ella es lo que sale (y así se ve que se usa).
 jq '.fechas["projects/largo.md"] = "1999-09-09"' "$CACHE" > "$CACHE.x" && mv "$CACHE.x" "$CACHE"
-corre m1 buscar zorro-azul
-espera "(cambiada el 1999-09-09)" "fechas: con HEAD igual, salen de la caché, sin git log"
+corre m1 leer largo
+espera " · cambiada el 1999-09-09 · " "fechas: con HEAD igual, salen de la caché, sin git log"
 rm -f "$CACHE"
-corre m1 buscar zorro-azul
-espera "(cambiada el $ALTA)" "fechas: sin caché, se calculan otra vez"
-# Sin historial de git (una carpeta de notas suelta): los mismos resultados, sin fecha y sin error.
-mkdir -p "$T/sin-git" && cp -r "$REPO/projects" "$T/sin-git/"
-SAL=$(MEMORIA_DIR="$T/sin-git" HOME="$T/h1" "${CLI[@]}" buscar zorro-azul 2>&1); RC=$?
-espera "  ↳ Nota larga de juguete" "buscar sin git: la description, sin fecha"
-no_espera "cambiada el" "buscar sin git: …y sin fecha"
-rc_es 0 "buscar sin git: no falla"
+corre m1 leer largo
+espera " · cambiada el $ALTA · " "fechas: sin caché, se calculan otra vez"
+
+# --- 0b. plazos: la herramienta deadlines, una línea por tarea ---------------------------------------------
+
+corre m1 plazos
+espera "2026-02 · Pagar la luz · ana · tareas/pendientes.md" "plazos: fecha · qué · responsable · nota"
+espera "2026-03-10 · Comprar pan · ana · tareas/pendientes.md" "plazos: por fecha"
+no_espera "Llamar al fontanero" "plazos: las hechas no salen sin --hechas"
+no_espera "Revisar el tejado" "plazos: las que no tienen fecha no salen sin --sin-plazo"
+espera "(3 tareas · sin plazo: --sin-plazo · hechas: --hechas)" "plazos: el total y cómo ver el resto"
+[ "$(m1 plazos | sed -n 1p | cut -d' ' -f1)" = "2026-02" ] && ok "plazos: la primera es la del mes más antiguo" || mal "plazos: la primera es la del mes más antiguo" "$(m1 plazos)"
+corre m1 plazos --hechas
+espera "2026-03-01 · Llamar al fontanero · beto · tareas/pendientes.md (hecha)" "plazos --hechas: las hechas van marcadas"
+corre m1 plazos --sin-plazo
+espera "sin plazo · Revisar el tejado · marta · tareas/pendientes.md" "plazos --sin-plazo: al final, sin fecha"
+corre m1 plazos --hechas --sin-plazo
+espera "(5 tareas)" "plazos --hechas --sin-plazo: las cinco"
+corre m1 plazos --carpeta tareas
+espera "(3 tareas" "plazos --carpeta X: solo esa carpeta"
+corre m1 plazos --carpeta projects
+espera "(0 tareas" "plazos --carpeta sin tareas: ninguna"
+corre m1 deadlines
+espera "2026-02 · Pagar la luz" "alias: deadlines es plazos"
+corre m1 plazos --json
+espera '"date_precision": "month"' "plazos --json: las tareas del servidor, tal cual"
+espera '"origin": "aviso"' "plazos --json: con su origen"
+corre m1 plazos tareas
+rc_es 2 "plazos con un posicional: error de uso"
+espera "uso: memoria plazos" "plazos: …y dice cómo se usa"
 
 # buscar --en <nota>: las líneas de esa nota, con su número y su sección, y el total
 corre m1 buscar tarea --en largo --limite 3
@@ -355,49 +688,56 @@ espera "no existe la nota topics/nohaytal.md" "…y lo dice"
 corre m1 lista projects --limite 1
 espera "(2 notas; mostrando 1: --pagina 2 (o --limite N))" "lista: total y paginación"
 
-# lo mismo por la pasarela (sin MEMORIA_DIR, modo remoto)
-corre mr1 leer largo
-espera "nota larga: lee una sección con --seccion" "remoto leer larga: el índice"
-espera "hash: " "remoto leer larga: con su hash"
-corre mr1 leer largo --seccion estado
-espera "Todo va bien." "remoto seccion: solo esa sección"
-no_espera "tarea" "remoto seccion: …y nada más"
-corre mr1 leer cafe
-espera "Espresso, filtrado y moka" "remoto leer corta: entera"
-corre mr1 buscar zorro-azul
-espera "projects/largo.md:" "remoto buscar: la ruta"
-espera "(1 resultado)" "remoto buscar: el total"
-espera "  ↳ " "remoto buscar: la línea ↳ con lo que da el servidor"
-espera "Nota larga de juguete" "remoto buscar: …su description"
-corre mr1 buscar zorro-azul --en largo
-espera "projects/largo.md:$(linea_de zorro-azul) · Pendiente › Cola 5 · - zorro-azul" "remoto --en: la línea, su número y su sección"
-espera "(1 resultado en projects/largo.md)" "remoto --en: el total"
-espera "  ↳ (cambiada el $ALTA) Nota larga de juguete" "remoto --en: la fecha que da el servidor (updated_at de read)"
-corre mr1 leer largo
-espera " · cambiada el $ALTA · " "remoto leer larga: la fecha en la cabecera"
+# --- 0c. sin copia local (MEMORIA_DIR vacío): leer, buscar y plazos, por el servidor -------------------------
 
-# --- 0b. la ayuda y los comandos: escribir una nota, primero; sin «badulaque memoria» -------------------------------------
+corre mr1 leer largo
+espera "nota larga: lee una sección con --seccion" "sin MEMORIA_DIR: leer larga da su índice"
+espera "hash: " "sin MEMORIA_DIR: …con su hash"
+corre mr1 leer largo --seccion estado
+espera "Todo va bien." "sin MEMORIA_DIR: leer --seccion"
+no_espera "tarea" "sin MEMORIA_DIR: …y nada más"
+corre mr1 leer cafe
+espera "Espresso, filtrado y moka" "sin MEMORIA_DIR: leer una nota corta, entera"
+corre mr1 buscar zeta --limite 2
+espera "(6 resultados; mostrando 1-2" "sin MEMORIA_DIR: buscar va al servidor y pagina igual"
+corre mr1 buscar zeta --tipo proyecto --limite 5
+espera "pruebas/a.md" "sin MEMORIA_DIR: los filtros de buscar, también"
+corre mr1 plazos
+espera "2026-02 · Pagar la luz · ana · tareas/pendientes.md" "sin MEMORIA_DIR: plazos"
+corre mr1 buscar pan --en alfa
+espera "projects/alfa.md:$(grep -n -m1 -F 'Comprar pan.' "$REPO/projects/alfa.md" | cut -d: -f1) · Pendiente · Comprar pan." "sin MEMORIA_DIR: --en lee la nota por el servidor y busca aquí"
+espera "  ↳ (cambiada el $ALTA) Proyecto alfa de juguete" "sin MEMORIA_DIR: --en con la fecha que da el servidor (updated_at de read)"
+corre mr1 buscar moka --regex
+rc_es 2 "sin MEMORIA_DIR: --regex falla (necesita la copia local)"
+espera "define MEMORIA_DIR" "…y lo dice"
+corre mr1 leer largo
+espera " · cambiada el $ALTA · " "sin MEMORIA_DIR: la fecha en la cabecera de leer"
+
+# --- 0d. la ayuda y los comandos: escribir una nota, primero -------------------------------------------------------------
 
 corre m1 --help
 [ "$(grep -n '^Escribir una nota' <<<"$SAL" | cut -d: -f1)" -lt "$(grep -n '^Cambios de varias notas' <<<"$SAL" | cut -d: -f1)" ] \
   && ok "ayuda: escribir una nota va antes que la copia de trabajo" || mal "ayuda: escribir una nota va antes que la copia de trabajo"
 espera "memoria borrar <nota> --razon <texto> --si" "ayuda: borrar pide --si"
 espera "--en <nota>" "ayuda: buscar --en"
+espera "--tipo T" "ayuda: buscar --tipo"
+espera "memoria plazos [--carpeta X] [--sin-plazo] [--hechas] [--json]" "ayuda: plazos"
+no_espera "BADULAQUE" "ayuda: no queda nada de la pasarela"
 espera 'Las notas en bruto están en $MEMORIA_DIR' "ayuda: las notas en bruto, para rg -n"
 no_espera "badulaque memoria" "ayuda: nada pasa por «badulaque memoria»"
 corre m1 buscr x
-espera "Comandos: buscar, leer, lista, recientes, crear, editar, escribir, mover, borrar" "error de comando: lista primero leer y escribir una nota"
+espera "Comandos: buscar, plazos, leer, lista, recientes, crear, editar, escribir, mover, borrar" "error de comando: lista primero leer y escribir una nota"
 printf -- '---\nname: Alias\ndescription: Nota de los alias\n---\n# Alias\nx\n' > "$T/alias.md"
 corre m1 write topics/cafe --razon "alias" --archivo "$T/alias.md" --simular
-espera '"herramienta": "memoria_write"' "alias: write es escribir"
+espera '"herramienta": "write"' "alias: write es escribir"
 corre m1 move topics/cafe topics/cafe-dos --razon "alias" --simular
-espera '"herramienta": "memoria_move"' "alias: move es mover"
+espera '"herramienta": "move"' "alias: move es mover"
 corre m1 mv topics/cafe topics/cafe-dos --razon "alias" --simular
-espera '"herramienta": "memoria_move"' "alias: mv es mover"
+espera '"herramienta": "move"' "alias: mv es mover"
 corre m1 create topics/alias --razon "alias" --archivo "$T/alias.md" --simular
-espera '"herramienta": "memoria_create"' "alias: create es crear"
+espera '"herramienta": "create"' "alias: create es crear"
 corre m1 edit topics/cafe --razon "alias" --viejo moka --nuevo moca --simular
-espera '"herramienta": "memoria_edit"' "alias: edit es editar"
+espera '"herramienta": "edit"' "alias: edit es editar"
 antes=$(srv_head)
 corre m1 delete topics/vieja --razon "alias" --si
 rc_es 2 "alias: delete no borra (no hay alias para borrar)"
@@ -408,7 +748,7 @@ corre m1 borrar topics/vieja --razon "sin si"
 rc_es 2 "borrar sin --si: no borra (rc 2)"
 espera "repite con --si" "borrar sin --si: dice cómo"
 corre m1 borrar topics/vieja --razon "simulado" --simular
-espera '"herramienta": "memoria_delete"' "borrar --simular: enseña la llamada sin --si"
+espera '"herramienta": "delete"' "borrar --simular: enseña la llamada sin --si"
 [ "$(srv_head)" = "$antes" ] && [ -f "$REPO/topics/vieja.md" ] && ok "alias y borrar sin --si: el servidor no cambió" || mal "alias y borrar sin --si: el servidor no cambió"
 
 # --- 1. la copia ----------------------------------------------------------------------------------------------
@@ -434,7 +774,7 @@ espera "tienes cambios sin commitear" "publicar: con cambios sin commitear, no h
 rc_es 1 "publicar: …y sale con 1"
 c1 add projects/alfa.md && c1 commit -q -m "Alfa: comprar también leche"
 corre m1 publicar --simular
-espera "memoria_write projects/alfa.md" "simular: enseña el cambio"
+espera "write projects/alfa.md" "simular: enseña el cambio"
 espera "todo en orden" "simular: dice que todo va bien"
 [ "$(srv_head)" = "$(srv rev-parse main)" ] && [ "$(srv log --oneline | lineas)" = 1 ] && ok "simular: no escribió nada en el servidor" || mal "simular: no escribió nada en el servidor"
 corre m1 publicar --razon "Beta: nota nueva de juguete"
@@ -459,6 +799,7 @@ espera "  ↳ (cambiada el $hoy_alfa) Proyecto alfa de juguete" "fecha: la del �
 no_espera "cambiada el $ALTA) Proyecto alfa" "fecha: …no la del alta"
 corre m1 buscar "Le gusta el café"
 espera "  ↳ (cambiada el $ALTA) Amiga de juguete" "fecha: una nota sin cambios conserva la del alta"
+corre m1 leer largo
 [ "$(jq -r .cabeza "$CACHE" 2>/dev/null)" = "$(srv_head)" ] && ok "fechas: la caché sigue al HEAD nuevo (solo los commits nuevos)" || mal "fechas: la caché sigue al HEAD nuevo"
 
 # mover (con reescritura de enlaces) y borrar, en commits distintos; un borrado con su enlace quitado antes
@@ -574,7 +915,7 @@ corre m1 publicar
 rc_es 1 "con un commit intermedio malo, publicar uno a uno sigue fallando"
 espera "memoria publicar --aplanar" "…y propone --aplanar"
 corre m1 publicar --aplanar --simular
-espera "memoria_create projects/delta.md" "aplanar (simulado): un solo crear de delta, ya arreglada"
+espera "create projects/delta.md" "aplanar (simulado): un solo crear de delta, ya arreglada"
 corre m1 publicar --aplanar
 rc_es 0 "aplanar: publica el resultado final de lo que faltaba"
 [ -f "$REPO/projects/gamma.md" ] && [ -f "$REPO/projects/delta.md" ] && [ -f "$REPO/projects/epsilon.md" ] && ok "servidor: ya están gamma, delta y epsilon" || mal "servidor: ya están gamma, delta y epsilon"
@@ -649,7 +990,7 @@ corre m1 borrar topics/cafes --razon "Fuera cafés" --si
 rc_es 0 "borrar --si: la quita"
 [ ! -f "$REPO/topics/cafes.md" ] && ok "borrar: el servidor ya no la tiene" || mal "borrar: el servidor ya no la tiene"
 corre m1 adjuntar docs/x.pdf --archivo "$T/nueva-cafes.md" --descripcion "Una prueba" --razon "Adjunto" --simular
-espera '"memoria_attach"' "adjuntar --simular: enseña la llamada"
+espera '"herramienta": "attach"' "adjuntar --simular: enseña la llamada"
 corre m1 adjuntar docs/x.pdf --descripcion "Una prueba" --razon "Adjunto"
 rc_es 2 "adjuntar sin --archivo: error de uso"
 corre m1 borrar topics/nada-de-nada --razon "x" --si
@@ -682,49 +1023,25 @@ else
   echo "OMITIDA partir una nota en un envío: este cli-memoria no tiene publish"
 fi
 
-# --- 6d. modo directo contra el servidor cli-memoria (sin pasarela: MEMORIA_URL + MEMORIA_TOKEN) -----------------------------
-md1() { MEMORIA_DIR="" MEMORIA_COPIA="$T/copiad" HOME="$T/hd" BADULAQUE_URL="" BADULAQUE_CLAVE="" MEMORIA_URL="http://127.0.0.1:$PUERTO_MM/mcp" MEMORIA_TOKEN="$TOK1" "${CLI[@]}" "$@"; }
-mdl() { MEMORIA_DIR="$REPO" MEMORIA_COPIA="$T/copiad" HOME="$T/hd" BADULAQUE_URL="" BADULAQUE_CLAVE="" MEMORIA_URL="http://127.0.0.1:$PUERTO_MM/mcp" MEMORIA_TOKEN="$TOK1" "${CLI[@]}" "$@"; }
+# --- 6d. sin copia local: crear, editar y lo demás, por el servidor (MEMORIA_URL + MEMORIA_TOKEN) ----------------------------
 
-corre md1 buscar alfa
-rc_es 0 "directo: buscar funciona sin pasarela"
-espera "projects/alfa.md" "directo: buscar encuentra alfa"
-espera "cambiada el " "directo: buscar devuelve fecha de cambio del servidor"
-
-corre md1 buscar "fuente-guion" --en projects/madre.md
-rc_es 0 "directo: buscar --en con guion no rompe la regex"
-
-corre md1 leer alfa
-rc_es 0 "directo: leer funciona sin pasarela"
-espera "Alfa" "directo: leer devuelve la nota"
-
-printf -- '---\nname: Directa\ndescription: Nota creada en modo directo\n---\n# Directa\nCreada sin pasarela.\n' > "$T/directa.md"
-corre md1 crear topics/directa --razon "Prueba directa" --archivo "$T/directa.md" --simular
-rc_es 0 "directo: --simular muestra herramienta sin prefijo"
-espera '"herramienta": "create"' "directo: --simular usa create"
-
-corre md1 crear topics/directa --razon "Prueba directa" --archivo "$T/directa.md"
-rc_es 0 "directo: crear escribe directo al servidor"
-[ -f "$REPO/topics/directa.md" ] && ok "directo: la nota está en el repositorio del servidor" || mal "directo: la nota no se creó"
-
-corre md1 editar topics/directa --razon "Editar directo" --viejo "Creada sin pasarela." --nuevo "Editada sin pasarela."
-rc_es 0 "directo: editar funciona sin pasarela"
-grep -q "Editada sin pasarela." "$REPO/topics/directa.md" && ok "directo: edición guardada en el servidor" || mal "directo: edición no guardada"
-
-corre md1 historial topics/directa
-rc_es 0 "directo: historial funciona sin pasarela"
-espera "Editar directo" "directo: historial ve el commit"
-
-corre md1 revisar
-rc_es 0 "directo: revisar funciona sin pasarela"
-
-corre mdl copia
-rc_es 0 "directo: copia creada"
-printf -- '---\nname: Lote Directo\ndescription: Publicada en directo\n---\n# Lote Directo\nTexto.\n' > "$T/copiad/topics/lote-directo.md"
-git -C "$T/copiad" add -A && git -C "$T/copiad" commit -q -m "Lote directo: prueba publish sin pasarela"
-corre mdl publicar
-rc_es 0 "directo: publicar funciona directo al servidor"
-[ -f "$REPO/topics/lote-directo.md" ] && ok "directo: publish atómico guardó la nota" || mal "directo: publish no guardó la nota"
+printf -- '---\nname: Directa\ndescription: Nota creada sin copia local\n---\n# Directa\nCreada sin MEMORIA_DIR.\n' > "$T/directa.md"
+corre mr1 crear topics/directa --razon "Prueba sin copia local" --archivo "$T/directa.md" --simular
+rc_es 0 "sin MEMORIA_DIR: crear --simular"
+espera '"herramienta": "create"' "sin MEMORIA_DIR: …y enseña la herramienta por su nombre"
+corre mr1 crear topics/directa --razon "Prueba sin copia local" --archivo "$T/directa.md"
+rc_es 0 "sin MEMORIA_DIR: crear escribe en el servidor"
+[ -f "$REPO/topics/directa.md" ] && ok "sin MEMORIA_DIR: la nota está en el repositorio del servidor" || mal "sin MEMORIA_DIR: la nota no se creó"
+corre mr1 editar topics/directa --razon "Editar sin copia local" --viejo "Creada sin MEMORIA_DIR." --nuevo "Editada sin MEMORIA_DIR."
+rc_es 0 "sin MEMORIA_DIR: editar"
+grep -q "Editada sin MEMORIA_DIR." "$REPO/topics/directa.md" && ok "sin MEMORIA_DIR: la edición está en el servidor" || mal "sin MEMORIA_DIR: la edición no está"
+corre mr1 historial topics/directa
+rc_es 0 "sin MEMORIA_DIR: historial"
+espera "Editar sin copia local" "sin MEMORIA_DIR: historial con la razón"
+corre mr1 revisar
+rc_es 0 "sin MEMORIA_DIR: revisar"
+corre mr1 buscar directa --carpeta topics
+espera "topics/directa.md" "sin MEMORIA_DIR: buscar encuentra la nota recién escrita"
 
 # --- 7. el repositorio de las notas no se toca a mano -----------------------------------------------------------------------
 
@@ -734,7 +1051,7 @@ c1 push >/dev/null 2>&1; [ $? -ne 0 ] && ok "copia: un git push no tiene adónde
 corre m1 crear --simular nota-suelta --razon prueba - </dev/null
 rc_es 2 "crear sigue ahí (falta el contenido: error de uso, no de otra cosa)"
 # la clave nunca sale en los mensajes
-if grep -q "mm_" <<<"$SAL$(cat "$T/pasarela.log")"; then mal "ningún token en las salidas"; else ok "ningún token en las salidas"; fi
+if grep -q "mm_" <<<"$SAL$(cat "$T/mm.log")$(cat "$T/juguete.log" 2>/dev/null)"; then mal "ningún token en las salidas"; else ok "ningún token en las salidas"; fi
 
 if [ "$fallos" -gt 0 ]; then
   echo "Fallaron $fallos comprobaciones."

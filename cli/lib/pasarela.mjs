@@ -1,7 +1,5 @@
-// Cliente MCP por HTTP (Streamable HTTP, JSON o SSE) para la CLI memoria.
-// Soporta dos modos sin dependencias externas:
-// - Directo al servidor cli-memoria (sin sesión o con sesión): MEMORIA_URL y MEMORIA_TOKEN.
-// - A través de una pasarela MCP compatible (envuelve herramientas en `buscador_usar`): BADULAQUE_URL y BADULAQUE_CLAVE.
+// Cliente MCP por HTTP (Streamable HTTP, JSON o SSE) para la CLI memoria: el endpoint /mcp del servidor
+// cli-memoria, sin sesión o con ella, con MEMORIA_URL y MEMORIA_TOKEN.
 
 import { request as pedirHttp } from "node:http";
 import { request as pedirHttps } from "node:https";
@@ -11,7 +9,7 @@ const PROTOCOLO = "2025-06-18";
 /** Sin noticias del servidor durante tanto, una llamada sencilla se da por perdida. */
 const TIEMPO_SIMPLE_MS = 60_000;
 /** Una llamada a herramienta puede tardar (OCR, publish grande): se da por perdida solo tras tanto silencio. */
-const SILENCIO_USAR_MS = 5 * 60_000;
+const SILENCIO_LLAMADA_MS = 5 * 60_000;
 
 /** Un error con su código de salida: 1 herramienta, 2 uso o configuración, 3 red o protocolo. */
 export class Fallo extends Error {
@@ -124,23 +122,22 @@ function pedir(url, { metodo = "POST", cabeceras = {}, cuerpo, alMensaje, silenc
   });
 }
 
-function comprobarEstado(estado, varClave) {
+function comprobarEstado(estado) {
   if (estado === 401 || estado === 403) {
-    throw new Fallo(`el servidor no acepta la credencial (${varClave}): ¿es la de tu agente?`, 2);
+    throw new Fallo("el servidor no acepta la credencial (MEMORIA_TOKEN): ¿es la de tu agente?", 2);
   }
   if (estado < 200 || estado >= 300) throw errorRed(`el servidor contestó ${estado}`);
 }
 
 /**
- * Cliente MCP por HTTP. Funciona tanto con el servidor cli-memoria sin estado (sin Mcp-Session-Id)
- * como con pasarelas MCP con sesión (`initialize` + `Mcp-Session-Id`).
+ * Cliente MCP por HTTP del servidor cli-memoria: habla con /mcp sin estado (sin Mcp-Session-Id) o con sesión, si el
+ * servidor la pide (`initialize` + `Mcp-Session-Id`).
  */
-export class Pasarela {
-  constructor(url, clave, { sinEstado = false, varClave = "MEMORIA_TOKEN" } = {}) {
+export class Cliente {
+  constructor(url, clave, { sinEstado = true } = {}) {
     this.url = url;
     this.clave = clave;
     this.sinEstado = sinEstado;
-    this.varClave = varClave;
     this.id = null;
     this.abierta = false;
     this.version = PROTOCOLO;
@@ -178,7 +175,7 @@ export class Pasarela {
         }
       }
     });
-    comprobarEstado(r.estado, this.varClave);
+    comprobarEstado(r.estado);
     const respuesta = r.mensajes.find(m => m.id === id);
     if (!respuesta || respuesta.error) {
       throw errorRed(`el servidor no abrió la sesión${respuesta?.error?.message ? `: ${respuesta.error.message}` : ""}`);
@@ -192,7 +189,7 @@ export class Pasarela {
         cuerpo: { jsonrpc: "2.0", method: "notifications/initialized" }
       });
     } else if (!this.sinEstado) {
-      throw errorRed("la pasarela no dio sesión");
+      throw errorRed("el servidor no dio sesión");
     }
     this.abierta = true;
   }
@@ -235,7 +232,7 @@ export class Pasarela {
         await this.abrir();
         continue;
       }
-      comprobarEstado(r.estado, this.varClave);
+      comprobarEstado(r.estado);
       if (!final) throw errorRed("el servidor cerró la conexión sin dar el resultado");
       if (final.error) throw errorRed(`el servidor devolvió un error${final.error.message ? `: ${final.error.message}` : ""}`);
       return final.result ?? {};
@@ -246,7 +243,7 @@ export class Pasarela {
     return this.pedir("tools/call", {
       name: nombre,
       arguments: argumentos ?? {}
-    }, { silencioMs: SILENCIO_USAR_MS });
+    }, { silencioMs: SILENCIO_LLAMADA_MS });
   }
 
   async cerrar() {
@@ -262,44 +259,20 @@ export class Pasarela {
   }
 }
 
-/** Qué modo de conexión se usaría con el entorno actual ("directo" o "pasarela"), sin abrir red. */
-export function modoDeConexion() {
-  if ((process.env.MEMORIA_URL ?? "").trim() || (process.env.MEMORIA_TOKEN ?? "").trim()) return "directo";
-  return "pasarela";
-}
-
 /**
- * Configura el cliente a partir del entorno:
- * - Directo (preferido): MEMORIA_URL + MEMORIA_TOKEN (contra el servidor cli-memoria, `/mcp`).
- * - Pasarela (compatibilidad): BADULAQUE_URL + BADULAQUE_CLAVE (envuelve llamadas en `buscador_usar`).
+ * Configura el cliente con MEMORIA_URL y MEMORIA_TOKEN (la dirección /mcp del servidor y el token del agente).
+ * Devuelve { cliente }.
  */
 export function configurar() {
-  const modo = modoDeConexion();
-  if (modo === "directo") {
-    const url = (process.env.MEMORIA_URL ?? "").trim();
-    const token = (process.env.MEMORIA_TOKEN ?? "").trim();
-    if (!url) throw new Fallo("falta MEMORIA_URL: indica la dirección /mcp del servidor cli-memoria.", 2);
-    if (!token) throw new Fallo("falta MEMORIA_TOKEN: indica el token del agente para el servidor cli-memoria.", 2);
-    try {
-      new URL(url);
-    } catch {
-      throw new Fallo("MEMORIA_URL no es una dirección válida", 2);
-    }
-    CLAVE = token;
-    return { modo, pasarela: new Pasarela(url, token, { sinEstado: true, varClave: "MEMORIA_TOKEN" }) };
-  }
-  const clave = (process.env.BADULAQUE_CLAVE ?? "").trim();
-  const url = (process.env.BADULAQUE_URL ?? "").trim();
-  if (!url && !clave) {
-    throw new Fallo("falta configurar el servidor: define MEMORIA_URL y MEMORIA_TOKEN (o BADULAQUE_URL y BADULAQUE_CLAVE para pasarela).", 2);
-  }
-  if (!clave) throw new Fallo("falta BADULAQUE_CLAVE: indica la clave del agente en la variable de entorno BADULAQUE_CLAVE.", 2);
-  if (!url) throw new Fallo("falta BADULAQUE_URL: indica la dirección MCP de la pasarela en la variable de entorno BADULAQUE_URL.", 2);
+  const url = (process.env.MEMORIA_URL ?? "").trim();
+  const token = (process.env.MEMORIA_TOKEN ?? "").trim();
+  if (!url) throw new Fallo("falta MEMORIA_URL: indica la dirección /mcp del servidor cli-memoria.", 2);
+  if (!token) throw new Fallo("falta MEMORIA_TOKEN: indica el token del agente para el servidor cli-memoria.", 2);
   try {
     new URL(url);
   } catch {
-    throw new Fallo("BADULAQUE_URL no es una dirección válida", 2);
+    throw new Fallo("MEMORIA_URL no es una dirección válida", 2);
   }
-  CLAVE = clave;
-  return { modo, pasarela: new Pasarela(url, clave, { sinEstado: false, varClave: "BADULAQUE_CLAVE" }) };
+  CLAVE = token;
+  return { cliente: new Cliente(url, token) };
 }

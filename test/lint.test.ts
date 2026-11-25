@@ -70,15 +70,15 @@ describe("lint", () => {
 			notes: ["temas/universidad.md", "temas/piso-de-oviedo.md"],
 			detail: { label: "piso de oviedo", line: 9, mentions: 2, snippet: "Cinco asignaturas. Queda cerca del Piso de Oviedo, y del piso de oviedo otra vez." },
 		});
-		expect(mentions).toContainEqual(expect.objectContaining({ notes: ["temas/huerto.md", "yo/perfil.md"], detail: expect.objectContaining({ label: "alex" }) }));
-		// Already linked (perfil → universidad), inside code, or too short ("yo"): not mentions.
-		expect(mentions.map((m) => m.notes.join(" "))).toEqual(["temas/universidad.md temas/piso-de-oviedo.md", "temas/huerto.md yo/perfil.md"]);
+		// Already linked (perfil → universidad), inside code, too short ("yo"), or a note of folders.index_full
+		// ("yo/perfil" is in yo/, which is listed note by note in the short index): not mentions.
+		expect(mentions.map((m) => m.notes.join(" "))).toEqual(["temas/universidad.md temas/piso-de-oviedo.md"]);
 
 		// yo/ is listed in index_full, so its notes are never orphans by default.
 		expect(ofKind(r.items, "orphan").map((i) => i.notes[0])).toEqual(["personas/luis.md", "temas/huerto.md", "temas/universidades.md"]);
 		expect(ofKind(r.items, "stale")).toEqual([]);
 		expect(ofKind(r.items, "oversized")).toEqual([]);
-		expect(r.counts).toEqual({ problems: 2, broken_link: 1, duplicate_candidates: 1, old_inference: 1, missing_page: 1, unlinked_mention: 2, orphan: 3, stale: 0, oversized: 0 });
+		expect(r.counts).toEqual({ problems: 2, broken_link: 1, duplicate_candidates: 1, old_inference: 1, missing_page: 1, unlinked_mention: 1, orphan: 3, stale: 0, oversized: 0 });
 	});
 
 	it("dates staleness and undated inferences from git", async () => {
@@ -164,7 +164,7 @@ mention_min_length = 5
 			const path = `temas/${name}.md`;
 			const title = name.replace(/-/g, " ");
 			index.putNote(
-				{ path, name, folder: "temas", title, description: parsed.meta.description, aliases: parsed.meta.aliases, archived: false, supersededBy: null, attachment: null, blobHash: blobHash(content), size: content.length, problems: [] },
+				{ path, name, folder: "temas", title, description: parsed.meta.description, aliases: parsed.meta.aliases, type: null, status: null, archived: false, supersededBy: null, attachment: null, blobHash: blobHash(content), size: content.length, problems: [] },
 				splitSections(parsed.body, parsed.bodyLine, title),
 				parseTypedLinks(content),
 			);
@@ -260,3 +260,64 @@ describe("lookAlikePairs", () => {
 function order(kind: string): number {
 	return ["problems", "broken_link", "duplicate_candidates", "old_inference", "missing_page", "unlinked_mention", "orphan", "stale", "oversized"].indexOf(kind);
 }
+
+describe("inference markers", () => {
+	it("reads them in brackets and in parentheses, with a note and a date after the marker", async () => {
+		env = await makeMemory({
+			"temas/marcas.md": note(
+				"Marcas",
+				"Las formas del marcador",
+				[
+					"Le gusta el té [deducido].",
+					"Vive en Vigo [deducido, 2020-02-01].",
+					"Trabaja en el puerto [deducido de [[otra]]].",
+					"Toca el piano (deducido).",
+					"Dicho por su madre (según [[otra]], dicho).",
+					"Una nota que enlaza a [[deducido]] no es un marcador.",
+				].join("\n"),
+			),
+		});
+		// An undated marker is as old as the note's last change, so the note has to be old too.
+		const inf = ofKind(env.memory.lint({ kinds: ["old_inference"], limit: 500 }, Date.now() + 200 * DAY).items, "old_inference");
+		expect(inf.map((i) => [i.detail.line, i.detail.date])).toEqual([
+			[8, "2020-02-01"],
+			[7, null],
+			[9, null],
+			[10, null],
+		]);
+		expect(inf.map((i) => i.detail.snippet)).toEqual(["Vive en Vigo", "Le gusta el té", "Trabaja en el puerto", "Toca el piano"]);
+	});
+});
+
+describe("mentions and records", () => {
+	it("leaves out the labels memory.toml excludes and the notes of folders.index_full", async () => {
+		const conventions = `${CONVENTIONS}
+[lint]
+mention_exclude_labels = ["Alex"]
+`;
+		env = await makeMemory({
+			"memory.toml": conventions,
+			"yo/perfil.md": note("Perfil", "Quién es", "Texto con [[universidad]]."),
+			"temas/universidad.md": note("Universidad", "Carrera", "Nada."),
+			"personas/sara.md": note("Sara", "Amiga", "Habla con Alex y con Perfil de todo."),
+			"temas/nota.md": note("Nota", "Otra", "Aquí se nombra a Perfil en prosa."),
+		});
+		const mentions = ofKind(env.memory.lint({ kinds: ["unlinked_mention"], limit: 500 }).items, "unlinked_mention");
+		// Alex is excluded by label, and yo/perfil is in folders.index_full (index_full = ["yo"]).
+		expect(mentions).toEqual([]);
+	});
+
+	it("does not report a record as stale nor as oversized", async () => {
+		env = await makeMemory({
+			"memory.toml": `${CONVENTIONS}\n[lint]\nstale_days = 10\nmax_bytes = 200\n`,
+			"temas/registro.md": note("Registro", "Un registro largo", "Una línea de relleno. ".repeat(40), "type: record\n"),
+			"temas/nota.md": note("Nota", "Una nota normal", "Una línea de relleno. ".repeat(40)),
+		});
+		const later = Date.now() + 60 * DAY;
+		const r = env.memory.lint({ kinds: ["stale", "oversized"], limit: 500 }, later);
+		expect(r.items.map((i) => [i.kind, i.notes[0]])).toEqual([
+			["stale", "temas/nota.md"],
+			["oversized", "temas/nota.md"],
+		]);
+	});
+});

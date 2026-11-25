@@ -9,7 +9,7 @@ A self-hosted, git-backed memory for AI agents: a compact **CLI (`memoria`)** fo
 - **A CLI for agents (`memoria`).** [cli/](cli/README.md) searches, reads and writes notes from a shell with compact output: reads straight from a checkout of the notes repo (`rg` + `git`), writes always through the server (`MEMORIA_URL` + `MEMORIA_TOKEN`). Packaged in Nix as `memoria` for Linux and macOS, with zero npm dependencies.
 - **Git is the source of truth.** Server-side search runs on a SQLite index (catalog, FTS5 full text by section, wikilinks) that can be rebuilt from git at any time.
 - **One commit per write**, authored by the client: `Claude Code (laptop)`, `Codex`, etc. The commit message is the reason the agent gave, plus `Client:` / `Tool:` / `Session:` trailers.
-- **Safe for several agents at once.** One writer queue, optimistic concurrency (`hash` from `read`), atomic multi-commit `publish`, and external pushes integrated by rebase.
+- **Safe for several agents at once.** One writer queue, optimistic concurrency (`hash` from `read`) and atomic multi-commit `publish`. The server is the only writer: there is no git remote to push to or fetch from.
 - **Your conventions, not ours.** The notes repo declares its folders, required frontmatter, write rules and filename pattern in `memory.toml`; its `AGENTS.md` is sent to every client as MCP instructions, with a short index.
 - **Per-agent static tokens.** One Bearer token per agent (`read` or `write` scope), stored as SHA-256 hashes and reloaded on `SIGHUP`. Read-only tokens only see read tools.
 - **Attachments.** Binaries go to git LFS with a companion note holding their text (PDFs via `pdftotext`; scanned PDFs and images via local OCR with `tesseract`, when installed), so they are searchable too.
@@ -49,11 +49,12 @@ On Claude Code it can also install, if you want, a hook that brings relevant not
 | Tool | What it does |
 |---|---|
 | `list` | Short index, or every note in a folder with description, aliases and last change |
-| `search` | Full-text search by section (SQLite FTS5: accents ignored, prefixes match) with snippets and `updated_at` |
+| `search` | Full-text search by section (SQLite FTS5: accents ignored, prefixes match, a Spanish plural also finds its singular) with snippets, `type`, `status`, `updated_at` and one page at a time (`offset`, `total`, `next_offset`). At most two sections per note (`group_by_note`, default true); filters `type` and `status` |
 | `read` | A note or one section, with its `hash`; `revision` reads an old version |
 | `links` | Outgoing `[[links]]` (broken ones included) and backlinks with context, optionally only one relation |
 | `history` | Commits that touched a note: who, when, why |
 | `recent` | Latest changes to the whole memory: per commit when, who (author and client), tool, reason and the notes it touched; filters `since` (`2026-05-01` or `7d`), `folder`, `client` |
+| `deadlines` | The pending lines of the notes, soonest first: from the «Pendiente» sections, one item per line (`- [ ] what · who · 2026-03-14 [origin]`). Month-only deadlines open their month, undated ones go last; `include_done`, `include_undated`, `folder`, `limit` |
 | `lint` | Maintenance worklist, worst first: bad frontmatter and superseded notes outside the archive, write-rule violations, broken links, look-alike duplicates, old inferences, missing pages, unlinked mentions, orphans, stale and oversized notes. Counts per kind; filter by `kinds`, `folder`, `limit` |
 | `clients` | Who is connected: every token with last seen (time and tool), writes in the last 7 and 30 days, and the `memory-setup` version it left in the notes. Never returns secrets |
 | `create` | New note; unique names across folders; refuses look-alike duplicates unless `confirm_new` |
@@ -65,7 +66,7 @@ On Claude Code it can also install, if you want, a hook that brings relevant not
 | `revert` | Undo a commit from `recent`/`history` with a new commit, or only what it did to one note; keeps later changes that don't overlap, refuses with `REVERT_CONFLICT` otherwise |
 | `attach` | Store a file in LFS with a searchable companion note |
 
-Clients with a read-only token only see the read tools: `list`, `search`, `read`, `links`, `history`, `recent`, `lint` and `clients`.
+Clients with a read-only token only see the read tools: `list`, `search`, `deadlines`, `read`, `links`, `history`, `recent`, `lint` and `clients`.
 
 `lint` is the cheap half of keeping the memory tidy (Karpathy's "LLM wiki": ingest, answer, lint). It is computed from the index and git dates in milliseconds, without a model, so the agent gets candidates instead of reading every note; judging them is the agent's half. See [docs/design.md](docs/design.md#lint).
 
@@ -122,6 +123,19 @@ inferred_markers   = ["deducido"]  # provenance words that mark an inference
 max_bytes          = 16384         # bigger → oversized (attachment notes are exempt)
 missing_page_min   = 2             # a missing target linked from this many notes → missing_page
 mention_min_length = 4             # shortest name or alias looked for as an unlinked mention
+mention_exclude_labels = []        # labels never looked for as an unlinked mention (besides folders.index_full)
+
+[rules]                            # optional; every write is checked against these
+# …see docs/normas-al-escribir.md for every rule…
+
+[rules.status]                     # optional, off unless declared
+types   = ["project"]              # the types that must say where they stand (empty: every typed note)
+allowed = ["idea", "active", "waiting", "paused"]
+action  = "warn"                   # or "block"
+
+[rules.pending]                    # optional, off unless declared
+section = "Pendiente"              # or sections = ["Pendiente", "Tareas"]
+action  = "warn"                   # checks that every line is «- [ ] what · who · 2026-03-14 [origin]»
 ```
 
 ## Running it
@@ -143,12 +157,6 @@ Last-seen times are kept in `activity.sqlite` in the data dir (written at most o
 ```toml
 data_dir = "/var/lib/cli-memoria"
 tokens_file = "tokens.toml"
-webhook_secret_file = "webhook-secret"          # optional; paths, or credential:NAME for systemd credentials
-
-[remote]                                        # omit to keep the notes repo local
-url = "https://git.example.com/me/notes.git"
-username = "cli-memoria"
-token_file = "git-remote-token"
 
 [listen]
 address = "127.0.0.1"
@@ -162,9 +170,9 @@ page_timeout_seconds = 120                      # per page (render + recognition
 # dpi = 300; tesseract = "tesseract"; pdftoppm = "pdftoppm"
 ```
 
-Uploads for `attach`: `curl -T file.pdf -H "Authorization: Bearer $TOKEN" http://host:8782/uploads/file.pdf` returns an `upload_id`. There is no size limit.
+Uploads for `attach`: `curl -T file.pdf -H "Authorization: Bearer $TOKEN" http://host:8782/uploads/file.pdf` returns an `upload_id`. There is no size limit. The JSON body of `/mcp` is capped at 32 MB, which is room for a `publish` of several long notes.
 
-Git push webhook (optional): `POST /hooks/git` signed with HMAC-SHA256 (`X-Hub-Signature-256: sha256=<hex>` or `X-Webhook-Signature: <hex>`).
+The server keeps the notes repo in `data_dir/repo` and is its only writer: no git remote, no fetch, no push, and no webhook to receive one. The keys of the removed git sync (`[remote]`, `fetch_interval_seconds`, `webhook_secret_file`) and the `/hooks/git` endpoint are gone; an old `config.toml` still works, and the server names those keys in the log (`config.ignored_keys`) instead of refusing to start.
 
 ### NixOS
 
@@ -175,7 +183,6 @@ Git push webhook (optional): `POST /hooks/git` signed with HMAC-SHA256 (`X-Hub-S
   imports = [ inputs.cli-memoria.nixosModules.default ];
   services.cli-memoria = {
     enable = true;
-    remote = { url = "https://git.example.com/me/notes.git"; tokenFile = "/run/secrets/git-remote-token"; };
     listen = { address = "127.0.0.1"; port = 8782; };
     tokensFile = "/var/lib/secrets/cli-memoria/tokens.toml";   # root:cli-memoria 0640
     # ocr = { enable = true; languages = [ "spa" "eng" ]; maxPages = 50; pageTimeoutSeconds = 120; dpi = 300; };
@@ -183,7 +190,7 @@ Git push webhook (optional): `POST /hooks/git` signed with HMAC-SHA256 (`X-Hub-S
 }
 ```
 
-After `cli-memoria token add … --file <tokensFile>`, run `systemctl reload cli-memoria`. The package brings `pdftotext`, `pdftoppm` and `tesseract`; the module installs the language data listed in `ocr.languages` (default Spanish and English), and builds that tesseract only when `ocr.enable` is on. `user`, `group` and `dataDir` are configurable (and `services.my-memory` plus `listen.private` remain supported for existing deployments).
+After `cli-memoria token add … --file <tokensFile>`, run `systemctl reload cli-memoria`. The package brings `pdftotext`, `pdftoppm` and `tesseract`; the module installs the language data listed in `ocr.languages` (default Spanish and English), and builds that tesseract only when `ocr.enable` is on. `user`, `group` and `dataDir` are configurable (and `services.my-memory` plus `listen.private` remain supported for existing deployments). The module still has `remote`, `webhookSecretFile` and `fetchIntervalSeconds`, which this server no longer uses: they end up in the config file as ignored keys (see `config.ignored_keys` in the log).
 
 ### Connecting clients
 
@@ -220,9 +227,11 @@ Then give the agent the setup link ([Give your agent one link](#give-your-agent-
 - **Behind a gateway or proxy** that joins several MCP servers into one endpoint, the gateway is the client the server sees. Give the gateway one key per agent and map each key to its own `cli-memoria` token; otherwise every write shows the gateway's name.
 - **Check it:** run `cli-memoria clients --config config.toml` or call the `clients` tool. Each agent must appear on its own row, with its last activity and its writes.
 
-### Moving an existing repo to wikilinks
+### Notes format at a glance
 
-`cli-memoria migrate <clone>` shows what would change: relative Markdown links become `[[wikilinks]]`, name collisions are renamed, and frontmatter that is not valid YAML gets quoted. Add `--apply` to commit it. Only those spans change.
+- **`type` and `status`.** `type` says what a note is (a person, a project, a reference…, see `[rules.type]`); `status` says where it stands: `idea`, `active`, `waiting` or `paused`. Both are optional and only enforced if `memory.toml` asks for it; `search` can filter by them.
+- **`type: record`.** A list or a log, meant to be long and to stay as it is: `lint` does not report it as `stale` or `oversized`, and the size rule of `[rules]` leaves it alone.
+- **Pending lines.** A `## Pendiente` section holds one item per line, `- [ ] what · who · 2026-03-14 [origin]` (`- [x]` when done; the date may be `2026-03` or `sin plazo`). The `deadlines` tool reads them; `[rules.pending]` checks their shape on every write.
 
 ## Development
 

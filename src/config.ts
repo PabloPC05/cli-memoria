@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import type { Level } from "./log.js";
 import { defaultOcrSettings, type OcrSettings } from "./ocr.js";
@@ -13,36 +13,13 @@ export interface ServerConfig {
 	dataDir: string;
 	branch: string;
 	authorDomain: string;
-	remote: { url: string; username: string; token: string | null } | null;
 	listen: Listen;
 	tokensFile: string | null;
-	webhookSecret: string | null;
-	fetchIntervalSeconds: number;
 	pdftotext: string;
 	ocr: OcrSettings;
 	logLevel: Level;
-}
-
-/**
- * A path to a secret. `credential:NAME` reads `$CREDENTIALS_DIRECTORY/NAME` (systemd LoadCredential),
- * anything else is a file path relative to the config file.
- */
-function secretPath(value: string, base: string): string {
-	if (value.startsWith("credential:")) {
-		const dir = process.env.CREDENTIALS_DIRECTORY;
-		if (!dir) throw new Error(`${value}: CREDENTIALS_DIRECTORY is not set (is this running under systemd with LoadCredential?)`);
-		return join(dir, value.slice("credential:".length));
-	}
-	return isAbsolute(value) ? value : resolve(base, value);
-}
-
-function readSecret(value: unknown, key: string, base: string, read = true): string | null {
-	if (value === undefined) return null;
-	if (typeof value !== "string" || !value) throw new Error(`${key} must be a path`);
-	if (!read) return "(not loaded)";
-	const text = readFileSync(secretPath(value, base), "utf8").trim();
-	if (!text) throw new Error(`${key}: the file is empty`);
-	return text;
+	/** Keys of the file this version no longer uses (a git remote, the push webhook…): ignored, but said in the log. */
+	ignoredKeys: string[];
 }
 
 function str(v: unknown, key: string, fallback?: string): string {
@@ -82,12 +59,16 @@ function parseListen(v: unknown, key: string): Listen {
 	return { address: str(t.address, `${key}.address`, "127.0.0.1"), port: t.port };
 }
 
-/** `secrets: false` skips reading secret files: for CLI commands that run outside the service. */
-export function loadConfig(file: string, opts: { secrets?: boolean } = {}): ServerConfig {
-	const read = opts.secrets ?? true;
+/**
+ * Keys of the configuration that this server no longer uses: the git remote it cloned, fetched and pushed to, and
+ * the webhook that told it to. They are left in place in existing files and only mentioned in the log: removing
+ * them from a working configuration must never make the server refuse to start.
+ */
+const IGNORED_KEYS = ["remote", "fetch_interval_seconds", "webhook_secret_file"] as const;
+
+export function loadConfig(file: string): ServerConfig {
 	const base = resolve(file, "..");
 	const doc = parseToml(readFileSync(file, "utf8")) as Record<string, unknown>;
-	const remote = doc.remote as Record<string, unknown> | undefined;
 	const listenRaw = doc.listen as Record<string, unknown> | undefined;
 	if (!listenRaw) throw new Error("configure [listen] with address and port");
 	// Accept legacy [listen.private] so existing config files keep working during migration.
@@ -97,15 +78,11 @@ export function loadConfig(file: string, opts: { secrets?: boolean } = {}): Serv
 		dataDir,
 		branch: str(doc.branch, "branch", "main"),
 		authorDomain: str(doc.author_domain, "author_domain", "cli-memoria.invalid"),
-		remote: remote
-			? { url: str(remote.url, "remote.url"), username: str(remote.username, "remote.username", "cli-memoria"), token: readSecret(remote.token_file, "remote.token_file", base, read) }
-			: null,
 		listen,
 		tokensFile: doc.tokens_file === undefined ? null : resolve(base, str(doc.tokens_file, "tokens_file")),
-		webhookSecret: readSecret(doc.webhook_secret_file, "webhook_secret_file", base, read),
-		fetchIntervalSeconds: typeof doc.fetch_interval_seconds === "number" ? doc.fetch_interval_seconds : 300,
 		pdftotext: str(doc.pdftotext, "pdftotext", "pdftotext"),
 		ocr: ocrSettings(doc.ocr),
 		logLevel: (["debug", "info", "warn", "error"].includes(doc.log_level as string) ? doc.log_level : "info") as Level,
+		ignoredKeys: IGNORED_KEYS.filter((key) => doc[key] !== undefined),
 	};
 }

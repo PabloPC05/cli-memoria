@@ -1,9 +1,9 @@
-// Lo común de la CLI memoria: leer opciones, hablar con la pasarela MCP (pasarela.mjs) y salir con los códigos de
+// Lo común de la CLI memoria: leer opciones, hablar con el servidor por MCP (pasarela.mjs) y salir con los códigos de
 // siempre. Sin dependencias. Ver cli/README.md.
 
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { Fallo, configurar, modoDeConexion, sanear } from "./pasarela.mjs";
+import { Fallo, configurar, sanear } from "./pasarela.mjs";
 
 export { Fallo };
 
@@ -72,6 +72,7 @@ const SINONIMOS = {
   read: ["leer"], show: ["leer"], cat: ["leer"], get: ["leer"], view: ["leer"], open: ["leer"],
   list: ["lista"], ls: ["lista"],
   recent: ["recientes"], history: ["historial"], links: ["enlaces"], lint: ["revisar"], check: ["revisar"],
+  deadlines: ["plazos"],
   status: ["estado"], clone: ["copia"], pull: ["actualizar"], sync: ["actualizar"], update: ["actualizar", "editar"],
   create: ["crear"], add: ["crear"], new: ["crear"],
   edit: ["editar"], write: ["escribir"],
@@ -129,13 +130,11 @@ export function textoDe(valor, archivo) {
 }
 
 /**
- * Llama a una herramienta del servidor (`nombre` sin prefijo, p. ej. `create`, `read`, `publish`) directamente o a través
- * de la pasarela (`buscador_usar` con `memoria_<nombre>`), y devuelve { texto, bloques, json, error }.
+ * Llama a una herramienta del servidor por su nombre (`create`, `read`, `search`, `publish`…) y devuelve
+ * { texto, bloques, json, error }.
  */
 export async function usar(ctx, nombre, argumentos = {}) {
-  const r = ctx.modo === "directo"
-    ? await ctx.pasarela.llamar(nombre, argumentos)
-    : await ctx.pasarela.llamar("buscador_usar", { nombre: `memoria_${nombre}`, argumentos });
+  const r = await ctx.cliente.llamar(nombre, argumentos);
   const partes = [];
   for (const c of r.content ?? []) {
     if (c?.type === "text") partes.push(c.text);
@@ -160,17 +159,15 @@ export async function usarOFallar(ctx, nombre, argumentos = {}) {
   return r;
 }
 
-/** Abre la conexión con el servidor (directo o pasarela), corre `fn(ctx)` y la cierra. */
+/** Abre la conexión con el servidor, corre `fn(ctx)` y la cierra. */
 export async function conServidor(fn) {
   const ctx = configurar();
   try {
     return await fn(ctx);
   } finally {
-    await ctx.pasarela.cerrar();
+    await ctx.cliente.cerrar();
   }
 }
-
-export const conBadulaque = conServidor;
 
 /** Corre un programa y devuelve { estado, salida, error }; la salida es texto. */
 export function correr(programa, args, opciones = {}) {
@@ -217,11 +214,6 @@ export function imprimirJson(valor) {
   return 0;
 }
 
-/** Nombre de herramienta tal como se enviará (directo: `write`; pasarela: `memoria_write`). */
-export function nombreHerramienta(herramienta) {
-  return modoDeConexion() === "directo" ? herramienta : `memoria_${herramienta}`;
-}
-
 /**
  * Las escrituras aceptan --simular: enseñan qué herramienta llamarían y con qué argumentos, y no llaman a nada.
  * Devuelve true si simuló (el comando acaba ahí). Los textos muy largos (base64) se abrevian.
@@ -229,6 +221,6 @@ export function nombreHerramienta(herramienta) {
 export function simular(op, herramienta, argumentos) {
   if (!op.simular) return false;
   const corto = v => (typeof v === "string" && v.length > 300 ? `${v.slice(0, 60)}… (${v.length} caracteres)` : v);
-  imprimirJson({ simulado: true, herramienta: nombreHerramienta(herramienta), argumentos: Object.fromEntries(Object.entries(argumentos).map(([k, v]) => [k, corto(v)])) });
+  imprimirJson({ simulado: true, herramienta, argumentos: Object.fromEntries(Object.entries(argumentos).map(([k, v]) => [k, corto(v)])) });
   return true;
 }

@@ -36,7 +36,7 @@ describe("setup guide over MCP", () => {
 	let token: string;
 
 	beforeAll(async () => {
-		env = await makeMemory({ "yo/perfil.md": note("Perfil", "Quién es") }, { noRemote: true });
+		env = await makeMemory({ "yo/perfil.md": note("Perfil", "Quién es") });
 		const tokensFile = join(env.root, "tokens.toml");
 		token = await addToken(tokensFile, "sam-reader", "Sam (reader)", "read");
 		const uploads = new UploadStore(join(env.root, "data", "uploads"));

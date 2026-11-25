@@ -7,9 +7,8 @@ import { main } from "../src/cli.js";
 import { parseConventions } from "../src/conventions.js";
 import { MemoryError } from "../src/errors.js";
 import { Git } from "../src/git.js";
-import type { Level } from "../src/log.js";
 import { blobHash } from "../src/util.js";
-import { makeMemory, otherClone, writer } from "./helpers.js";
+import { makeMemory, writer } from "./helpers.js";
 import { RULES } from "./rules-config.js";
 
 const FOLDERS = `[folders]
@@ -202,18 +201,6 @@ describe("rules on every write path", () => {
 		await refused(m.attach(writer, { path: "projects/otro.png", source: { base64: png }, description: "Otro", type: "Imagen", reason: "Otro" }));
 	});
 
-	it("commits pushed to the remote cannot be refused any more: their new problems are logged", async () => {
-		const events: { event: string; data: Record<string, unknown> }[] = [];
-		env = await makeMemory(SEED, { log: (_level: Level, event: string, data: Record<string, unknown> = {}) => events.push({ event, data }) });
-		const other = await otherClone(env.root, env.bare as string);
-		await other.write("topics/vieja.md", VIEJA.replace("Otra línea.", "Otra línea con memoria_write."));
-		await other.commitPush("Desde fuera");
-		env.memory.requestSync("test");
-		for (let i = 0; i < 100 && !events.some((e) => e.event === "rules.remote_violations"); i++) await new Promise((r) => setTimeout(r, 50));
-		const logged = events.find((e) => e.event === "rules.remote_violations");
-		expect(logged?.data.path).toBe("topics/vieja.md");
-		expect((logged?.data.violations as { rule: string; line: number }[]).map((v) => [v.rule, v.line])).toEqual([["obsolete", 11]]);
-	});
 });
 
 describe("publish: several commits as one submission", () => {

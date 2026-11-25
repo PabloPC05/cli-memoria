@@ -1,4 +1,5 @@
-import { createHash, createHmac } from "node:crypto";
+import { createHash } from "node:crypto";
+import { request as httpRequest } from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -7,7 +8,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type express from "express";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { addToken, TokenStore } from "../src/auth/tokens.js";
-import { createApp } from "../src/http.js";
+import { createApp, MAX_MCP_BODY } from "../src/http.js";
 import { silentLogger } from "../src/log.js";
 import { UploadStore } from "../src/uploads.js";
 import { makeMemory, note } from "./helpers.js";
@@ -23,7 +24,6 @@ let env: Awaited<ReturnType<typeof makeMemory>>;
 let srv: { server: Server; url: string };
 let writeToken: string;
 let readToken: string;
-const WEBHOOK_SECRET = "s3cret";
 
 beforeAll(async () => {
 	env = await makeMemory({ "yo/perfil.md": note("Perfil", "Quién es", "Le gusta el café.") });
@@ -34,7 +34,7 @@ beforeAll(async () => {
 	const uploads = new UploadStore(join(env.root, "data", "uploads"));
 	await uploads.init();
 	(env.memory.opts as { uploads: UploadStore }).uploads = uploads;
-	srv = await listen(createApp({ memory: env.memory, tokens, uploads, webhookSecret: WEBHOOK_SECRET, log: silentLogger }));
+	srv = await listen(createApp({ memory: env.memory, tokens, uploads, log: silentLogger }));
 });
 
 afterAll(async () => {
@@ -60,7 +60,7 @@ describe("HTTP server", () => {
 		const client = await mcp(srv.url, writeToken, "chat-7");
 		expect(client.getInstructions()).toContain("[[perfil]]");
 		const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-		expect(tools).toEqual(["attach", "create", "delete", "edit", "history", "links", "lint", "list", "move", "publish", "read", "recent", "revert", "search", "write"]);
+		expect(tools).toEqual(["attach", "create", "deadlines", "delete", "edit", "history", "links", "lint", "list", "move", "publish", "read", "recent", "revert", "search", "write"]);
 		const created = parse(await client.callTool({ name: "create", arguments: { path: "personas/sara.md", content: note("Sara", "Amiga", "Le gusta el té."), reason: "Nueva" } }));
 		expect(created.commit).toBeTruthy();
 		const hist = parse(await client.callTool({ name: "history", arguments: { name: "sara" } })) as { commits: { author: string; trailers: Record<string, string> }[] };
@@ -83,7 +83,7 @@ describe("HTTP server", () => {
 	it("gives read-only tokens only the read tools", async () => {
 		const client = await mcp(srv.url, readToken);
 		const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-		expect(tools).toEqual(["history", "links", "lint", "list", "read", "recent", "search"]);
+		expect(tools).toEqual(["deadlines", "history", "links", "lint", "list", "read", "recent", "search"]);
 		const hits = parse(await client.callTool({ name: "search", arguments: { query: "café" } })) as { hits: { path: string }[] };
 		expect(hits.hits[0]?.path).toBe("yo/perfil.md");
 		const lint = parse(await client.callTool({ name: "lint", arguments: { kinds: ["stale", "oversized"] } }));
@@ -126,15 +126,76 @@ describe("HTTP server", () => {
 		expect(scan.warnings.map((w) => w.code)).toContain("EXTRACTION_EMPTY");
 		await client.close();
 	});
+});
 
-	it("accepts the git webhook only with a valid HMAC-SHA256 signature", async () => {
-		const body = JSON.stringify({ ref: "refs/heads/main" });
-		const bad = await fetch(`${srv.url}/hooks/git`, { method: "POST", headers: { "x-hub-signature-256": "sha256=00" }, body });
-		expect(bad.status).toBe(401);
-		const sig = createHmac("sha256", WEBHOOK_SECRET).update(body).digest("hex");
-		const good = await fetch(`${srv.url}/hooks/git`, { method: "POST", headers: { "x-hub-signature-256": `sha256=${sig}`, "content-type": "application/json" }, body });
-		expect(good.status).toBe(204);
-		const goodRaw = await fetch(`${srv.url}/hooks/git`, { method: "POST", headers: { "x-webhook-signature": sig, "content-type": "application/json" }, body });
-		expect(goodRaw.status).toBe(204);
+describe("HTTP details", () => {
+	it("answers tool calls with compact JSON, and instructions only when a client initializes", async () => {
+		const client = await mcp(srv.url, writeToken);
+		const raw = await fetch(`${srv.url}/mcp`, {
+			method: "POST",
+			headers: { authorization: `Bearer ${writeToken}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+			body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "list", arguments: {} } }),
+		});
+		const answer = (await raw.json()) as { result: { content: { text: string }[] } };
+		const text = answer.result.content[0]?.text as string;
+		// One line: no indentation in what a tool returns.
+		expect(text).not.toContain("\n");
+		expect(JSON.parse(text)).toHaveProperty("index");
+		await client.close();
+	});
+
+	it("offers search with the common interface and the deadlines tool over MCP", async () => {
+		const client = await mcp(srv.url, writeToken);
+		const created = parse(
+			await client.callTool({
+				name: "create",
+				arguments: {
+					path: "temas/plazos.md",
+					content: note("Plazos", "Con pendientes", "## Pendiente\n\n- [ ] Llamar al banco · Sam · 2026-04-02 [web]\n- [ ] Otra cosa · Sam · sin plazo\n", "type: project\nstatus: active\n"),
+					reason: "Plazos",
+				},
+			}),
+		);
+		expect(created.commit).toBeTruthy();
+		const hits = parse(await client.callTool({ name: "search", arguments: { query: "banco", limit: 1 } })) as { hits: { type: string | null; status: string | null }[]; total: number };
+		expect(hits.hits[0]).toMatchObject({ type: "project", status: "active" });
+		expect(hits.total).toBeGreaterThan(0);
+		const filtered = parse(await client.callTool({ name: "search", arguments: { query: "banco", status: "paused" } })) as { hits: unknown[]; total: number };
+		expect(filtered.hits).toEqual([]);
+		const pend = parse(await client.callTool({ name: "deadlines", arguments: {} })) as { items: { text: string; owner: string; date: string }[] };
+		expect(pend.items.map((i) => [i.text, i.owner, i.date])).toEqual([["Llamar al banco", "Sam", "2026-04-02"]]);
+		const all = parse(await client.callTool({ name: "deadlines", arguments: { include_undated: true } })) as { items: { text: string; date: string | null }[] };
+		expect(all.items.map((i) => i.date)).toEqual(["2026-04-02", null]);
+		await client.close();
+	});
+
+	it("takes JSON bodies up to 32 MB", async () => {
+		expect(MAX_MCP_BODY).toBe("32mb");
+		const big = (n: number) => JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "list", arguments: {}, pad: "x".repeat(n) } });
+		// A couple of megabytes (over what a small note needs) goes through…
+		const ok = await fetch(`${srv.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${writeToken}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: big(2 * 1024 * 1024) });
+		expect(ok.status).toBe(200);
+		// …and one over the limit is refused, as 413 and not as a server error. Streamed, not built in memory.
+		const chunk = "x".repeat(1024 * 1024);
+		const chunks = 34;
+		const status = await new Promise<number>((resolve) => {
+			const request = httpRequest(
+				`${srv.url}/mcp`,
+				{ method: "POST", headers: { authorization: `Bearer ${writeToken}`, "content-type": "application/json", "content-length": String(chunks * chunk.length) } },
+				(res) => {
+					res.resume();
+					resolve(res.statusCode ?? 0);
+				},
+			);
+			request.on("error", () => resolve(-1));
+			for (let i = 0; i < chunks; i++) request.write(chunk);
+			request.end();
+		});
+		expect(status).toBe(413);
+	});
+
+	it("has no git webhook any more", async () => {
+		const r = await fetch(`${srv.url}/hooks/git`, { method: "POST", body: "{}" });
+		expect(r.status).toBe(404);
 	});
 });

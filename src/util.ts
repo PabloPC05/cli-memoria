@@ -112,12 +112,18 @@ function sameNormalized(x: string, y: string): boolean {
 	return x === y || withinDistance(x, y, maxTypos(x, y)) || contained(x, y);
 }
 
-/** All the words of the shorter label, if it has 6+ characters, appear in the longer one. */
+/**
+ * All the words of the shorter label, if it has 6+ characters **and several words**, appear in the longer one.
+ * A single word is not enough on its own: «lentejas» inside «receta de lentejas» is a topic of a note, not the
+ * same note, and treating it as a duplicate hides real ones behind a wall of candidates.
+ */
 function contained(x: string, y: string): boolean {
 	const [short, long] = x.length <= y.length ? [x, y] : [y, x];
 	if (short.length < 6) return false;
+	const shortWords = short.split(" ");
+	if (shortWords.length < 2) return false;
 	const longWords = new Set(long.split(" "));
-	return short.split(" ").every((w) => longWords.has(w));
+	return shortWords.every((w) => longWords.has(w));
 }
 
 /** The labels a note is known by, for look-alike checks: its name (dashes as spaces), title and aliases. */
@@ -137,8 +143,8 @@ export function lookAlikeLabels(a: string[], b: string[]): [string, string] | nu
  * - typos: two strings within edit distance k share at least max(|x|, |y|) - 1 - 2k bigrams, counted with
  *   repetition (the q-gram lemma), and k is bounded by the same tolerance, as is the length difference; so a
  *   bigram index, walked only over labels of a reachable length, counts the shared bigrams of every candidate;
- * - containment: every word of the shorter label is in the longer one, so the longer one is in the index of the
- *   shorter label's rarest word.
+ * - containment: every word of the shorter label is in the longer one (so the shorter one has several words), so
+ *   the longer one is in the index of the shorter label's rarest word.
  */
 export function lookAlikePairs<T>(items: { item: T; labels: string[] }[]): { a: T; b: T; labels: [string, string] }[] {
 	type Entry = { owner: number; label: string; norm: string; words: string[]; grams: number[]; severalWords: boolean };
