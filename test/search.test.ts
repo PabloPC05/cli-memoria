@@ -22,6 +22,17 @@ afterEach(async () => {
 });
 
 describe("search: paging, filters and grouping", () => {
+	it("keeps «all words» on a page past the end instead of widening to «any word»", async () => {
+		env = await makeMemory(SEED);
+		const first = env.memory.search({ query: "fontanero hipotecas", limit: 1 });
+		expect(first).toMatchObject({ mode: "all", total: 2 });
+		const past = env.memory.search({ query: "fontanero hipotecas", limit: 1, offset: 5 });
+		expect(past).toMatchObject({ mode: "all", total: 2 });
+		expect(past.hits).toEqual([]);
+		// With nothing for «all words», it still widens.
+		expect(env.memory.search({ query: "fontanero inexistentepalabra" }).mode).toBe("any");
+	});
+
 	it("marks the matched words with «» unless highlight is false", async () => {
 		env = await makeMemory(SEED);
 		expect(env.memory.search({ query: "fontanero" }).hits.some((h) => h.snippet.includes("«fontanero»"))).toBe(true);
@@ -170,6 +181,17 @@ describe("deadlines", () => {
 		expect(env.memory.deadlines({ folder: "temas" }).items).toEqual([]);
 		expect(env.memory.deadlines({ limit: 1 }).items).toHaveLength(1);
 		expect(env.memory.deadlines({ limit: 1 })).toMatchObject({ total: 3 });
+	});
+
+	it("reads an origin that holds a link, like [deducido de [[nota]]]", async () => {
+		env = await makeMemory({
+			"proyectos/papeles.md": note("Papeles", "Trámites", "## Pendiente\n\n- [ ] Firmar la escritura · Ana · 2026-06-01 [deducido de [[reforma]]]\n- [ ] Pedir la nota simple · Ana · sin plazo [correo, [[papeles]]]\n", "type: project\nstatus: active\n"),
+		});
+		const all = env.memory.deadlines({ include_undated: true }).items;
+		expect(all.map((i) => [i.text, i.date, i.origin])).toEqual([
+			["Firmar la escritura", "2026-06-01", "deducido de [[reforma]]"],
+			["Pedir la nota simple", null, "correo, [[papeles]]"],
+		]);
 	});
 
 	it("reads «Pendiente» when the memory has [rules] but no [rules.pending]", async () => {

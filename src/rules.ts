@@ -76,6 +76,34 @@ export interface WriteCheck {
 	existing: Violation[];
 }
 
+/** What the rules may ask about the rest of the memory. Without it, every note is judged on its own. */
+export interface RuleContext {
+	/** The frontmatter type of another note, by path; null if it does not exist or says none. */
+	typeOf?: (path: string) => string | null;
+}
+
+/**
+ * The main notes that may govern a note, nearest first: `a/b/c/c.md` and `a/b/b.md` for `a/b/c/d.md`. A note directly in
+ * a top-level folder (`projects/x.md`) and the main note of its own folder (`a/b/b.md`) have none.
+ */
+export function mainNoteCandidates(path: string): string[] {
+	const parts = path.split("/");
+	const file = (parts.at(-1) ?? "").replace(/\.md$/i, "");
+	const out: string[] = [];
+	for (let depth = parts.length - 1; depth >= 2; depth--) {
+		const dir = parts[depth - 1] as string;
+		if (depth === parts.length - 1 && dir === file) return [];
+		out.push([...parts.slice(0, depth), `${dir}.md`].join("/"));
+	}
+	return out;
+}
+
+/** The frontmatter type of a note's text, as the rules read it. */
+export function typeOfText(rules: Rules, text: string): string | null {
+	const type = parse(text).fields[rules.type.field];
+	return typeof type === "string" ? type : null;
+}
+
 export interface CheckOptions {
 	/** Only these rules (attach checks only the frontmatter of the note it generates). */
 	only?: RuleId[];
@@ -88,6 +116,8 @@ export interface CheckOptions {
 	allowAdded?: string[];
 	/** Part of a submission of several notes (a `publish`, a commit): changes the advice of `append_only`. */
 	batch?: boolean;
+	/** The rest of the memory, for the rules that look at it (`status`: a subnote takes its main note's). */
+	context?: RuleContext;
 }
 
 // ── configuration ──────────────────────────────────────────────────────────
@@ -357,7 +387,7 @@ export function datesThePast(line: string): boolean {
  * Violations a note has as it stands (every rule but `append_only`, which compares two versions).
  * Used for each side of a write and, on its own, by `lint` and `cli-memoria check`.
  */
-export function noteViolations(rules: Rules, path: string, text: string, only?: RuleId[]): Violation[] {
+export function noteViolations(rules: Rules, path: string, text: string, only?: RuleId[], context?: RuleContext): Violation[] {
 	const on = (r: RuleId) => !only || only.includes(r);
 	const p = parse(text);
 	const out: Violation[] = [];
@@ -386,9 +416,21 @@ export function noteViolations(rules: Rules, path: string, text: string, only?: 
 	if (on("status") && rules.status && (p.hasFrontmatter || !(on("frontmatter") && rules.frontmatter.required))) {
 		const { field, types, allowed } = rules.status;
 		// Without `types`, every note that says what it is must say where it stands; a note of another type is left alone.
-		const wanted = types.length === 0 ? typeof type === "string" : typeof type === "string" && types.includes(type);
+		const needs = (t: unknown) => (types.length === 0 ? typeof t === "string" : typeof t === "string" && types.includes(t));
+		const wanted = needs(type);
+		// A subnote takes the status of the main note of its folder (`projects/x/y.md` that of `projects/x/x.md`) when that
+		// main note is one that carries it; a project on its own inside an area (`areas/a/p.md`, whose main is an area) does not.
+		let inherits = false;
+		if (wanted && context?.typeOf) {
+			for (const main of mainNoteCandidates(path)) {
+				const mainType = context.typeOf(main);
+				if (mainType === null) continue;
+				inherits = needs(mainType);
+				break;
+			}
+		}
 		const value = p.fields[field];
-		if (wanted && (value === undefined || value === null || value === "")) {
+		if (wanted && !inherits && (value === undefined || value === null || value === "")) {
 			add("status", rules.status.action, "missing", 1, `the frontmatter has no «${field}» (this ${type} note needs one)`, `add «${field}: …» with one of: ${allowed.join(", ")}`);
 		} else if (value !== undefined && value !== null && value !== "" && (typeof value !== "string" || !allowed.includes(value.trim().toLowerCase()))) {
 			const shown = typeof value === "string" ? value : JSON.stringify(value);
@@ -510,8 +552,8 @@ function byLine(a: Violation, b: Violation): number {
  * count (so editing a line that already had an old problem is fine), and `append_only` sections may not lose lines.
  */
 export function checkWrite(rules: Rules, after: NoteText, before: NoteText | null, opts: CheckOptions = {}): WriteCheck {
-	const now = noteViolations(rules, after.path, after.text, opts.only);
-	const was = before ? noteViolations(rules, before.path, before.text, opts.only) : [];
+	const now = noteViolations(rules, after.path, after.text, opts.only, opts.context);
+	const was = before ? noteViolations(rules, before.path, before.text, opts.only, opts.context) : [];
 	const fresh: Violation[] = [];
 	const existing: Violation[] = [];
 	const afterLines = after.text.split("\n").map((l) => l.replace(/\r$/, ""));

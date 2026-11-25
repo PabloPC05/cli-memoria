@@ -158,7 +158,7 @@ export function lint(index: SearchIndex, conventions: Conventions, args: LintArg
 			if (!rulesApply(conventions, n.path)) continue;
 			const text = readNote(n.path);
 			if (text === null) continue;
-			const found = noteViolations(conventions.rules, n.path, text);
+			const found = noteViolations(conventions.rules, n.path, text, undefined, { typeOf: (p) => byPath.get(p)?.type ?? null });
 			if (!found.length) continue;
 			const byRule: Record<string, number> = {};
 			for (const v of found) byRule[v.rule] = (byRule[v.rule] ?? 0) + 1;

@@ -15,7 +15,8 @@ const SEPARATOR = /\s*·\s*/u;
 const DONE = /^\s*[-*+]\s+\[( |x|X)\]\s+(.*)$/u;
 const DAY = /^(\d{4}-\d{2}-\d{2})$/;
 const MONTH = /^(\d{4}-\d{2})$/;
-const ORIGIN = /\s*\[([^\]\n]*)\]\s*$/u;
+// The origin may hold a link (`[deducido de [[otra-nota]]]`): its brackets are not the end of the marker.
+const ORIGIN = /\s*\[((?:\[\[[^\]\n]*\]\]|[^[\]\n])*)\]\s*$/u;
 
 export interface PendingLine {
 	/** `- [x]`. */

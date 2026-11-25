@@ -21,6 +21,8 @@ import {
 	blockingMessage,
 	type CheckOptions,
 	checkBatch,
+	type RuleContext,
+	typeOfText,
 	checkWrite,
 	describeRules,
 	type NoteText,
@@ -514,7 +516,7 @@ export class MemoryService {
 			this.rulesBatch.push({ after, before: previous, opts });
 			return [];
 		}
-		const check = checkWrite(rules, after, previous, opts);
+		const check = checkWrite(rules, after, previous, { ...opts, context: opts.context ?? this.ruleContext() });
 		if (check.blocking.length) {
 			throw new MemoryError("RULES_VIOLATED", blockingMessage(after.path, check), {
 				path: after.path,
@@ -525,11 +527,23 @@ export class MemoryService {
 		return opts.quiet ? [] : warningTexts(check).map((w) => ({ ...w, path: after.path }));
 	}
 
+	/** What the rules may ask about other notes: their type, from `overrides` (a submission) or else the index. */
+	private ruleContext(overrides?: Map<string, string | null>): RuleContext {
+		return { typeOf: (path) => (overrides?.has(path) ? (overrides.get(path) ?? null) : (this.index.getNote(path)?.type ?? null)) };
+	}
+
 	/** The notes of a `publish`, judged together (see `checkBatch`): RULES_VIOLATED for all its problems at once. */
 	private judgeBatch(entries: BatchEntry[]): Warning[] {
 		const rules = this.conventions.rules;
 		if (!rules || entries.length === 0) return [];
-		const checks = checkBatch(rules, entries);
+		// The notes of the submission count as they will be (a main note written in the same publish, for example).
+		const pending = new Map<string, string | null>();
+		for (const e of entries) {
+			if (e.before && !e.after) pending.set(e.before.path, null);
+			if (e.after) pending.set(e.after.path, typeOfText(rules, e.after.text));
+		}
+		const context = this.ruleContext(pending);
+		const checks = checkBatch(rules, entries.map((e) => ({ ...e, opts: { ...e.opts, context: e.opts.context ?? context } })));
 		const results = entries.flatMap((e, i) => (e.after ? [{ path: e.after.path, check: checks[i] as WriteCheck, quiet: e.opts.quiet ?? false }] : []));
 		if (results.some((r) => r.check.blocking.length)) {
 			throw new MemoryError("RULES_VIOLATED", batchBlockingMessage(results), { violations: results.flatMap((r) => r.check.blocking.map((v) => ({ path: r.path, ...violationJson(v) }))) });
@@ -823,7 +837,8 @@ export class MemoryService {
 		const opts = { ...this.searchOpts(args), ...(limit ? { limit } : {}) };
 		let mode: "all" | "any" = "all";
 		let page = this.index.search(q.and, opts);
-		if (page.hits.length === 0 && q.or !== q.and) {
+		// Only when «all words» has nothing at all: a page past the end is empty but not a reason to widen the search.
+		if (page.total === 0 && q.or !== q.and) {
 			page = this.index.search(q.or, opts);
 			mode = "any";
 		}
