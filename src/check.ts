@@ -1,6 +1,6 @@
 import type { Conventions } from "./conventions.js";
 import type { Git } from "./git.js";
-import { checkBatch, formatViolation, type NoteText, noteViolations, type Rules, rulesApply, type Violation, violationJson, type WriteCheck } from "./rules.js";
+import { checkBatch, formatViolation, mainNoteCandidates, typeOfText, type NoteText, noteViolations, type Rules, rulesApply, type Violation, violationJson, type WriteCheck } from "./rules.js";
 import { type FileChange, parseNameStatus } from "./util.js";
 
 /**
@@ -44,10 +44,12 @@ export async function checkTree(git: Git, conventions: Conventions, rev = "HEAD"
 	const paths = (await git.out(["ls-tree", "-r", "-z", "--name-only", rev])).split("\0").filter((p) => p && rulesApply(conventions, p));
 	const texts = await git.blobs(paths.map((p) => `${rev}:${p}`));
 	const findings: NoteFindings[] = [];
+	const types = new Map(paths.map((p, i) => [p, typeof texts[i] === "string" ? typeOfText(rules, texts[i] as string) : null]));
+	const context = { typeOf: (p: string) => types.get(p) ?? null };
 	paths.forEach((path, i) => {
 		const text = texts[i];
 		if (text === null || text === undefined) return;
-		const violations = noteViolations(rules, path, text);
+		const violations = noteViolations(rules, path, text, undefined, context);
 		if (violations.length) findings.push({ path, violations });
 	});
 	return { notes: paths.length, findings };
@@ -73,6 +75,11 @@ async function judge(git: Git, conventions: Conventions, pairs: { from: string; 
 		return { change, beforePath, hasBefore, deleted, group };
 	});
 	const texts = await git.blobs(specs);
+	// The main notes the changed notes may take their status from, as they are in the same version.
+	const mains = new Map<string, string | null>();
+	const mainSpecs = [...new Set(pairs.flatMap(({ to, change }, i) => (plan[i] && !plan[i]?.deleted ? mainNoteCandidates(change.path).map((m) => `${to}:${m}`) : [])))];
+	(await git.blobs(mainSpecs)).forEach((t, i) => mains.set(mainSpecs[i] as string, typeof t === "string" ? typeOfText(rules, t) : null));
+	const contextAt = (to: string) => ({ typeOf: (p: string) => mains.get(`${to}:${p}`) ?? null });
 	let k = 0;
 	const groups = new Map<number, { index: number; after: NoteText | null; before: NoteText | null }[]>();
 	plan.forEach((p, index) => {
@@ -89,7 +96,8 @@ async function judge(git: Git, conventions: Conventions, pairs: { from: string; 
 	});
 	const out: FileCheck[][] = pairs.map(() => []);
 	for (const entries of groups.values()) {
-		checkBatch(rules, entries).forEach((check, i) => {
+		const to = pairs[(entries[0] as { index: number }).index]?.to ?? "HEAD";
+		checkBatch(rules, entries.map((e) => ({ ...e, opts: { context: contextAt(to) } }))).forEach((check, i) => {
 			const e = entries[i] as (typeof entries)[number];
 			if (!e.after) return;
 			const change = (plan[e.index] as { change: FileChange }).change;

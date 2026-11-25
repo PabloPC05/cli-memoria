@@ -324,3 +324,77 @@ describe("findings of a note as it stands", () => {
 		expect(noteViolations(rules, "topics/vieja.md", text, ["obsolete"]).map((v) => v.rule)).toEqual(["obsolete"]);
 	});
 });
+
+describe("status", () => {
+	const withStatus = `${RULES}\n[rules.status]\ntypes = ["Work"]\nallowed = ["idea", "active", "waiting", "paused"]\n`;
+	const statusRules = parseConventions(withStatus).rules as Rules;
+	const work = (fmExtra: string) => `---\nname: Reforma\ndescription: La reforma de la cocina\ntype: Work\n${fmExtra}---\n# Reforma\n\nTexto.\n`;
+
+	it("is off unless memory.toml declares it, and then only for the types it names", () => {
+		expect(rules.status).toBeNull();
+		expect(statusRules.status).toEqual({ field: "status", types: ["Work"], allowed: ["idea", "active", "waiting", "paused"], action: "warn" });
+		// A note of another type is left alone, even with a status outside the list.
+		expect(noteViolations(statusRules, "topics/x.md", work("").replace("type: Work", "type: Profile")).filter((v) => v.rule === "status")).toEqual([]);
+		const missing = noteViolations(statusRules, "projects/reforma.md", work(""));
+		expect(missing.map((v) => [v.rule, v.message])).toEqual([["status", "the frontmatter has no «status» (this Work note needs one)"]]);
+		const bad = noteViolations(statusRules, "projects/reforma.md", work("status: dormido\n"));
+		expect(bad.map((v) => [v.rule, v.line, v.fix])).toEqual([["status", 5, "use one of: idea, active, waiting, paused"]]);
+	});
+
+	it("blocks a write that adds one, and only permits writing a status it already had", () => {
+		const strict = parseConventions(withStatus.replace('paused"]', 'paused"]\naction = "block"')).rules as Rules;
+		const c = checkWrite(strict, { path: "projects/reforma.md", text: work("") }, null);
+		expect(c.blocking.map((v) => v.rule)).toEqual(["status"]);
+		const ok = checkWrite(strict, { path: "projects/reforma.md", text: work("status: waiting\n") }, null);
+		expect(ok.blocking).toEqual([]);
+		// An existing note without a status: adding it later is a change, but nothing is new.
+		const existing = checkWrite(strict, { path: "projects/reforma.md", text: work("") }, { path: "projects/reforma.md", text: work("") });
+		expect(existing.blocking).toEqual([]);
+	});
+
+	it("is announced in the instructions", () => {
+		expect(describeRules(statusRules)).toContain("every note of type Work says where it stands in «status», one of idea, active, waiting, paused");
+		expect(describeRules(rules)).not.toContain("«status»");
+	});
+});
+
+describe("pending lines", () => {
+	const withPending = `${RULES}\n[rules.pending]\n`;
+	const pendingRules = parseConventions(withPending).rules as Rules;
+	const project = (lines: string) => `---\nname: Reforma\ndescription: La reforma\ntype: Work\n---\n# Reforma\n\n## Pendiente\n\n${lines}\n`;
+
+	it("is off by default and reads its section and action from memory.toml", () => {
+		expect(rules.pending).toEqual({ sections: [], action: "warn" });
+		expect(pendingRules.pending).toEqual({ sections: ["Pendiente"], action: "warn" });
+		const custom = parseConventions(`${RULES}\n[rules.pending]\nsection = "Tareas"\naction = "block"\n`).rules as Rules;
+		expect(custom.pending).toEqual({ sections: ["Tareas"], action: "block" });
+		expect(() => parseConventions('[rules.pending]\nsection = "A"\nsections = ["B"]')).toThrow(/not both/);
+	});
+
+	it("accepts the agreed shape and reports every line that is not one, with its line", () => {
+		const good = project("- [ ] Pedir presupuesto · Ana · 2026-03-14 [llamada]\n- [x] Elegir azulejos · Ana · 2026-03\n- [ ] Llamar al fontanero · - · sin plazo");
+		expect(noteViolations(pendingRules, "projects/reforma.md", good).filter((v) => v.rule === "pending")).toEqual([]);
+		const bad = project("- Pedir presupuesto\n- [ ] Pedir presupuesto a Ana\n- [ ] Otra · Ana · 2026-13-40");
+		const found = noteViolations(pendingRules, "projects/reforma.md", bad).filter((v) => v.rule === "pending");
+		// The line without the mark is prose, not a pending line: only the marked ones are judged.
+		expect(found.map((v) => v.line)).toEqual([11, 12]);
+		expect(found[0]?.message).toBe("«- [ ] Pedir presupuesto a Ana» is not a pending line of this memory");
+		expect(found[0]?.fix).toContain("«- [ ] what · who · 2026-03-14 [origin]»");
+	});
+
+	it("warns by default and blocks when asked to", () => {
+		const text = project("- [ ] Sin fecha ni responsable");
+		const c = checkWrite(pendingRules, { path: "projects/reforma.md", text }, { path: "projects/reforma.md", text: project("") });
+		expect(c.warnings.map((v) => v.rule)).toEqual(["pending"]);
+		const strict = parseConventions(`${RULES}\n[rules.pending]\naction = "block"\n`).rules as Rules;
+		expect(checkWrite(strict, { path: "projects/reforma.md", text }, { path: "projects/reforma.md", text: project("") }).blocking.map((v) => v.rule)).toEqual(["pending"]);
+	});
+});
+
+describe("records", () => {
+	it("are exempt from the size rule, as lint exempts them from stale and oversized", () => {
+		const big = (n: number) => person(`${"Una frase de relleno. ".repeat(n)}\n`, "Notes").replace("type: Notes", "type: record");
+		expect(noteViolations(rules, "topics/x.md", big(200)).map((v) => v.rule)).not.toContain("size");
+		expect(noteViolations(rules, "topics/x.md", big(200).replace("type: record", "type: Notes")).map((v) => v.rule)).toContain("size");
+	});
+});

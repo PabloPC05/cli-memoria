@@ -1,3 +1,5 @@
+import { normalizeWords } from "./util.js";
+
 /**
  * Markdown helpers that respect code: headings and links inside fenced blocks or inline code spans are not real.
  * Every function works on positions of the original text, so rewrites only touch the link spans.
@@ -113,6 +115,31 @@ export function firstH1(body: string): string | null {
 		if (m && m[1] === "#") return (m[2] as string).trim() || null;
 	}
 	return null;
+}
+
+/**
+ * Selects the sections (in document order) whose heading matches `names` (ignoring case and accents) together with
+ * every deeper subsection under each match until a heading of equal or higher level. Level 1 is the note title, not a
+ * section, so matching starts at `##` (level >= 2). Returns the matched sections in order and the first named match.
+ */
+export function sectionsMatching<T extends { heading: string; level: number }>(
+	sections: readonly T[],
+	names: readonly string[],
+): { matched: T[]; first: T | null } {
+	const wanted = new Set(names.map(normalizeWords));
+	const matched: T[] = [];
+	let first: T | null = null;
+	let activeLevel: number | null = null;
+	for (const section of sections) {
+		if (activeLevel !== null && section.level <= activeLevel) activeLevel = null;
+		const direct = section.level >= 2 && wanted.has(normalizeWords(section.heading));
+		if (direct) {
+			first ??= section;
+			activeLevel ??= section.level;
+		}
+		if (direct || activeLevel !== null) matched.push(section);
+	}
+	return { matched, first };
 }
 
 export interface WikiLink {

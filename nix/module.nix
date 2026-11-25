@@ -67,32 +67,11 @@ let
       description = "Domain of commit author emails (<client-id>@<domain>).";
     };
 
-    remote = mkOption {
-      default = null;
-      description = "Git remote of the notes repo. Without it the repo stays local.";
-      type = types.nullOr (
-        types.submodule {
-          options = {
-            url = mkOption { type = types.str; };
-            username = mkOption {
-              type = types.str;
-              default = defaultName;
-            };
-            tokenFile = mkOption {
-              type = types.nullOr types.str;
-              default = null;
-              description = "File with the remote password or access token (HTTP basic auth).";
-            };
-          };
-        }
-      );
-    };
-
     listen = {
       address = mkOption {
         type = types.str;
         default = "127.0.0.1";
-        description = "Bind address for the HTTP listener (MCP, uploads and git webhook).";
+        description = "Bind address for the HTTP listener (MCP and uploads).";
       };
       port = mkOption {
         type = types.port;
@@ -114,17 +93,6 @@ let
         Read directly (not as a credential) so `systemctl reload ${defaultName}` picks up changes; it must be
         readable by the service group.
       '';
-    };
-
-    webhookSecretFile = mkOption {
-      type = types.nullOr types.str;
-      default = null;
-    };
-
-    fetchIntervalSeconds = mkOption {
-      type = types.int;
-      default = 300;
-      description = "Safety-net fetch from the remote, in case a webhook is missed. 0 disables it.";
     };
 
     ocr = {
@@ -180,10 +148,9 @@ let
       # Tesseract with just the language data the OCR config asks for. Only referenced (so only built) with OCR on.
       ocrTesseract = pkgs.tesseract.override { enableLanguages = lib.unique cfg.ocr.languages; };
 
-      # Secrets reach the service through systemd credentials; the config only names them.
-      credentials =
-        optional (cfg.remote != null && cfg.remote.tokenFile != null) "remote-token:${cfg.remote.tokenFile}"
-        ++ optional (cfg.webhookSecretFile != null) "webhook-secret:${cfg.webhookSecretFile}";
+      # No secrets travel as systemd credentials any more: the git remote and its webhook are gone (the notes repo is
+      # local and the server is its only writer). The tokens file is read directly (see tokensFile).
+      credentials = [ ];
 
       effectiveListen =
         if cfg.listen.private != null then
@@ -204,7 +171,6 @@ let
           data_dir = cfg.dataDir;
           inherit (cfg) branch;
           author_domain = cfg.authorDomain;
-          fetch_interval_seconds = cfg.fetchIntervalSeconds;
           log_level = cfg.logLevel;
           pdftotext = "${pkgs.poppler-utils}/bin/pdftotext";
           ocr =
@@ -222,14 +188,7 @@ let
           listen = effectiveListen;
         }
         // optionalAttrs (cfg.tokensFile != null) { tokens_file = cfg.tokensFile; }
-        // optionalAttrs (cfg.webhookSecretFile != null) { webhook_secret_file = "credential:webhook-secret"; }
-        // optionalAttrs (cfg.remote != null) {
-          remote =
-            {
-              inherit (cfg.remote) url username;
-            }
-            // optionalAttrs (cfg.remote.tokenFile != null) { token_file = "credential:remote-token"; };
-        };
+        ;
 
       configFile = toml.generate "${unitName}.toml" settings;
     in

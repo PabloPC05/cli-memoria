@@ -63,7 +63,7 @@ describe("toolCalls", () => {
 describe("clients report", () => {
 	let env: Awaited<ReturnType<typeof makeMemory>>;
 	beforeAll(async () => {
-		env = await makeMemory({ "yo/perfil.md": note("Perfil", "Quién es") }, { noRemote: true });
+		env = await makeMemory({ "yo/perfil.md": note("Perfil", "Quién es") });
 		await env.memory.create(sam, { path: "temas/uno.md", content: note("Uno", "Primera"), reason: "Primera" });
 		await env.memory.create(sam, { path: "temas/dos.md", content: note("Dos", "Segunda"), reason: "Segunda" });
 		await env.memory.create({ id: "old-bot", name: "Old Bot", scope: "write" }, { path: "temas/tres.md", content: note("Tres", "Tercera"), reason: "Tercera" });
@@ -122,7 +122,7 @@ describe("clients report", () => {
 	});
 
 	it("copes with an empty repo", async () => {
-		const empty = await makeMemory({}, { noRemote: true });
+		const empty = await makeMemory({});
 		try {
 			const report = await buildClientsReport({ git: empty.memory.git, repoDir: empty.memory.opts.repoDir, staticClients: () => [], activity: () => [] });
 			expect(report.clients).toEqual([]);
@@ -141,7 +141,7 @@ describe("clients over MCP", () => {
 	let readToken: string;
 
 	beforeAll(async () => {
-		env = await makeMemory({ "yo/perfil.md": note("Perfil", "Quién es") }, { noRemote: true });
+		env = await makeMemory({ "yo/perfil.md": note("Perfil", "Quién es") });
 		const tokensFile = join(env.root, "tokens.toml");
 		writeToken = await addToken(tokensFile, "sam-laptop", "Sam (laptop)", "write");
 		readToken = await addToken(tokensFile, "alex-reader", "Alex (reader)", "read");

@@ -25,7 +25,6 @@ Diseño, principios y evaluación empírica de las reglas de escritura en códig
 | `attach` | Frontmatter y `type` de la nota compañera (`type` del parámetro o `attachment_type`). El texto extraído del documento se conserva tal cual. |
 | `delete` | No escribe contenido (solo bloquea `HAS_BACKLINKS`). |
 | `publish` | Varios commits (`create`, `write`, `move`, `delete`) en un solo envío atómico (todo o nada). Las reglas se juzgan al final sobre el conjunto, permitiendo mover líneas de `append_only` o menciones obsoletas al partir/fusionar notas. |
-| Remoto git | Los commits ya empujados no se pueden rechazar; sus incumplimientos se registran en el log (`rules.remote_violations`) y pueden bloquearse antes con `cli-memoria check` como hook git. |
 | `lint` | Tipo `rules` (`cli-memoria lint --kind rules` o herramienta `lint`): una entrada por nota con los problemas actuales, sin modelo. |
 | `cli-memoria check` | `cli-memoria check <repo> [<rev> \| <de>..<a> [--each]] [--conventions f] [--json]` evalúa un árbol, un rango (código de salida `1` si añade un problema bloqueante: sirve como hook `pre-push`/`pre-receive`) o cada commit por separado. |
 
@@ -35,11 +34,13 @@ Diseño, principios y evaluación empírica de las reglas de escritura en códig
 |---|---|---|---|
 | `frontmatter` | La nota empieza con frontmatter YAML entre `---`. | `block` | Si antes lo tenía y ahora no, o si la nota es nueva. |
 | `type` | El campo `type` existe y pertenece a la lista cerrada `allowed`. Las carpetas de `untyped_folders` quedan exentas. | `block` | Por valor: mantener un valor viejo inválido solo avisa, pero cambiarlo a otro inválido bloquea. |
+| `status` | Solo con `[rules.status]`: las notas de los tipos listados en `types` llevan un `status` (por defecto el campo `status`) que está en `allowed` (`idea`, `active`, `waiting`, `paused` salvo que se acote). Sin `types`, se pide a toda nota con tipo. | `warn` | Por valor: un `status` ausente o fuera de la lista es nuevo si la nota no lo tenía. |
+| `pending` | Solo con `[rules.pending]`: cada línea con marca (`- [ ]` / `- [x]`) de las secciones indicadas tiene la forma `- [ ] qué · quién · AAAA-MM-DD [origen]`, con la fecha también como `AAAA-MM` o `sin plazo`. La prosa de la sección no se toca. | `warn` | Por línea concreta (la clave es su texto), así que corregir una no afecta a las demás. |
 | `obsolete` | Nombres retirados definidos como expresiones regulares (sensibles a mayúsculas por defecto). Cuenta también dentro de código. Con `allow_dated = true` (por defecto), una línea con fecha `AAAA-MM-DD` fuera de marcadores `[…]` cuenta como historia y se permite. | `block` | Por texto encontrado: una escritura no puede aumentar el conteo, así que retocar la línea que ya lo tenía no bloquea. En un envío (`publish`), cada mención que sale de una nota cubre una que entra en otra (las notas borradas también ceden las suyas). |
 | `append_only` | Las líneas existentes de las secciones listadas (p. ej. `Fuentes`) no se modifican ni se borran; se puede añadir y reordenar (se ignoran líneas en blanco y espacios finales). | `block` | Línea a línea entre la versión anterior y la nueva. En `publish`, una línea que sale de una nota y entra idéntica en la misma sección de otra del mismo envío queda cubierta. |
 | `forbidden_section` | Encabezados prohibidos (de cualquier nivel, sin distinguir mayúsculas ni tildes, fuera de bloques de código). | `block` | Por encabezado. |
 | `template` | Las secciones del nivel indicado de un tipo con plantilla coinciden con las de la plantilla y van en orden. | `warn` | Por encabezado fuera de plantilla o fuera de orden. |
-| `size` | Caracteres de la nota por encima de `max_chars` (las notas compañeras de adjuntos quedan fuera). | `warn` | Si cruza el límite o si ya lo superaba y crece. |
+| `size` | Caracteres de la nota por encima de `max_chars` (quedan fuera las notas compañeras de adjuntos y las de `type: record`). | `warn` | Si cruza el límite o si ya lo superaba y crece. |
 
 Quedan fuera de todas las reglas los archivos de la raíz (`AGENTS.md`, `README.md`), la carpeta de archivo (`archive/`) y las carpetas de `[rules] exclude`.
 
@@ -92,7 +93,18 @@ People = ["Quién es", "Relación", "Contacto", "Trato", "Asuntos", "Pendiente",
 [rules.size]
 max_chars = 20000
 action = "warn"
+
+[rules.status]                       # opcional: apagada si no se declara
+types = ["Work"]                     # los tipos que deben llevar estado (vacío: toda nota con tipo)
+allowed = ["idea", "active", "waiting", "paused"]
+action = "warn"
+
+[rules.pending]                      # opcional: apagada si no se declara
+section = "Pendiente"                # o sections = ["Pendiente", "Tareas"]
+action = "warn"
 ```
+
+`status` dice en qué punto está una nota (`idea`, `active`, `waiting`, `paused`) y `search` puede filtrar por él; `type: record` marca una lista o un registro, que queda exento de `stale`, `oversized` y de la regla `size`. Una nota `record` no se considera desactualizada por no cambiar: se supone que se queda como está.
 
 Un `memory.toml` mal escrito nunca se aplica: el mensaje indica qué clave falla (expresión regular inválida, claves desconocidas, plantilla de un tipo que no está en `allowed`, patrón que casa con cadena vacía). Mientras corre, el servidor conserva las últimas convenciones válidas.
 

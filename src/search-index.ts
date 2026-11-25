@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { Section } from "./markdown.js";
 import type { TypedLink } from "./relations.js";
 
-export const SCHEMA_VERSION = "4";
+export const SCHEMA_VERSION = "5";
 
 export interface NoteRecord {
 	path: string;
@@ -11,6 +11,10 @@ export interface NoteRecord {
 	title: string | null;
 	description: string | null;
 	aliases: string[];
+	/** Frontmatter `type`: what kind of note this is (project, person, reference…), if it says. */
+	type: string | null;
+	/** Frontmatter `status`: where it stands (idea, active, waiting, paused), if it says. */
+	status: string | null;
 	archived: boolean;
 	supersededBy: string | null;
 	attachment: string | null;
@@ -38,6 +42,8 @@ export interface SearchHit {
 	name: string;
 	description: string | null;
 	updatedAt: string | null;
+	type: string | null;
+	status: string | null;
 	section: SectionRow;
 	snippet: string;
 	score: number;
@@ -62,6 +68,8 @@ CREATE TABLE IF NOT EXISTS notes (
   title TEXT,
   description TEXT,
   aliases TEXT NOT NULL DEFAULT '[]',
+  type TEXT,
+  status TEXT,
   archived INTEGER NOT NULL,
   superseded_by TEXT,
   attachment TEXT,
@@ -114,6 +122,8 @@ function toNote(r: Row): NoteRow {
 		title: (r.title as string | null) ?? null,
 		description: (r.description as string | null) ?? null,
 		aliases: JSON.parse(r.aliases as string) as string[],
+		type: (r.type as string | null) ?? null,
+		status: (r.status as string | null) ?? null,
 		archived: r.archived === 1,
 		supersededBy: (r.superseded_by as string | null) ?? null,
 		attachment: (r.attachment as string | null) ?? null,
@@ -213,8 +223,8 @@ export class SearchIndex {
 		this.removeNote(note.path);
 		this.db
 			.prepare(
-				`INSERT INTO notes (path, name, folder, title, description, aliases, archived, superseded_by, attachment, blob_hash, size, created_at, created_by, updated_at, updated_by, problems)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO notes (path, name, folder, title, description, aliases, type, status, archived, superseded_by, attachment, blob_hash, size, created_at, created_by, updated_at, updated_by, problems)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(
 				note.path,
@@ -223,6 +233,8 @@ export class SearchIndex {
 				note.title,
 				note.description,
 				JSON.stringify(note.aliases),
+				note.type,
+				note.status,
 				note.archived ? 1 : 0,
 				note.supersededBy,
 				note.attachment,
@@ -263,12 +275,16 @@ export class SearchIndex {
 		this.db.prepare("DELETE FROM assets WHERE path = ?").run(path);
 	}
 
-	/** Re-resolves every link: cheap at this scale and always right after adds, removes and renames. */
+	/**
+	 * Re-resolves every link: cheap at this scale and always right after adds, removes and renames. The note name
+	 * is compared `COLLATE NOCASE`, the collation of its index, so this is one index lookup per link and not a
+	 * table scan (`lower(notes.name)` would hide the index).
+	 */
 	resolveLinks(): void {
 		this.db.exec(`
       UPDATE links SET target_path = COALESCE(
-        (SELECT path FROM notes WHERE lower(notes.name) = links.target_name ORDER BY path LIMIT 1),
-        (SELECT path FROM assets WHERE assets.name = links.target_name ORDER BY path LIMIT 1)
+        (SELECT path FROM notes WHERE notes.name COLLATE NOCASE = links.target_name ORDER BY path LIMIT 1),
+        (SELECT path FROM assets WHERE assets.name COLLATE NOCASE = links.target_name ORDER BY path LIMIT 1)
       )`);
 	}
 
@@ -317,28 +333,52 @@ export class SearchIndex {
 		}));
 	}
 
-	search(match: string, opts: { folder?: string | null; includeArchive: boolean; limit: number }): SearchHit[] {
+	/**
+	 * One page of full-text hits, best first, plus how many there are in total. `types` and `statuses` are already
+	 * lowercased; notes of type `reference` or `record` are down-weighted (bm25 is negative, so a lower weight
+	 * means a score closer to zero and a worse position). `groupByNote` keeps at most two sections per note.
+	 *
+	 * Two queries: FTS5 only allows `bm25()` in a query that reads the FTS table directly, so the ranking is read
+	 * first (path, section id and score, no snippets) and the snippets of the page are fetched by rowid after it.
+	 */
+	search(
+		match: string,
+		opts: { folder?: string | null; includeArchive: boolean; limit: number; offset?: number; types?: string[] | null; statuses?: string[] | null; groupByNote?: boolean; highlight?: boolean },
+	): { hits: SearchHit[]; total: number } {
+		const offset = Math.max(opts.offset ?? 0, 0);
+		const types = opts.types?.length ? opts.types : null;
+		const statuses = opts.statuses?.length ? opts.statuses : null;
+		const conditions = [...(types ? [`lower(n.type) IN (${types.map(() => "?").join(", ")})`] : []), ...(statuses ? [`lower(n.status) IN (${statuses.map(() => "?").join(", ")})`] : [])];
+		const where = ["sections_fts MATCH ?1", "(?2 IS NULL OR n.folder = ?2)", "(?3 = 1 OR n.archived = 0)", ...conditions].join(" AND ");
+		const params = [match, opts.folder ?? null, opts.includeArchive ? 1 : 0, ...(types ?? []), ...(statuses ?? [])];
+		const score = "bm25(sections_fts, 5.0, 4.0, 3.0, 2.0, 1.0) * (CASE WHEN lower(n.type) IN ('reference', 'record') THEN 0.5 ELSE 1.0 END)";
+		const ranked = this.db
+			.prepare(`SELECT s.path, s.id, ${score} AS score FROM sections_fts JOIN sections s ON s.id = sections_fts.rowid JOIN notes n ON n.path = s.path WHERE ${where} ORDER BY score`)
+			.all(...params) as Row[];
+		// At most two sections per note, in the order they were ranked.
+		const seen = new Map<string, number>();
+		const kept: Row[] = [];
+		for (const row of ranked) {
+			if (opts.groupByNote !== false) {
+				const n = seen.get(row.path as string) ?? 0;
+				if (n >= 2) continue;
+				seen.set(row.path as string, n + 1);
+			}
+			kept.push(row);
+		}
+		const page = kept.slice(offset, offset + opts.limit);
+		if (page.length === 0) return { hits: [], total: kept.length };
+		const ids = page.map((r) => r.id as number);
 		const rows = this.db
 			.prepare(
-				`SELECT s.path, s.heading, s.level, s.line_start, s.line_end, n.name, n.description, n.updated_at,
-                bm25(sections_fts, 5.0, 4.0, 3.0, 2.0, 1.0) AS score,
-                snippet(sections_fts, -1, '«', '»', '…', 24) AS snippet
-         FROM sections_fts
-         JOIN sections s ON s.id = sections_fts.rowid
-         JOIN notes n ON n.path = s.path
-         WHERE sections_fts MATCH ?1 AND (?2 IS NULL OR n.folder = ?2) AND (?3 = 1 OR n.archived = 0)
-         ORDER BY score LIMIT ?4`,
+				`SELECT s.id, s.path, s.heading, s.level, s.line_start, s.line_end, n.name, n.description, n.updated_at, n.type, n.status,
+				        ${score} AS score, snippet(sections_fts, -1, ${opts.highlight === false ? "''" : "'«'"}, ${opts.highlight === false ? "''" : "'»'"}, '…', 24) AS snippet
+				 FROM sections_fts JOIN sections s ON s.id = sections_fts.rowid JOIN notes n ON n.path = s.path
+				 WHERE ${where} AND s.id IN (${ids.map(() => "?").join(", ")})`,
 			)
-			.all(match, opts.folder ?? null, opts.includeArchive ? 1 : 0, opts.limit) as Row[];
-		return rows.map((r) => ({
-			path: r.path as string,
-			name: r.name as string,
-			description: (r.description as string | null) ?? null,
-			updatedAt: (r.updated_at as string | null) ?? null,
-			section: { heading: r.heading as string, level: r.level as number, lineStart: r.line_start as number, lineEnd: r.line_end as number },
-			snippet: (r.snippet as string).replace(/\s+/g, " ").trim(),
-			score: Math.round(-(r.score as number) * 1000) / 1000,
-		}));
+			.all(...params, ...ids) as Row[];
+		const byId = new Map(rows.map((r) => [r.id as number, toHit(r)]));
+		return { hits: ids.flatMap((id) => byId.get(id) ?? []), total: kept.length };
 	}
 
 	/** Links from a note, optionally only those of one relation. */
@@ -349,6 +389,11 @@ export class SearchIndex {
 	/** Links to a note or asset, optionally only those of one relation. */
 	linksIn(path: string, relation?: string): LinkRow[] {
 		return (this.db.prepare("SELECT * FROM links WHERE target_path = ?1 AND (?2 IS NULL OR relation = ?2) ORDER BY src_path, line").all(path, relation ?? null) as Row[]).map(toLink);
+	}
+
+	/** Links that name a note but are not resolved yet (they are resolved once, at the end of a `publish`). */
+	linksToName(name: string): LinkRow[] {
+		return (this.db.prepare("SELECT * FROM links WHERE target_path IS NULL AND target_name = ? ORDER BY src_path, line").all(name.toLowerCase()) as Row[]).map(toLink);
 	}
 
 	/** Every relation key in use, with how many links carry it. */
@@ -363,11 +408,11 @@ export class SearchIndex {
 		return (this.db.prepare("SELECT * FROM links ORDER BY src_path, line").all() as Row[]).map(toLink);
 	}
 
-	/** Every section with its indexed body text (the FTS table keeps it), in note order. For lint. */
-	sectionTexts(): { path: string; heading: string; lineStart: number; text: string }[] {
+	/** Every section with its indexed body text (the FTS table keeps it), in note order. For lint and deadlines. */
+	sectionTexts(): { path: string; heading: string; level: number; lineStart: number; text: string }[] {
 		return (
-			this.db.prepare("SELECT s.path, s.heading, s.line_start, f.body FROM sections s JOIN sections_fts f ON f.rowid = s.id ORDER BY s.path, s.ord").all() as Row[]
-		).map((r) => ({ path: r.path as string, heading: r.heading as string, lineStart: r.line_start as number, text: r.body as string }));
+			this.db.prepare("SELECT s.path, s.heading, s.level, s.line_start, f.body FROM sections s JOIN sections_fts f ON f.rowid = s.id ORDER BY s.path, s.ord").all() as Row[]
+		).map((r) => ({ path: r.path as string, heading: r.heading as string, level: r.level as number, lineStart: r.line_start as number, text: r.body as string }));
 	}
 
 	/** Number of sections per note. */
@@ -397,21 +442,48 @@ function toLink(r: Row): LinkRow {
 	};
 }
 
+function toHit(r: Row): SearchHit {
+	return {
+		path: r.path as string,
+		name: r.name as string,
+		description: (r.description as string | null) ?? null,
+		updatedAt: (r.updated_at as string | null) ?? null,
+		type: (r.type as string | null) ?? null,
+		status: (r.status as string | null) ?? null,
+		section: { heading: r.heading as string, level: r.level as number, lineStart: r.line_start as number, lineEnd: r.line_end as number },
+		snippet: (r.snippet as string).replace(/\s+/g, " ").trim(),
+		score: Math.round(-(r.score as number) * 1000) / 1000,
+	};
+}
+
 /**
  * Turns free text into a safe FTS5 query: quoted phrases stay phrases, every other word of 3+ characters
- * becomes a prefix term (Spanish has no stemmer here). Returns an AND query and an OR fallback, or null if empty.
+ * becomes a prefix term (Spanish has no stemmer here). A word of 4+ characters ending in `s`/`es` also
+ * searches its singular (Spanish plurals), keeping the word itself, so «hipotecas» finds «hipoteca».
+ * Returns an AND query and an OR fallback, or null if empty.
  */
 export function buildFtsQuery(input: string): { and: string; or: string } | null {
 	const terms: string[] = [];
 	const quote = (s: string) => `"${s.replace(/"/g, '""')}"`;
+	const pluralForms = (word: string): string[] => {
+		if (word.length < 4) return [];
+		const forms: string[] = [];
+		if (word.endsWith("es") && word.length - 2 >= 3) forms.push(word.slice(0, -2));
+		if (word.endsWith("s")) forms.push(word.slice(0, -1));
+		return forms.filter((f) => f !== word && f.length >= 3);
+	};
+	const term = (word: string): string => {
+		const exact = word.length >= 3 ? `${quote(word)}*` : quote(word);
+		const forms = pluralForms(word);
+		// The exact word first: a group of alternatives, so it still counts as one term of an AND query.
+		return forms.length === 0 ? exact : `(${[exact, ...forms.map((f) => `${quote(f)}*`)].join(" OR ")})`;
+	};
 	const rest = input.replace(/"([^"]*)"/g, (_, phrase: string) => {
 		const words = phrase.match(/[\p{L}\p{N}]+/gu);
 		if (words?.length) terms.push(quote(words.join(" ")));
 		return " ";
 	});
-	for (const word of rest.match(/[\p{L}\p{N}]+/gu) ?? []) {
-		terms.push(word.length >= 3 ? `${quote(word)}*` : quote(word));
-	}
+	for (const word of rest.match(/[\p{L}\p{N}]+/gu) ?? []) terms.push(term(word));
 	if (terms.length === 0) return null;
 	return { and: terms.join(" AND "), or: terms.join(" OR ") };
 }

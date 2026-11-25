@@ -1,7 +1,7 @@
 import type { Conventions } from "./conventions.js";
 import { MemoryError } from "./errors.js";
 import { maskCode } from "./markdown.js";
-import { formatViolation, noteViolations, rulesApply } from "./rules.js";
+import { formatViolation, noteViolations, RECORD, rulesApply } from "./rules.js";
 import type { NoteRow, SearchIndex } from "./search-index.js";
 import { dirOf, joinPath, lookAlikePairs, noteLabels, normalizeWords, topFolder } from "./util.js";
 
@@ -70,6 +70,11 @@ function words(line: string): { word: string; at: number }[] {
 	return out;
 }
 
+/** A note of type `record` is a list or a log that is meant to be long and to stay as it is. */
+function isRecord(note: NoteRow): boolean {
+	return (note.type ?? "").trim().toLowerCase() === RECORD;
+}
+
 /** Whole-line window of `max` characters around an offset. */
 function around(line: string, at: number, max = SNIPPET): string {
 	if (line.length <= max) return truncate(line, max);
@@ -93,6 +98,22 @@ function sentenceBefore(line: string, at: number): string {
 
 function escapeRegExp(s: string): string {
 	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * The provenance markers of an inference, in brackets or in parentheses: `[deducido]`, `[deducido, 2026-01-02]`,
+ * `[deducido de [[nota]]]`, `(deducido)`. A wikilink is allowed inside (an inference from another note), and the
+ * brackets of a link never open one: `[[deducido]]` is a link, not a marker.
+ */
+function inferenceMarker(markers: string[]): RegExp {
+	const words = markers.map(escapeRegExp).join("|");
+	return new RegExp(`(?<!\\[)\\[(?!\\[)\\s*(?:${words})(?:\\[\\[[^\\]\\n]*\\]\\]|[^[\\]\\n])*?\\](?!\\])|\\(\\s*(?:${words})(?:\\[\\[[^\\]\\n]*\\]\\]|[^()\\n])*?\\)`, "giu");
+}
+
+/** The date a marker carries, if it carries one: the last `AAAA-MM-DD` of its text. */
+function markerDate(marker: string): string | null {
+	const dates = [...marker.matchAll(/(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)/g)].map((m) => m[1] as string);
+	return dates.at(-1) ?? null;
 }
 
 /**
@@ -137,7 +158,7 @@ export function lint(index: SearchIndex, conventions: Conventions, args: LintArg
 			if (!rulesApply(conventions, n.path)) continue;
 			const text = readNote(n.path);
 			if (text === null) continue;
-			const found = noteViolations(conventions.rules, n.path, text);
+			const found = noteViolations(conventions.rules, n.path, text, undefined, { typeOf: (p) => byPath.get(p)?.type ?? null });
 			if (!found.length) continue;
 			const byRule: Record<string, number> = {};
 			for (const v of found) byRule[v.rule] = (byRule[v.rule] ?? 0) + 1;
@@ -174,7 +195,7 @@ export function lint(index: SearchIndex, conventions: Conventions, args: LintArg
 	}
 
 	if (wanted.has("old_inference") && settings.inferredMarkers.length) {
-		const marker = new RegExp(`\\((?:${settings.inferredMarkers.map(escapeRegExp).join("|")})(?:\\s*[,;:]\\s*(\\d{4}-\\d{2}-\\d{2}))?\\s*\\)`, "giu");
+		const marker = inferenceMarker(settings.inferredMarkers);
 		const found: { item: LintItem; days: number }[] = [];
 		for (const s of texts) {
 			const note = byPath.get(s.path) as NoteRow;
@@ -182,7 +203,7 @@ export function lint(index: SearchIndex, conventions: Conventions, args: LintArg
 			const masked = maskCode(s.text).split("\n");
 			masked.forEach((line, i) => {
 				for (const m of line.matchAll(marker)) {
-					const date = m[1] ?? null;
+					const date = markerDate(m[0]);
 					// Undated: the statement is at least as old as the note's last change.
 					const since = date ?? note.updatedAt;
 					if (!since || Number.isNaN(Date.parse(since))) continue;
@@ -200,11 +221,16 @@ export function lint(index: SearchIndex, conventions: Conventions, args: LintArg
 
 	if (wanted.has("unlinked_mention")) {
 		// Labels of every note (and their leading words, to grow phrases); a label several notes share is ambiguous.
+		// Notes of `folders.index_full` are the index itself (the profile, the home page): by default they are not
+		// searched as destinations, and `lint.mention_exclude_labels` adds labels to leave alone.
+		const skipLabels = new Set(settings.mentionExcludeLabels.map(normalizeWords));
+		const indexFull = new Set(conventions.folders.indexFull);
 		const owners = new Map<string, Set<string>>();
 		for (const n of notes) {
+			if (indexFull.has(n.folder)) continue;
 			for (const label of noteLabels(n)) {
 				const norm = normalizeWords(label);
-				if (norm.length < settings.mentionMinLength) continue;
+				if (norm.length < settings.mentionMinLength || skipLabels.has(norm)) continue;
 				owners.set(norm, (owners.get(norm) ?? new Set()).add(n.path));
 			}
 		}
@@ -277,7 +303,7 @@ export function lint(index: SearchIndex, conventions: Conventions, args: LintArg
 	if (wanted.has("stale")) {
 		const found: { item: LintItem; days: number }[] = [];
 		for (const n of notes) {
-			if (!n.updatedAt) continue;
+			if (!n.updatedAt || isRecord(n)) continue;
 			const days = daysSince(n.updatedAt, nowMs);
 			if (days > settings.staleDays) found.push({ item: { kind: "stale", notes: [n.path], detail: { updated_at: n.updatedAt.slice(0, 10), days } }, days });
 		}
@@ -287,7 +313,7 @@ export function lint(index: SearchIndex, conventions: Conventions, args: LintArg
 
 	if (wanted.has("oversized")) {
 		const sections = index.sectionCounts();
-		const big = notes.filter((n) => !n.attachment && n.size > settings.maxBytes).sort((a, b) => b.size - a.size);
+		const big = notes.filter((n) => !n.attachment && !isRecord(n) && n.size > settings.maxBytes).sort((a, b) => b.size - a.size);
 		for (const n of big) items.push({ kind: "oversized", notes: [n.path], detail: { bytes: n.size, sections: sections.get(n.path) ?? 0 } });
 	}
 

@@ -1,4 +1,3 @@
-import { createHmac } from "node:crypto";
 import express, { type NextFunction, type Request, type Response } from "express";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -8,7 +7,9 @@ import type { Logger } from "./log.js";
 import type { ClientIdentity, MemoryService } from "./memory.js";
 import { createMcpServer } from "./tools.js";
 import type { UploadStore } from "./uploads.js";
-import { safeEqual } from "./util.js";
+
+/** Largest JSON body `/mcp` accepts: a `publish` of several long notes or an `attach` sent as base64. */
+export const MAX_MCP_BODY = "32mb";
 
 type AuthedRequest = Request & { auth?: AuthInfo };
 
@@ -31,6 +32,15 @@ export function toolCalls(body: unknown): (string | null)[] {
 		});
 }
 
+/**
+ * Whether the body starts a session. The `instructions` (the memory's rules file and the short index) are only
+ * part of the answer to `initialize`: rendering them for every tool call would cost more than the call itself.
+ */
+export function wantsInitialize(body: unknown): boolean {
+	const messages = Array.isArray(body) ? body : [body];
+	return messages.some((m) => typeof m === "object" && m !== null && (m as { method?: unknown }).method === "initialize");
+}
+
 function mcpHandler(memory: MemoryService, log: Logger, clients: ClientsService | null) {
 	return async (req: Request, res: Response) => {
 		if (req.method !== "POST") {
@@ -45,7 +55,8 @@ function mcpHandler(memory: MemoryService, log: Logger, clients: ClientsService 
 				log("warn", "clients.record_failed", { error: String(error) });
 			}
 		}
-		const server = await createMcpServer(memory, client, log, clients);
+		const instructions = wantsInitialize(req.body) ? await memory.instructions() : null;
+		const server = await createMcpServer(memory, client, log, clients, instructions);
 		const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
 		res.on("close", () => {
 			transport.close().catch(() => undefined);
@@ -65,15 +76,18 @@ function asyncRoute(fn: (req: Request, res: Response) => Promise<void>) {
 function errorHandler(log: Logger) {
 	return (error: unknown, _req: Request, res: Response, _next: NextFunction) => {
 		log("error", "http.error", { error: String((error as Error)?.stack ?? error) });
-		if (!res.headersSent) res.status(500).json({ error: "internal_error" });
+		if (res.headersSent) return;
+		// A body over the limit is the client's mistake, not ours.
+		if ((error as { type?: string })?.type === "entity.too.large") res.status(413).json({ error: "payload_too_large", limit: MAX_MCP_BODY });
+		else res.status(500).json({ error: "internal_error" });
 	};
 }
 
 /**
- * HTTP app: stateless MCP endpoint authenticated with per-client static Bearer tokens,
- * streaming uploads (`PUT /uploads/:filename`) and an optional git push webhook (`POST /hooks/git`).
+ * HTTP app: stateless MCP endpoint authenticated with per-client static Bearer tokens, and streaming uploads
+ * (`PUT /uploads/:filename`). There is no git remote and no push webhook: this process is the only writer.
  */
-export function createApp(opts: { memory: MemoryService; tokens: TokenStore; uploads: UploadStore; webhookSecret?: string | null; log: Logger; clients?: ClientsService | null }): express.Express {
+export function createApp(opts: { memory: MemoryService; tokens: TokenStore; uploads: UploadStore; log: Logger; clients?: ClientsService | null }): express.Express {
 	const app = express();
 	app.disable("x-powered-by");
 
@@ -94,24 +108,6 @@ export function createApp(opts: { memory: MemoryService; tokens: TokenStore; upl
 	const authenticated = (req: Request, res: Response, next: NextFunction) => {
 		if (authenticate(req, res)) next();
 	};
-
-	app.post("/hooks/git", express.raw({ type: "*/*", limit: "10mb" }), (req, res) => {
-		if (!opts.webhookSecret) {
-			res.status(404).end();
-			return;
-		}
-		const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
-		const rawSig = (req.header("x-hub-signature-256") ?? req.header("x-webhook-signature") ?? "").trim().toLowerCase();
-		const given = rawSig.startsWith("sha256=") ? rawSig.slice("sha256=".length) : rawSig;
-		const expected = createHmac("sha256", opts.webhookSecret).update(body).digest("hex");
-		if (!given || !safeEqual(given, expected)) {
-			opts.log("warn", "webhook.bad_signature", {});
-			res.status(401).end();
-			return;
-		}
-		opts.memory.requestSync("webhook");
-		res.status(204).end();
-	});
 
 	app.put(
 		"/uploads/:filename",
@@ -139,7 +135,7 @@ export function createApp(opts: { memory: MemoryService; tokens: TokenStore; upl
 		}),
 	);
 
-	app.all("/mcp", authenticated, express.json({ limit: "512mb" }), asyncRoute(mcpHandler(opts.memory, opts.log, opts.clients ?? null)));
+	app.all("/mcp", authenticated, express.json({ limit: MAX_MCP_BODY }), asyncRoute(mcpHandler(opts.memory, opts.log, opts.clients ?? null)));
 	app.use((_req, res) => {
 		res.status(404).json({ error: "not_found" });
 	});

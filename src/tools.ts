@@ -5,7 +5,7 @@ import { MemoryError } from "./errors.js";
 import { LINT_KINDS } from "./lint.js";
 import type { ClientsService } from "./clients.js";
 import type { Logger } from "./log.js";
-import type { ClientIdentity, MemoryService, PublishChange } from "./memory.js";
+import type { ClientIdentity, MemoryService, PublishChange, SearchArgs } from "./memory.js";
 import { SETUP_GUIDE_URI, setupGuide } from "./setup-guide.js";
 
 export const SERVER_NAME = "cli-memoria";
@@ -17,17 +17,20 @@ const reason = z.string().describe("One line saying why, in the user's language.
 const hash = z.string().describe("The `hash` returned by `read` for the version you are changing.");
 
 function ok(result: unknown): CallToolResult {
-	return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+	return { content: [{ type: "text", text: JSON.stringify(result) }] };
 }
 
 function fail(error: unknown): CallToolResult {
 	const e = error instanceof MemoryError ? error : new MemoryError("INTERNAL", "Internal error; the server log has the details.");
-	return { isError: true, content: [{ type: "text", text: JSON.stringify(e.toJSON(), null, 2) }] };
+	return { isError: true, content: [{ type: "text", text: JSON.stringify(e.toJSON()) }] };
 }
 
-/** A fresh MCP server per request (stateless transport), with the tools this client's scope allows. */
-export async function createMcpServer(memory: MemoryService, client: ClientIdentity, log: Logger, clients: ClientsService | null = null): Promise<McpServer> {
-	const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, { instructions: await memory.instructions() });
+/**
+ * A fresh MCP server per request (stateless transport), with the tools this client's scope allows. `instructions`
+ * goes into the answer to `initialize` only, so the caller passes it for that request and null for the rest.
+ */
+export async function createMcpServer(memory: MemoryService, client: ClientIdentity, log: Logger, clients: ClientsService | null = null, instructions: string | null = null): Promise<McpServer> {
+	const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, instructions === null ? {} : { instructions });
 
 	const wrap =
 		<A extends Record<string, unknown>>(tool: string, fn: (args: A) => unknown) =>
@@ -67,16 +70,39 @@ export async function createMcpServer(memory: MemoryService, client: ClientIdent
 		"search",
 		{
 			title: "Search notes",
-			description: "Full-text search (FTS5: accents ignored, word prefixes match). Returns the best sections with a snippet; read the note or the section next. Use quotes for exact phrases. The archive is excluded unless include_archive.",
+			description:
+				"Full-text search (FTS5: accents ignored, word prefixes match, Spanish plurals find their singular). Returns the best sections with a snippet, two sections per note at most (group_by_note); read the note or the section next. Use quotes for exact phrases. The archive is excluded unless include_archive. One page at a time: `total` and `next_offset` say how to go on.",
 			inputSchema: {
 				query: z.string().describe("Words to look for."),
 				folder: z.string().optional(),
 				include_archive: z.boolean().optional(),
 				limit: z.number().int().min(1).max(50).optional().describe("Default 10."),
+				offset: z.number().int().min(0).optional().describe("Hits to skip: the `next_offset` of the previous page."),
+				type: z.union([z.string(), z.array(z.string())]).optional().describe("Only notes of this frontmatter type (one or several), e.g. «project»."),
+				status: z.union([z.string(), z.array(z.string())]).optional().describe("Only notes with this frontmatter status (one or several): idea, active, waiting, paused."),
+				group_by_note: z.boolean().optional().describe("At most two sections per note (default true)."),
+				highlight: z.boolean().optional().describe("Mark the matched words with «» in the snippet (default true)."),
 			},
 			annotations: read,
 		},
-		wrap("search", (a: { query: string; folder?: string; include_archive?: boolean; limit?: number }) => memory.search(a)),
+		wrap("search", (a: SearchArgs) => memory.search(a)),
+	);
+
+	server.registerTool(
+		"deadlines",
+		{
+			title: "Pending lines with their dates",
+			description:
+				"The pending lines of the notes, soonest first: the items of the sections named «Pendiente», written as `- [ ] what · who · 2026-03-14 [origin]` (date `AAAA-MM-DD`, `AAAA-MM` or «sin plazo»; `- [x]` is done). Month-only deadlines come at the start of their month, undated ones last. Open ones only unless include_done; dated ones only unless include_undated.",
+			inputSchema: {
+				folder: z.string().optional().describe("Only notes of this top-level folder."),
+				include_undated: z.boolean().optional().describe("Also the lines with no deadline (default false)."),
+				include_done: z.boolean().optional().describe("Also the lines marked as done (default false)."),
+				limit: z.number().int().min(1).max(1000).optional().describe("Default 200."),
+			},
+			annotations: read,
+		},
+		wrap("deadlines", (a: { folder?: string; include_undated?: boolean; include_done?: boolean; limit?: number }) => memory.deadlines(a)),
 	);
 
 	server.registerTool(

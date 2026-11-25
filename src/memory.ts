@@ -11,8 +11,9 @@ import { parseNote, splitFrontmatter } from "./frontmatter.js";
 import { Git } from "./git.js";
 import { type LintArgs, lint } from "./lint.js";
 import { type Logger, silentLogger } from "./log.js";
-import { firstH1, rewriteWikiLinks, splitSections, targetNameOf } from "./markdown.js";
+import { firstH1, rewriteWikiLinks, sectionsMatching, splitSections, targetNameOf } from "./markdown.js";
 import type { OcrRunner } from "./ocr.js";
+import { deadlineKey, parsePendingLine, PENDING_SECTION } from "./pending.js";
 import { parseTypedLinks } from "./relations.js";
 import {
 	appendOnlyAdded,
@@ -20,6 +21,8 @@ import {
 	blockingMessage,
 	type CheckOptions,
 	checkBatch,
+	type RuleContext,
+	typeOfText,
 	checkWrite,
 	describeRules,
 	type NoteText,
@@ -29,7 +32,7 @@ import {
 	warningTexts,
 } from "./rules.js";
 import { SETUP_GUIDE_URI, SETUP_GUIDE_URL } from "./setup-guide.js";
-import { buildFtsQuery, type NoteRow, type SearchHit, SearchIndex } from "./search-index.js";
+import { buildFtsQuery, type LinkRow, type NoteRow, type SearchHit, SearchIndex } from "./search-index.js";
 import type { UploadStore } from "./uploads.js";
 import {
 	blobHash,
@@ -60,18 +63,10 @@ export interface ClientIdentity {
 	session?: string | null;
 }
 
-export interface RemoteConfig {
-	url: string;
-	/** HTTP basic credentials for the remote git server. */
-	username?: string;
-	token?: string;
-}
-
 export interface MemoryOptions {
 	repoDir: string;
 	indexPath: string;
 	branch?: string;
-	remote?: RemoteConfig | null;
 	/** Domain of the author emails: `<client-id>@<domain>`. */
 	authorDomain?: string;
 	committer?: { name: string; email: string };
@@ -80,23 +75,27 @@ export interface MemoryOptions {
 	/** OCR for scanned PDFs and images; null or absent means no OCR. */
 	ocr?: OcrRunner | null;
 	log?: Logger;
-	pushRetry?: { initialMs: number; maxMs: number };
-	fetchIntervalMs?: number;
 }
 
-type SearchArgs = { query: string; folder?: string; include_archive?: boolean; limit?: number };
+/** Arguments of the `search` tool. A type alias, not an interface: it goes through the tools' generic wrapper. */
+export type SearchArgs = {
+	query: string;
+	folder?: string;
+	include_archive?: boolean;
+	limit?: number;
+	offset?: number;
+	/** Only notes of these types (frontmatter «type»), one or several. */
+	type?: string | string[];
+	/** Only notes with one of these statuses (frontmatter «status»). */
+	status?: string | string[];
+	/** At most two sections per note (default true). */
+	group_by_note?: boolean;
+	/** Mark the matched words with «» in the snippet (default true). */
+	highlight?: boolean;
+};
 
 export interface Warning {
-	code:
-		| "BROKEN_LINKS"
-		| "UNKNOWN_RELATIONS"
-		| "PUSH_PENDING"
-		| "EXTRACTION_EMPTY"
-		| "EXTRACTION_PARTIAL"
-		| "NO_CHANGES"
-		| "FRONTMATTER_PROBLEMS"
-		| "RULES_WARNINGS"
-		| "RULES_EXISTING";
+	code: "BROKEN_LINKS" | "UNKNOWN_RELATIONS" | "EXTRACTION_EMPTY" | "EXTRACTION_PARTIAL" | "NO_CHANGES" | "FRONTMATTER_PROBLEMS" | "RULES_WARNINGS" | "RULES_EXISTING";
 	message: string;
 	[key: string]: unknown;
 }
@@ -110,6 +109,20 @@ export interface WriteResult {
 }
 
 type NoteRef = { path?: string; name?: string };
+
+/** One pending line, as `deadlines` returns it. */
+export interface DeadlineItem {
+	path: string;
+	name: string;
+	/** 1-based line of the file. */
+	line: number;
+	done: boolean;
+	text: string;
+	owner: string | null;
+	date: string | null;
+	date_precision: "day" | "month" | null;
+	origin: string | null;
+}
 
 /** A note of a `publish` for the rules; `after` null for a note it deletes (it only gives what leaves it). */
 type BatchEntry = { after: NoteText | null; before: NoteText | null; opts: CheckOptions & { quiet?: boolean } };
@@ -163,25 +176,15 @@ export class MemoryService {
 	private readonly log: Logger;
 	private readonly branch: string;
 	private lfs = false;
-	private pushPending = false;
-	private pushTimer: NodeJS.Timeout | null = null;
-	private pushDelay: number;
-	private fetchTimer: NodeJS.Timeout | null = null;
-	private syncTimer: NodeJS.Timeout | null = null;
-	private syncRequested = false;
+	/** Cached MCP instructions, keyed by HEAD and the conventions hash. */
+	private instructionsCache: { key: string; text: string } | null = null;
 	/** While a `publish` runs: the notes it writes, judged together at the end instead of one by one. */
 	private rulesBatch: BatchEntry[] | null = null;
 
 	constructor(readonly opts: MemoryOptions) {
 		this.log = opts.log ?? silentLogger;
 		this.branch = opts.branch ?? "main";
-		this.pushDelay = opts.pushRetry?.initialMs ?? 30_000;
-		const config: Record<string, string> = {};
-		if (opts.remote?.token) {
-			const basic = Buffer.from(`${opts.remote.username ?? "cli-memoria"}:${opts.remote.token}`).toString("base64");
-			config["http.extraHeader"] = `Authorization: Basic ${basic}`;
-		}
-		this.git = new Git(opts.repoDir, { config });
+		this.git = new Git(opts.repoDir);
 	}
 
 	// ── lifecycle ────────────────────────────────────────────────────────────
@@ -190,16 +193,8 @@ export class MemoryService {
 		await mkdir(dirname(this.opts.repoDir), { recursive: true });
 		await mkdir(dirname(this.opts.indexPath), { recursive: true });
 		if (!existsSync(join(this.opts.repoDir, ".git"))) {
-			if (this.opts.remote) {
-				const parent = new Git(dirname(this.opts.repoDir), { config: this.gitConfig() });
-				await parent.run(["clone", "-q", "--no-checkout", this.opts.remote.url, this.opts.repoDir]);
-				const branches = await this.git.out(["branch", "-r"]);
-				if (branches.includes(`origin/${this.branch}`)) await this.git.run(["checkout", "-q", "-B", this.branch, `origin/${this.branch}`]);
-				else await this.git.run(["symbolic-ref", "HEAD", `refs/heads/${this.branch}`]);
-			} else {
-				await mkdir(this.opts.repoDir, { recursive: true });
-				await this.git.run(["init", "-q", "-b", this.branch]);
-			}
+			await mkdir(this.opts.repoDir, { recursive: true });
+			await this.git.run(["init", "-q", "-b", this.branch]);
 		}
 		const committer = this.opts.committer ?? { name: "cli-memoria", email: `cli-memoria@${this.authorDomain()}` };
 		for (const [k, v] of [
@@ -207,7 +202,6 @@ export class MemoryService {
 			["core.quotepath", "false"],
 			["user.name", committer.name],
 			["user.email", committer.email],
-			["pull.rebase", "true"],
 		] as const) {
 			await this.git.run(["config", "--local", k, v]);
 		}
@@ -223,41 +217,16 @@ export class MemoryService {
 		await this.loadConventions();
 		this.index = new SearchIndex(this.opts.indexPath);
 		await this.reconcileIndex();
-		if (this.opts.remote) {
-			await this.lock.run(() => this.syncLocked("startup")).catch((error) => this.log("warn", "sync.startup_failed", { error: String(error) }));
-		}
-		if (this.opts.fetchIntervalMs && this.opts.remote) {
-			this.fetchTimer = setInterval(() => this.requestSync("timer"), this.opts.fetchIntervalMs);
-			this.fetchTimer.unref();
-		}
 	}
 
 	async stop(): Promise<void> {
-		for (const t of [this.pushTimer, this.fetchTimer, this.syncTimer]) if (t) clearTimeout(t);
 		await this.lock.run(async () => undefined);
 		this.index?.close();
 	}
 
-	/** Asks for a fetch + integrate soon (webhook or timer). Several requests in a row collapse into one. */
-	requestSync(source: string): void {
-		this.syncRequested = true;
-		if (this.syncTimer) return;
-		this.syncTimer = setTimeout(() => {
-			this.syncTimer = null;
-			this.lock.run(() => this.syncLocked(source)).catch((error) => this.log("warn", "sync.failed", { source, error: String(error) }));
-		}, 300);
-		this.syncTimer.unref();
-	}
-
-	/** Waits until queued writes and syncs are done (tests and shutdown). */
+	/** Waits until queued writes are done (tests and shutdown). */
 	idle(): Promise<void> {
 		return this.lock.run(async () => undefined);
-	}
-
-	private gitConfig(): Record<string, string> {
-		if (!this.opts.remote?.token) return {};
-		const basic = Buffer.from(`${this.opts.remote.username ?? "cli-memoria"}:${this.opts.remote.token}`).toString("base64");
-		return { "http.extraHeader": `Authorization: Basic ${basic}` };
 	}
 
 	private authorDomain(): string {
@@ -304,6 +273,7 @@ export class MemoryService {
 		if (!root && !archived && !this.conventions.notes.filenamePattern.test(file)) problems.push("filename does not match the repo's pattern");
 		if (!root && this.conventions.folders.allowed && !this.conventions.folders.allowed.includes(folder)) problems.push(`folder «${folder}» is not in the allowed list`);
 		const title = parsed.meta.title ?? firstH1(parsed.body) ?? name;
+		const asText = (value: unknown): string | null => (typeof value === "string" && value.trim() ? value.trim() : null);
 		const record = {
 			path,
 			name,
@@ -311,6 +281,8 @@ export class MemoryService {
 			title,
 			description: parsed.meta.description,
 			aliases: parsed.meta.aliases,
+			type: asText(parsed.meta.fields[this.conventions.rules?.type.field ?? "type"]),
+			status: asText(parsed.meta.fields[this.conventions.rules?.status?.field ?? "status"]),
 			archived,
 			supersededBy: parsed.meta.superseded,
 			attachment: parsed.meta.attachment,
@@ -430,116 +402,13 @@ export class MemoryService {
 		});
 	}
 
-	// ── git sync ─────────────────────────────────────────────────────────────
+	// ── worktree ─────────────────────────────────────────────────────────────
 
+	/** Puts the worktree back to a commit: a crash mid-write left it dirty, or a write failed before its commit. */
 	private async restoreWorktree(head: string | null): Promise<void> {
 		if (head) await this.git.run(["reset", "-q", "--hard", head]);
 		else await this.git.run(["read-tree", "--empty"], { allowFail: true });
 		await this.git.run(["clean", "-fdq"]);
-	}
-
-	/**
-	 * Fetches and integrates the remote. Fast-forwards when it can, rebases local commits on top otherwise.
-	 * On a rebase conflict the remote wins: local commits are dropped (and logged) and the index follows.
-	 */
-	private async integrateRemoteLocked(): Promise<{ status: "ok" | "unreachable" } | { status: "conflict"; lost: string[] }> {
-		const fetched = await this.git.run(["fetch", "-q", "origin", this.branch], { allowFail: true });
-		if (fetched.code !== 0) {
-			if (/couldn't find remote ref|could not find remote ref/i.test(fetched.stderr)) return { status: "ok" }; // empty remote
-			this.log("warn", "git.fetch_failed", { error: fetched.stderr.trim().split("\n").pop() });
-			return { status: "unreachable" };
-		}
-		const remote = (await this.git.run(["rev-parse", "--verify", "-q", `origin/${this.branch}`], { allowFail: true })).stdout.trim();
-		const local = await this.git.head();
-		if (!remote || remote === local) return { status: "ok" };
-		if (!local) {
-			await this.git.run(["reset", "-q", "--hard", remote]);
-			await this.reconcileAfterMove(null);
-			return { status: "ok" };
-		}
-		const isAncestor = async (a: string, b: string) => (await this.git.run(["merge-base", "--is-ancestor", a, b], { allowFail: true })).code === 0;
-		if (await isAncestor(remote, local)) return { status: "ok" }; // we are only ahead
-		if (await isAncestor(local, remote)) {
-			await this.git.run(["merge", "-q", "--ff-only", remote]);
-			await this.reconcileAfterMove(local);
-			this.log("info", "git.fast_forward", { from: local, to: remote });
-			await this.logRemoteViolations(local, remote);
-			return { status: "ok" };
-		}
-		const rebased = await this.git.run(["rebase", "-q", remote], { allowFail: true });
-		if (rebased.code === 0) {
-			await this.reconcileAfterMove(local);
-			this.log("info", "git.rebased", { onto: remote });
-			const base = (await this.git.run(["merge-base", local, remote], { allowFail: true })).stdout.trim();
-			if (base) await this.logRemoteViolations(base, remote);
-			return { status: "ok" };
-		}
-		await this.git.run(["rebase", "--abort"], { allowFail: true });
-		const lost = (await this.git.out(["log", "--format=%H %s", `${remote}..${local}`])).trim().split("\n").filter(Boolean);
-		await this.git.run(["reset", "-q", "--hard", remote]);
-		await this.git.run(["clean", "-fdq"]);
-		await this.reconcileAfterMove(local);
-		this.log("error", "git.remote_conflict", { dropped: lost.map((l) => l.split(" ")[0]) });
-		return { status: "conflict", lost };
-	}
-
-	private async reconcileAfterMove(previous: string | null): Promise<void> {
-		const head = await this.git.head();
-		const before = this.conventionsHash;
-		await this.loadConventions();
-		if (!head || !previous || before !== this.conventionsHash || !(await this.git.exists(previous))) return this.fullReindex(head);
-		return this.incrementalReindex(previous, head);
-	}
-
-	/** Pushes, integrating the remote first when the push is rejected. */
-	private async pushLocked(): Promise<{ status: "ok" | "pending" } | { status: "conflict"; lost: string[] }> {
-		if (!this.opts.remote) return { status: "ok" };
-		for (let attempt = 0; attempt < 3; attempt++) {
-			const r = await this.git.run(["push", "-q", "origin", `HEAD:refs/heads/${this.branch}`], { allowFail: true });
-			if (r.code === 0) {
-				if (this.pushPending) this.log("info", "git.push_recovered", {});
-				this.pushPending = false;
-				this.pushDelay = this.opts.pushRetry?.initialMs ?? 30_000;
-				return { status: "ok" };
-			}
-			if (/\[rejected\]|non-fast-forward|fetch first|stale info|\[remote rejected\]/.test(r.stderr) && !/remote rejected.*(denied|protected|permission)/i.test(r.stderr)) {
-				const integrated = await this.integrateRemoteLocked();
-				if (integrated.status === "conflict") return integrated;
-				if (integrated.status === "unreachable") break;
-				continue;
-			}
-			this.log("warn", "git.push_failed", { error: r.stderr.trim().split("\n").pop() });
-			break;
-		}
-		this.pushPending = true;
-		this.schedulePushRetry();
-		return { status: "pending" };
-	}
-
-	private schedulePushRetry(): void {
-		if (this.pushTimer) return;
-		this.pushTimer = setTimeout(() => {
-			this.pushTimer = null;
-			this.lock
-				.run(async () => {
-					if (!this.pushPending) return;
-					const r = await this.pushLocked();
-					if (r.status === "pending") this.pushDelay = Math.min(this.pushDelay * 2, this.opts.pushRetry?.maxMs ?? 600_000);
-				})
-				.catch((error) => this.log("error", "git.push_retry_failed", { error: String(error) }));
-		}, this.pushDelay);
-		this.pushTimer.unref();
-	}
-
-	private async syncLocked(source: string): Promise<void> {
-		this.syncRequested = false;
-		if (!this.opts.remote) return;
-		const r = await this.integrateRemoteLocked();
-		if (r.status === "conflict") return;
-		const head = await this.git.head();
-		const remote = (await this.git.run(["rev-parse", "--verify", "-q", `origin/${this.branch}`], { allowFail: true })).stdout.trim();
-		if (head && head !== remote && r.status === "ok") await this.pushLocked();
-		this.log("debug", "sync.done", { source });
 	}
 
 	// ── helpers ──────────────────────────────────────────────────────────────
@@ -647,7 +516,7 @@ export class MemoryService {
 			this.rulesBatch.push({ after, before: previous, opts });
 			return [];
 		}
-		const check = checkWrite(rules, after, previous, opts);
+		const check = checkWrite(rules, after, previous, { ...opts, context: opts.context ?? this.ruleContext() });
 		if (check.blocking.length) {
 			throw new MemoryError("RULES_VIOLATED", blockingMessage(after.path, check), {
 				path: after.path,
@@ -658,11 +527,23 @@ export class MemoryService {
 		return opts.quiet ? [] : warningTexts(check).map((w) => ({ ...w, path: after.path }));
 	}
 
+	/** What the rules may ask about other notes: their type, from `overrides` (a submission) or else the index. */
+	private ruleContext(overrides?: Map<string, string | null>): RuleContext {
+		return { typeOf: (path) => (overrides?.has(path) ? (overrides.get(path) ?? null) : (this.index.getNote(path)?.type ?? null)) };
+	}
+
 	/** The notes of a `publish`, judged together (see `checkBatch`): RULES_VIOLATED for all its problems at once. */
 	private judgeBatch(entries: BatchEntry[]): Warning[] {
 		const rules = this.conventions.rules;
 		if (!rules || entries.length === 0) return [];
-		const checks = checkBatch(rules, entries);
+		// The notes of the submission count as they will be (a main note written in the same publish, for example).
+		const pending = new Map<string, string | null>();
+		for (const e of entries) {
+			if (e.before && !e.after) pending.set(e.before.path, null);
+			if (e.after) pending.set(e.after.path, typeOfText(rules, e.after.text));
+		}
+		const context = this.ruleContext(pending);
+		const checks = checkBatch(rules, entries.map((e) => ({ ...e, opts: { ...e.opts, context: e.opts.context ?? context } })));
 		const results = entries.flatMap((e, i) => (e.after ? [{ path: e.after.path, check: checks[i] as WriteCheck, quiet: e.opts.quiet ?? false }] : []));
 		if (results.some((r) => r.check.blocking.length)) {
 			throw new MemoryError("RULES_VIOLATED", batchBlockingMessage(results), { violations: results.flatMap((r) => r.check.blocking.map((v) => ({ path: r.path, ...violationJson(v) }))) });
@@ -672,7 +553,8 @@ export class MemoryService {
 
 	/**
 	 * Brings the index entries of some paths in line with the worktree without a commit, so the next change of a
-	 * `publish` sees what the previous ones did; `datesAt` also restores their git dates (after a rollback).
+	 * `publish` sees what the previous ones did; `datesAt` also restores their git dates (after a rollback). Links
+	 * are resolved once for the whole submission (`resolveBatchLinks`): that is the expensive half.
 	 */
 	private async refreshIndex(paths: string[], datesAt: string | null = null): Promise<void> {
 		const prepared: (() => void)[] = [];
@@ -693,6 +575,17 @@ export class MemoryService {
 			}
 			for (const apply of prepared) apply();
 			for (const [p, d] of dates) if (p.toLowerCase().endsWith(".md")) this.index.setDates(p, d);
+			this.index.db.exec("COMMIT");
+		} catch (error) {
+			this.index.db.exec("ROLLBACK");
+			throw error;
+		}
+	}
+
+	/** Re-resolves every link once, at the end of a `publish` (or after a rollback of one). */
+	private resolveBatchLinks(): void {
+		this.index.db.exec("BEGIN IMMEDIATE");
+		try {
 			this.index.resolveLinks();
 			this.index.db.exec("COMMIT");
 		} catch (error) {
@@ -702,36 +595,12 @@ export class MemoryService {
 	}
 
 	/**
-	 * Commits that reached the branch from the remote (a push to it, not a tool) cannot be refused any more: the
-	 * problems they added are logged, and `lint` lists them like any other.
+	 * Links that point at a note: the ones already resolved, plus those whose target is still unresolved but
+	 * carries the note's name (a `publish` resolves links only at the end, so the changes inside it can see them).
 	 */
-	private async logRemoteViolations(from: string, to: string): Promise<void> {
-		const rules = this.conventions.rules;
-		if (!rules) return;
-		try {
-			const changes = parseNameStatus(await this.git.out(["diff", "-M", "--name-status", from, to]));
-			// What arrived is one submission: a line may leave the Fuentes of one note for those of another.
-			const entries: { after: NoteText | null; before: NoteText | null }[] = [];
-			for (const c of changes) {
-				if (c.status === "D") {
-					const gone = rulesApply(this.conventions, c.path) ? await this.git.run(["show", `${from}:${c.path}`], { allowFail: true }) : null;
-					if (gone?.code === 0) entries.push({ after: null, before: { path: c.path, text: gone.stdout } });
-					continue;
-				}
-				if (!rulesApply(this.conventions, c.path)) continue;
-				const after = await this.git.run(["show", `${to}:${c.path}`], { allowFail: true });
-				if (after.code !== 0) continue;
-				const beforePath = c.status === "R" && c.from ? c.from : c.path;
-				const before = c.status === "A" || c.status === "C" ? null : await this.git.run(["show", `${from}:${beforePath}`], { allowFail: true });
-				const previous = before && before.code === 0 && rulesApply(this.conventions, beforePath) ? { path: beforePath, text: before.stdout } : null;
-				entries.push({ after: { path: c.path, text: after.stdout }, before: previous });
-			}
-			checkBatch(rules, entries).forEach((check, i) => {
-				if (check.blocking.length) this.log("warn", "rules.remote_violations", { path: entries[i]?.after?.path, from, to, violations: check.blocking.map(violationJson) });
-			});
-		} catch (error) {
-			this.log("warn", "rules.remote_check_failed", { error: String(error) });
-		}
+	private linksTo(path: string): LinkRow[] {
+		const pending = this.index.linksToName(noteName(path));
+		return pending.length === 0 ? this.index.linksIn(path) : [...this.index.linksIn(path), ...pending];
 	}
 
 	/** Relation keys used in the links that `memory.toml` does not allow, in order of appearance. */
@@ -821,7 +690,6 @@ export class MemoryService {
 			return Promise.reject(error);
 		}
 		return this.lock.run(async () => {
-			if (this.syncRequested) await this.syncLocked("before-write");
 			const before = await this.git.head();
 			let applied: Awaited<ReturnType<typeof apply>>;
 			try {
@@ -843,17 +711,7 @@ export class MemoryService {
 			if (before) await this.incrementalReindex(before, commit);
 			else await this.fullReindex(commit);
 			const warnings = [...(applied.warnings ?? [])];
-			const pushed = await this.pushLocked();
 			const contentPath = applied.contentPath ?? applied.result.path;
-			if (pushed.status === "conflict") {
-				const current = (await this.exists(contentPath)) ? await this.readText(contentPath) : null;
-				throw new MemoryError("REMOTE_CONFLICT", "Someone changed the memory at the same time and the changes collided; yours was not kept. Read the note again and redo the change.", {
-					path: contentPath,
-					hash: current === null ? null : blobHash(current),
-					content: current,
-				});
-			}
-			if (pushed.status === "pending") warnings.push({ code: "PUSH_PENDING", message: "Saved and committed here, but the remote is unreachable; it will be pushed automatically." });
 			const hash = (await this.exists(contentPath)) && contentPath.endsWith(".md") ? blobHash(await this.readText(contentPath)) : null;
 			const finalCommit = (await this.git.head()) as string;
 			this.log("info", "memory.write", { client: client.id, tool, path: applied.result.path, commit: finalCommit.slice(0, 12), warnings: warnings.map((w) => w.code) });
@@ -898,8 +756,13 @@ export class MemoryService {
 		return lines.join("\n");
 	}
 
-	/** What the server sends as MCP `instructions`: the repo's rules file plus the short index. */
+	/**
+	 * What the server sends as MCP `instructions`: the repo's rules file plus the short index. It depends on HEAD
+	 * (the index) and on `memory.toml`, so it is cached under both and only computed when a client initializes.
+	 */
 	async instructions(): Promise<string> {
+		const key = `${(await this.git.head()) ?? ""}|${this.conventionsHash}`;
+		if (this.instructionsCache?.key === key) return this.instructionsCache.text;
 		const parts = [
 			"This server is a shared, git-versioned memory of Markdown notes. Every write is a commit attributed to you; give a one-line `reason` in the user's language. Search before creating notes; read a note before rewriting it and pass back its `hash`. Link notes with [[name]]. To say how two notes relate, write the link as a field, `key:: [[name]]` on its own line or `[key:: [[name]]]` inside a sentence; `links` can then filter by that key.",
 			`If this host is not set up to use this memory yet, follow the \`setup\` prompt or the \`${SETUP_GUIDE_URI}\` resource (or ${SETUP_GUIDE_URL}).`,
@@ -916,7 +779,9 @@ export class MemoryService {
 			if (text) parts.push(`## Rules of this memory (${file})\n\n${text.trim()}`);
 		}
 		parts.push(`## Index\n\n${this.renderShortIndex()}`);
-		return parts.join("\n\n");
+		const text = parts.join("\n\n");
+		this.instructionsCache = { key, text };
+		return text;
 	}
 
 	list(args: { folder?: string; include_archive?: boolean; limit?: number; cursor?: string }) {
@@ -948,7 +813,17 @@ export class MemoryService {
 	}
 
 	private searchOpts(args: SearchArgs) {
-		return { folder: args.folder ? args.folder.replace(/\/+$/, "") : null, includeArchive: args.include_archive ?? false, limit: Math.min(Math.max(args.limit ?? 10, 1), 50) };
+		const list = (v: string | string[] | undefined) => (v === undefined ? null : (Array.isArray(v) ? v : [v]).map((s) => s.trim().toLowerCase()).filter(Boolean) || null);
+		return {
+			folder: args.folder ? args.folder.replace(/\/+$/, "") : null,
+			includeArchive: args.include_archive ?? false,
+			limit: Math.min(Math.max(args.limit ?? 10, 1), 50),
+			offset: Math.max(Math.trunc(args.offset ?? 0), 0),
+			types: list(args.type),
+			statuses: list(args.status),
+			groupByNote: args.group_by_note ?? true,
+			highlight: args.highlight ?? true,
+		};
 	}
 
 	private ftsQuery(args: SearchArgs) {
@@ -957,16 +832,17 @@ export class MemoryService {
 		return q;
 	}
 
-	private textHits(args: SearchArgs, limit?: number): { mode: "all" | "any"; hits: SearchHit[] } {
+	private textHits(args: SearchArgs, limit?: number): { mode: "all" | "any"; hits: SearchHit[]; total: number } {
 		const q = this.ftsQuery(args);
 		const opts = { ...this.searchOpts(args), ...(limit ? { limit } : {}) };
 		let mode: "all" | "any" = "all";
-		let hits = this.index.search(q.and, opts);
-		if (hits.length === 0 && q.or !== q.and) {
-			hits = this.index.search(q.or, opts);
+		let page = this.index.search(q.and, opts);
+		// Only when «all words» has nothing at all: a page past the end is empty but not a reason to widen the search.
+		if (page.total === 0 && q.or !== q.and) {
+			page = this.index.search(q.or, opts);
 			mode = "any";
 		}
-		return { mode, hits };
+		return { mode, hits: page.hits, total: page.total };
 	}
 
 	private static hitsOut(hits: (SearchHit | null)[]) {
@@ -977,16 +853,67 @@ export class MemoryService {
 				name: h.name,
 				description: h.description,
 				...(h.updatedAt ? { updated_at: h.updatedAt } : {}),
+				type: h.type,
+				status: h.status,
 				section: { heading: h.section.heading, level: h.section.level, line_start: h.section.lineStart, line_end: h.section.lineEnd },
 				snippet: h.snippet,
 				score: h.score,
 			}));
 	}
 
-	/** Full-text search (FTS5 bm25). */
+	/** Full-text search (FTS5 bm25): one page of hits, the total, and where the next page starts. */
 	search(args: SearchArgs) {
-		const { mode, hits } = this.textHits(args);
-		return { mode, hits: MemoryService.hitsOut(hits) };
+		const offset = Math.max(Math.trunc(args.offset ?? 0), 0);
+		const limit = this.searchOpts(args).limit;
+		const { mode, hits, total } = this.textHits({ ...args, offset });
+		const next = offset + hits.length;
+		return { mode, hits: MemoryService.hitsOut(hits), total, ...(next < total ? { next_offset: next } : {}) };
+	}
+
+	/** The pending lines of the memory (sections named «Pendiente» by default), soonest first. */
+	deadlines(args: { folder?: string; include_undated?: boolean; include_done?: boolean; limit?: number }) {
+		const folder = args.folder ? args.folder.trim().replace(/^\.\/|\/+$/g, "") : null;
+		const limit = Math.min(Math.max(args.limit ?? 200, 1), 1000);
+		// The validation rule is off by default (no sections); the deadlines are still read from «Pendiente».
+		const configured = this.conventions.rules?.pending.sections;
+		const sectionNames = configured?.length ? configured : [PENDING_SECTION];
+		const notes = new Map(this.index.allNotes().map((n) => [n.path, n]));
+		const byNote = new Map<string, ReturnType<SearchIndex["sectionTexts"]>>();
+		for (const section of this.index.sectionTexts()) {
+			const note = notes.get(section.path);
+			if (!note || note.archived || (folder !== null && note.folder !== folder)) continue;
+			let list = byNote.get(section.path);
+			if (!list) {
+				list = [];
+				byNote.set(section.path, list);
+			}
+			list.push(section);
+		}
+		const items: DeadlineItem[] = [];
+		for (const [path, noteSections] of byNote) {
+			const note = notes.get(path) as NoteRow;
+			for (const section of sectionsMatching(noteSections, sectionNames).matched) {
+				section.text.split("\n").forEach((line, i) => {
+					const pending = parsePendingLine(line);
+					if (!pending) return;
+					if (pending.done && !args.include_done) return;
+					if (pending.date === null && !args.include_undated) return;
+					items.push({
+						path: note.path,
+						name: note.name,
+						line: section.lineStart + i,
+						done: pending.done,
+						text: pending.text,
+						owner: pending.owner,
+						date: pending.date,
+						date_precision: pending.precision,
+						origin: pending.origin,
+					});
+				});
+			}
+		}
+		items.sort((a, b) => deadlineKey(a).localeCompare(deadlineKey(b)) || a.path.localeCompare(b.path) || a.line - b.line);
+		return { items: items.slice(0, limit), total: items.length, ...(items.length > limit ? { truncated: true } : {}) };
 	}
 
 	async read(args: NoteRef & { section?: string; revision?: string }) {
@@ -1294,7 +1221,7 @@ export class MemoryService {
 		let movedText = current;
 		if (renamed) {
 			const oldKey = oldName.toLowerCase();
-			const referrers = new Set(this.index.linksIn(row.path).map((l) => l.srcPath));
+			const referrers = new Set(this.linksTo(row.path).map((l) => l.srcPath));
 			referrers.add(row.path);
 			for (const src of referrers) {
 				const file = src === row.path ? to : src;
@@ -1328,7 +1255,7 @@ export class MemoryService {
 		// In a publish, what this note had may go to another note of it (merging notes).
 		if (this.rulesBatch && rulesApply(this.conventions, row.path)) this.rulesBatch.push({ after: null, before: { path: row.path, text: current }, opts: {} });
 		const binary = row.attachment ? joinPath(dirOf(row.path), row.attachment) : null;
-		const backlinks = [...this.index.linksIn(row.path), ...(binary ? this.index.linksIn(binary) : [])].filter((l) => l.srcPath !== row.path);
+		const backlinks = [...this.linksTo(row.path), ...(binary ? this.index.linksIn(binary) : [])].filter((l) => l.srcPath !== row.path);
 		if (backlinks.length) {
 			throw new MemoryError("HAS_BACKLINKS", `Other notes link to «${row.name}»; fix or remove those links first.`, { backlinks: backlinks.map((l) => ({ src_path: l.srcPath, line: l.line })) });
 		}
@@ -1346,7 +1273,7 @@ export class MemoryService {
 	 * each commit becomes one commit here with its reason, the changes run in order (each sees what the previous ones
 	 * did), and the rules are judged over the whole submission at the end, so a line may leave the «Fuentes» of one
 	 * note if it enters, unchanged, those of another (splitting a note). All or nothing: if any change or rule fails,
-	 * the worktree, the branch and the index go back to where they were and nothing is pushed.
+	 * the worktree, the branch and the index go back to where they were. Links are resolved once, at the end.
 	 */
 	publish(
 		client: ClientIdentity,
@@ -1366,7 +1293,6 @@ export class MemoryService {
 			return Promise.reject(error);
 		}
 		return this.lock.run(async () => {
-			if (this.syncRequested) await this.syncLocked("before-write");
 			const before = await this.git.head();
 			const touched = new Set<string>();
 			const made: { commit: string; reason: string; changes: Record<string, unknown>[] }[] = [];
@@ -1409,17 +1335,11 @@ export class MemoryService {
 				this.rulesBatch = null;
 			}
 			if (made.length === 0) return { commit: before, commits: [], hashes: {}, warnings };
+			// Every change above left the worktree in its place: the links of the whole submission are resolved once.
+			this.resolveBatchLinks();
 			const head = (await this.git.head()) as string;
 			if (before) await this.incrementalReindex(before, head);
 			else await this.fullReindex(head);
-			const pushed = await this.pushLocked();
-			if (pushed.status === "conflict") {
-				throw new MemoryError("REMOTE_CONFLICT", "Someone changed the memory at the same time and the changes collided; nothing of this submission was kept. Bring your copy up to date and send it again.", {
-					paths: [...touched],
-				});
-			}
-			if (pushed.status === "pending") warnings.push({ code: "PUSH_PENDING", message: "Saved and committed here, but the remote is unreachable; it will be pushed automatically." });
-			// A push that had to rebase rewrites the hashes: ours are the last ones on the branch.
 			const final = (await this.git.out(["rev-list", "--reverse", `-n${made.length}`, "HEAD"])).trim().split("\n");
 			made.forEach((m, i) => {
 				m.commit = final[i] ?? m.commit;

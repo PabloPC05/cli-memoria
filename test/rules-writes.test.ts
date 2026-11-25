@@ -7,9 +7,8 @@ import { main } from "../src/cli.js";
 import { parseConventions } from "../src/conventions.js";
 import { MemoryError } from "../src/errors.js";
 import { Git } from "../src/git.js";
-import type { Level } from "../src/log.js";
 import { blobHash } from "../src/util.js";
-import { makeMemory, otherClone, writer } from "./helpers.js";
+import { makeMemory, writer } from "./helpers.js";
 import { RULES } from "./rules-config.js";
 
 const FOLDERS = `[folders]
@@ -202,18 +201,6 @@ describe("rules on every write path", () => {
 		await refused(m.attach(writer, { path: "projects/otro.png", source: { base64: png }, description: "Otro", type: "Imagen", reason: "Otro" }));
 	});
 
-	it("commits pushed to the remote cannot be refused any more: their new problems are logged", async () => {
-		const events: { event: string; data: Record<string, unknown> }[] = [];
-		env = await makeMemory(SEED, { log: (_level: Level, event: string, data: Record<string, unknown> = {}) => events.push({ event, data }) });
-		const other = await otherClone(env.root, env.bare as string);
-		await other.write("topics/vieja.md", VIEJA.replace("Otra línea.", "Otra línea con memoria_write."));
-		await other.commitPush("Desde fuera");
-		env.memory.requestSync("test");
-		for (let i = 0; i < 100 && !events.some((e) => e.event === "rules.remote_violations"); i++) await new Promise((r) => setTimeout(r, 50));
-		const logged = events.find((e) => e.event === "rules.remote_violations");
-		expect(logged?.data.path).toBe("topics/vieja.md");
-		expect((logged?.data.violations as { rule: string; line: number }[]).map((v) => [v.rule, v.line])).toEqual([["obsolete", 11]]);
-	});
 });
 
 describe("publish: several commits as one submission", () => {
@@ -414,5 +401,61 @@ describe("lint and check report the same rules", () => {
 		expect(await main(["check", m.opts.repoDir, `${start}..HEAD~1`])).toBe(0);
 		expect(await main(["check", m.opts.repoDir, "--json"])).toBe(0);
 		expect(JSON.parse(String(out.mock.calls.at(-1)?.[0]))).toMatchObject({ notes: 4, with_problems: 1, notes_by_rule: { type: 1, obsolete: 1, forbidden_section: 1 } });
+	});
+});
+
+describe("rules.status: a subnote takes the status of its project", () => {
+	const STATUS_TOML = `[folders]
+allowed = ["projects", "areas", "archive"]
+archive = "archive"
+
+[notes]
+superseded_field = "superseded_by"
+
+[attachments]
+page_heading = "Page {n}"
+
+[rules.status]
+types = ["project"]
+action = "block"
+`;
+	const doc = (name: string, type: string, status?: string) => `---\nname: ${name}\ndescription: ${name} de prueba\ntype: ${type}\n${status ? `status: ${status}\n` : ""}---\n# ${name}\n\nTexto.\n`;
+	let local: Awaited<ReturnType<typeof makeMemory>> | null = null;
+	afterEach(async () => {
+		await local?.cleanup();
+		local = null;
+	});
+
+	it("asks for status in a main note or a project on its own, not in the subnotes of a project", async () => {
+		local = await makeMemory({
+			"memory.toml": STATUS_TOML,
+			"projects/obra/obra.md": doc("Obra", "project", "active"),
+			"areas/casa/casa.md": doc("Casa", "area"),
+		});
+		const m = local.memory;
+		const create = (path: string, content: string) => m.create(writer, { path, content, reason: "Prueba", confirm_new: true });
+		// Subnotes of a project, also in a subfolder without a main note of its own: they take «obra»'s status.
+		await expect(create("projects/obra/presupuesto.md", doc("Presupuesto", "project"))).resolves.toBeTruthy();
+		await expect(create("projects/obra/clientes/ana-encaje.md", doc("Encaje de Ana", "project"))).resolves.toBeTruthy();
+		// A project on its own (at the top, or inside an area whose main note is not a project) needs its own.
+		await expect(create("projects/suelta.md", doc("Suelta", "project"))).rejects.toMatchObject({ code: "RULES_VIOLATED" });
+		await expect(create("areas/casa/reforma.md", doc("Reforma", "project"))).rejects.toMatchObject({ code: "RULES_VIOLATED" });
+		await expect(create("areas/casa/pintura.md", doc("Pintura", "project", "idea"))).resolves.toBeTruthy();
+
+		// `check` judges the same way, over the tree and over a range committed by hand with a main note and its subnote.
+		const git = new Git(m.opts.repoDir);
+		const conventions = parseConventions(STATUS_TOML);
+		expect((await checkTree(git, conventions)).findings).toEqual([]);
+		const start = (await git.head()) as string;
+		await m.stop();
+		execFileSync("mkdir", ["-p", join(m.opts.repoDir, "projects/nueva")]);
+		await writeFile(join(m.opts.repoDir, "projects/nueva/nueva.md"), doc("Nueva", "project", "waiting"));
+		await writeFile(join(m.opts.repoDir, "projects/nueva/tarea.md"), doc("Tarea", "project"));
+		await writeFile(join(m.opts.repoDir, "projects/sin-estado.md"), doc("Sin estado", "project"));
+		await git.run(["add", "-A"]);
+		await git.run(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "A mano"]);
+		const range = await checkRange(git, conventions, start, "HEAD");
+		expect(range.filter((f) => f.check.blocking.length).map((f) => f.path)).toEqual(["projects/sin-estado.md"]);
+		expect((await checkTree(git, conventions)).findings.map((f) => f.path)).toEqual(["projects/sin-estado.md"]);
 	});
 });
