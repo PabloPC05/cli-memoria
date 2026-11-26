@@ -45,8 +45,10 @@ self:
     init = call('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')
     assert "cli-memoria" in init, init
 
-    # The memory is notes only: no attachments, no uploads, no OCR.
+    # The memory is notes only: no attachments, no uploads, no OCR. The list is anchored on a tool that must be
+    # there, so a failed call cannot make the check pass on its own.
     tools = call('{"jsonrpc":"2.0","id":9,"method":"tools/list","params":{}}')
+    assert '"search"' in tools, tools
     assert "attach" not in tools, tools
     machine.fail("curl -sf -X PUT http://127.0.0.1:8782/uploads/x.pdf -H 'Authorization: Bearer " + token + "' --data-binary x")
 
