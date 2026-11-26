@@ -3,12 +3,16 @@ import { MemoryError } from "./errors.js";
 import { maskCode } from "./markdown.js";
 import { formatViolation, noteViolations, RECORD, rulesApply } from "./rules.js";
 import type { NoteRow, SearchIndex } from "./search-index.js";
-import { dirOf, joinPath, lookAlikePairs, noteLabels, normalizeWords, topFolder } from "./util.js";
+import { lookAlikePairs, noteLabels, normalizeWords, topFolder } from "./util.js";
 
 /**
  * Lint: the cheap, structural half of maintaining the memory. Everything here comes from the index and git dates,
  * with no model involved; it only finds candidates. Deciding whether two notes contradict each other, whether an
  * old inference still holds or how to split a note is the agent's job.
+ *
+ * The memory is notes only: its documents live in the archives of lisa. A repo that still carries files of another
+ * kind is read without breaking (they are catalogued as assets, so links to them resolve) and its `binary` kind says
+ * where each one should go.
  */
 
 /** Kinds in priority order: problems that break things first, housekeeping last. */
@@ -22,6 +26,7 @@ export const LINT_KINDS = [
 	"unlinked_mention",
 	"orphan",
 	"stale",
+	"binary",
 	"oversized",
 ] as const;
 
@@ -136,8 +141,6 @@ export function lint(index: SearchIndex, conventions: Conventions, args: LintArg
 	const notes = all.filter(inScope);
 	const links = wanted.has("broken_link") || wanted.has("missing_page") || wanted.has("orphan") || wanted.has("unlinked_mention") ? index.allLinks() : [];
 	const texts = wanted.has("old_inference") || wanted.has("unlinked_mention") ? index.sectionTexts().filter((s) => inScope(byPath.get(s.path))) : [];
-	/** Path of a note's attachment binary: links to it count as links to the note. */
-	const binaryOf = (n: NoteRow) => (n.attachment ? joinPath(dirOf(n.path), n.attachment) : null);
 	const items: LintItem[] = [];
 
 	if (wanted.has("problems")) {
@@ -158,7 +161,7 @@ export function lint(index: SearchIndex, conventions: Conventions, args: LintArg
 			if (!rulesApply(conventions, n.path)) continue;
 			const text = readNote(n.path);
 			if (text === null) continue;
-			const found = noteViolations(conventions.rules, n.path, text, undefined, { typeOf: (p) => byPath.get(p)?.type ?? null });
+			const found = noteViolations(conventions.rules, n.path, text, { typeOf: (p: string) => byPath.get(p)?.type ?? null });
 			if (!found.length) continue;
 			const byRule: Record<string, number> = {};
 			for (const v of found) byRule[v.rule] = (byRule[v.rule] ?? 0) + 1;
@@ -246,7 +249,7 @@ export function lint(index: SearchIndex, conventions: Conventions, args: LintArg
 		}
 		const linked = new Set<string>();
 		for (const l of links) if (l.targetPath) linked.add(`${l.srcPath}\0${l.targetPath}`);
-		const linksTo = (src: string, target: NoteRow) => linked.has(`${src}\0${target.path}`) || (binaryOf(target) !== null && linked.has(`${src}\0${binaryOf(target)}`));
+		const linksTo = (src: string, target: NoteRow) => linked.has(`${src}\0${target.path}`);
 		const pairs = new Map<string, { src: string; target: string; label: string; line: number; snippet: string; count: number }>();
 		for (const s of texts) {
 			const raw = s.text.split("\n");
@@ -294,8 +297,7 @@ export function lint(index: SearchIndex, conventions: Conventions, args: LintArg
 		}
 		for (const n of notes) {
 			if (settings.orphanExclude.includes(n.folder)) continue;
-			const bin = binaryOf(n);
-			if (incoming.has(n.path) || (bin && incoming.has(bin))) continue;
+			if (incoming.has(n.path)) continue;
 			items.push({ kind: "orphan", notes: [n.path], detail: { links_out: outgoing.get(n.path) ?? 0 } });
 		}
 	}
@@ -311,9 +313,13 @@ export function lint(index: SearchIndex, conventions: Conventions, args: LintArg
 		items.push(...found.map((f) => f.item));
 	}
 
+	if (wanted.has("binary")) {
+		for (const a of index.allAssets()) items.push({ kind: "binary", notes: [a.path], detail: { bytes: a.size, fix: "move it to the archives of lisa and cite it with [doc: …]" } });
+	}
+
 	if (wanted.has("oversized")) {
 		const sections = index.sectionCounts();
-		const big = notes.filter((n) => !n.attachment && !isRecord(n) && n.size > settings.maxBytes).sort((a, b) => b.size - a.size);
+		const big = notes.filter((n) => !isRecord(n) && n.size > settings.maxBytes).sort((a, b) => b.size - a.size);
 		for (const n of big) items.push({ kind: "oversized", notes: [n.path], detail: { bytes: n.size, sections: sections.get(n.path) ?? 0 } });
 	}
 

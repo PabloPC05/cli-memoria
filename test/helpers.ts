@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Git } from "../src/git.js";
 import { type ClientIdentity, MemoryService, type MemoryOptions } from "../src/memory.js";
-import { UploadStore } from "../src/uploads.js";
 
 export const writer: ClientIdentity = { id: "test-writer", name: "Test Writer", scope: "write" };
 export const reader: ClientIdentity = { id: "test-reader", name: "Test Reader", scope: "read" };
@@ -51,9 +50,6 @@ index_full = ["yo"]
 
 [notes]
 superseded_field = "sustituida_por"
-
-[attachments]
-page_heading = "Página {n}"
 `;
 
 export async function makeMemory(
@@ -62,12 +58,9 @@ export async function makeMemory(
 ): Promise<{ root: string; memory: MemoryService; cleanup: () => Promise<void> }> {
 	const root = await tempDir();
 	await seedRepo(join(root, "data", "repo"), { "memory.toml": CONVENTIONS, ...files });
-	const uploads = new UploadStore(join(root, "data", "uploads"));
-	await uploads.init();
 	const memory = new MemoryService({
 		repoDir: join(root, "data", "repo"),
 		indexPath: join(root, "data", "index.sqlite"),
-		uploads,
 		...opts,
 	});
 	await memory.start();

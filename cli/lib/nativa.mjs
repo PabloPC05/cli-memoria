@@ -77,7 +77,7 @@ const SINONIMOS = {
   create: ["crear"], add: ["crear"], new: ["crear"],
   edit: ["editar"], write: ["escribir"],
   move: ["mover"], mv: ["mover"], rename: ["mover"],
-  attach: ["adjuntar"], revert: ["revertir"], undo: ["revertir"], publish: ["publicar"]
+  revert: ["revertir"], undo: ["revertir"], publish: ["publicar"]
 };
 
 /** ¿Es la petición de ayuda? (`--help`, `-h`, `help`, `ayuda`) */

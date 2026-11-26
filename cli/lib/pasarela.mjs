@@ -8,7 +8,7 @@ const VERSION = "2.3.0";
 const PROTOCOLO = "2025-06-18";
 /** Sin noticias del servidor durante tanto, una llamada sencilla se da por perdida. */
 const TIEMPO_SIMPLE_MS = 60_000;
-/** Una llamada a herramienta puede tardar (OCR, publish grande): se da por perdida solo tras tanto silencio. */
+/** Una llamada a herramienta puede tardar (un publish grande): se da por perdida solo tras tanto silencio. */
 const SILENCIO_LLAMADA_MS = 5 * 60_000;
 
 /** Un error con su código de salida: 1 herramienta, 2 uso o configuración, 3 red o protocolo. */

@@ -401,23 +401,20 @@ describe("recent and revert", () => {
 		expect(await repoGit().head()).toBe(first.commit);
 	});
 
-	it("removes an attachment when undoing attach, but never rewrites a binary from history", { timeout: 60_000 }, async () => {
+	it("removes a binary when undoing the commit that added it, but never restores one from history", { timeout: 60_000 }, async () => {
 		env = await makeMemory(SEED);
 		const m = env.memory;
-		if (!(await m.git.lfsAvailable())) return;
-		const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3]).toString("base64");
-		const att = await m.attach(writer, { path: "temas/foto.png", source: { base64: png }, description: "Una foto", reason: "Foto" });
-		const attrs = await readFile(join(env.root, "data/repo/.gitattributes"), "utf8");
-		const undo = await m.revert(writer, { commit: att.commit as string, reason: "Sin foto" });
-		expect((undo.changes as { path: string }[]).map((c) => c.path).sort()).toEqual(["temas/foto.md", "temas/foto.png"]);
-		expect(await readFile(join(env.root, "data/repo/.gitattributes"), "utf8")).toBe(attrs); // LFS rules stay
-		await expectCode(m.read({ name: "foto" }), "NOT_FOUND");
+		// A file that is not a note, committed by hand: its place is the archives of lisa, but an old repo may still
+		// carry one and nothing here may break on it.
+		await writeFile(join(env.root, "data/repo/temas/foto.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3]));
+		await repoGit().run(["add", "--", "temas/foto.png"]);
+		await repoGit().run(["commit", "-q", "-m", "una foto"]);
+		const added = (await repoGit().head()) as string;
+		const undo = await m.revert(writer, { commit: added, reason: "Sin foto" });
+		expect((undo.changes as { path: string }[]).map((c) => c.path)).toEqual(["temas/foto.png"]);
 		const e = await expectCode(m.revert(writer, { commit: undo.commit as string, reason: "Volver a poner la foto" }), "NOT_RESTORABLE");
 		expect(e.details.path).toBe("temas/foto.png");
 		expect(await repoGit().isClean()).toBe(true);
-		// The note alone can come back.
-		const back = await m.revert(writer, { commit: undo.commit as string, path: "temas/foto.md", reason: "Solo la nota" });
-		expect(back.changes).toEqual([{ path: "temas/foto.md", change: "restored" }]);
 	});
 });
 

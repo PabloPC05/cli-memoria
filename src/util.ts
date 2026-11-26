@@ -290,7 +290,7 @@ export function checkPath(input: unknown, conventions: Conventions, kind: "note"
 	if (parts.some((p) => p.startsWith("."))) throw bad("hidden files and folders (like .git) are off limits");
 	const isMd = /\.md$/i.test(path);
 	if (kind === "note" && !isMd) throw bad("notes must end in .md");
-	if (kind === "asset" && (isMd || !/\.[A-Za-z0-9]+$/.test(path))) throw bad("attachments need a non-.md extension");
+	if (kind === "asset" && (isMd || !/\.[A-Za-z0-9]+$/.test(path))) throw bad("a file that is not a note needs a non-.md extension");
 	if (parts.length === 1) {
 		if (kind === "asset" || !conventions.folders.rootFiles.includes(path)) {
 			throw bad(`only ${conventions.folders.rootFiles.join(", ") || "no files"} may live at the root; put it in a folder`);
@@ -301,7 +301,7 @@ export function checkPath(input: unknown, conventions: Conventions, kind: "note"
 	return path;
 }
 
-/** New names must follow the repo's filename pattern; attachments are checked as if they were `<stem>.md`. */
+/** New names must follow the repo's filename pattern; other files are checked as if they were `<stem>.md`. */
 export function checkNewFilename(path: string, conventions: Conventions): void {
 	const file = path.split("/").pop() as string;
 	const asNote = `${file.replace(/\.[^.]+$/, "")}.md`;

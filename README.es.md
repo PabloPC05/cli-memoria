@@ -12,7 +12,7 @@ Una memoria autoalojada en git para agentes de IA: una **CLI compacta (`memoria`
 - **Seguro con varios agentes a la vez.** Una sola cola de escritura, concurrencia optimista (el `hash` de `read`) y `publish` atómico de varios commits. El servidor es el único que escribe: no hay remoto git al que empujar ni del que traer.
 - **Tus convenciones, no las nuestras.** El repo de notas declara sus carpetas, su frontmatter obligatorio, sus reglas de escritura y sus reglas de nombres en `memory.toml`; su `AGENTS.md` llega a todos los clientes como instrucciones MCP, junto con un índice corto.
 - **Tokens fijos por agente.** Un token Bearer por agente (permiso `read` o `write`), guardado solo como hash SHA-256 y recargable con `SIGHUP`. Los tokens de solo lectura solo ven herramientas de lectura.
-- **Adjuntos.** Los binarios van a git LFS con una nota al lado que contiene su texto (los PDF, con `pdftotext`; los PDF escaneados y las imágenes, con OCR local mediante `tesseract` si está instalado), así que también se encuentran al buscar.
+- **Solo notas.** La memoria es Markdown y nada más: ni archivos adjuntos, ni OCR, ni git-lfs. Los documentos viven en los archivos de lisa y la nota los cita en su texto. Un repo que aún lleve un binario se lee sin romper nada (se cataloga para que los enlaces a él sigan resolviéndose) y `lint` lo señala como `binary` hasta que se vaya.
 - **Enlaces con tipo.** `works_at:: [[acme]]` dice qué significa un enlace, y `links` puede filtrar por él.
 
 Cómo funciona por dentro (índice, flujo de escritura, concurrencia, autenticación): [docs/design.md](docs/design.md). Diseño y evaluación de las reglas de escritura: [docs/normas-al-escribir.md](docs/normas-al-escribir.md).
@@ -55,7 +55,7 @@ En Claude Code también puede instalar, si quieres, un hook que le acerca al age
 | `history` | Commits que tocaron una nota: quién, cuándo, por qué |
 | `recent` | Últimos cambios de toda la memoria: por commit cuándo, quién (autor y cliente), herramienta, motivo y las notas que tocó; filtros `since` (`2026-05-01` o `7d`), `folder`, `client` |
 | `deadlines` | Las líneas pendientes de las notas, lo más próximo primero: las de las secciones «Pendiente», un item por línea (`- [ ] qué · quién · 2026-03-14 [origen]`). Las de solo mes abren su mes y las que no tienen fecha van al final; `include_done`, `include_undated`, `folder`, `limit` |
-| `lint` | Lista de mantenimiento, lo más grave primero: frontmatter roto y notas sustituidas fuera del archivo, incumplimientos de `[rules]`, enlaces rotos, posibles duplicados, deducciones antiguas, páginas que faltan, menciones sin enlace, notas huérfanas, sin tocar hace mucho o demasiado grandes. Cuenta por tipo; filtra por `kinds`, `folder` y `limit` |
+| `lint` | Lista de mantenimiento, lo más grave primero: frontmatter roto y notas sustituidas fuera del archivo, incumplimientos de `[rules]`, enlaces rotos, posibles duplicados, deducciones antiguas, páginas que faltan, menciones sin enlace, notas huérfanas, sin tocar hace mucho, archivos que no son notas (`binary`) y notas demasiado grandes. Cuenta por tipo; filtra por `kinds`, `folder` y `limit` |
 | `clients` | Quién está conectado: cada token con su última conexión (hora y herramienta), escrituras en los últimos 7 y 30 días y la versión de `memory-setup` que dejó anotada en las notas. Nunca devuelve secretos |
 | `create` | Nota nueva; nombres únicos entre carpetas; rechaza duplicados parecidos salvo `confirm_new` |
 | `edit` | Reemplazos de texto exactos, todos o ninguno |
@@ -64,7 +64,6 @@ En Claude Code también puede instalar, si quieres, un hook que le acerca al age
 | `delete` | Borra una nota (queda en el historial); se rechaza mientras otras notas la enlacen |
 | `publish` | Envío atómico de varios commits (`create`, `write`, `move`, `delete`), juzgados en conjunto contra `[rules]` |
 | `revert` | Deshace un commit de `recent`/`history` con un commit nuevo, o solo lo que hizo en una nota; conserva los cambios posteriores que no se solapan y si no, se rechaza con `REVERT_CONFLICT` |
-| `attach` | Guarda un archivo en LFS con una nota al lado en la que se puede buscar |
 
 Los clientes con un token de solo lectura ven solo las herramientas de lectura: `list`, `search`, `deadlines`, `read`, `links`, `history`, `recent`, `lint` y `clients`.
 
@@ -107,10 +106,6 @@ max_description  = 200
 [instructions]
 file = "AGENTS.md"
 
-[attachments]
-page_heading = "Page {n}"
-ocr_notice   = "Text recognised with OCR ({languages}); it may contain errors."
-
 [relations]
 allowed = ["works_at", "lives_with"]  # avisa con otras claves; sin esto, se sugieren las que estén en uso
 
@@ -120,7 +115,7 @@ orphan_exclude     = ["me"]        # nunca se avisan como huérfanas; por defect
 stale_days         = 180           # sin cambios más tiempo → stale
 inference_days     = 90            # «(deducido, 2026-01-31)» más antiguo → old_inference
 inferred_markers   = ["deducido"]  # palabras de procedencia que marcan una deducción
-max_bytes          = 16384         # más grande → oversized (las notas de adjuntos no cuentan)
+max_bytes          = 16384         # más grande → oversized
 missing_page_min   = 2             # un destino que no existe enlazado desde tantas notas → missing_page
 mention_min_length = 4             # nombre o alias más corto que se busca como mención sin enlace
 mention_exclude_labels = []        # etiquetas que no se buscan nunca como mención (además de folders.index_full)
@@ -140,7 +135,7 @@ action  = "warn"                   # comprueba que cada línea sea «- [ ] qué 
 
 ## Ponerlo en marcha
 
-Requisitos: Node.js 24, git, git-lfs y, de forma opcional, poppler-utils (`pdftotext` para el texto de los PDF y `pdftoppm` para el OCR de escaneos) y `tesseract` con los idiomas que quieras (para el OCR de PDF escaneados e imágenes). Al arrancar se registra qué herramientas hay (`ocr.tools` en el log); si falta alguna, solo deja de estar disponible esa extracción.
+Requisitos: Node.js 24 y git. Nada más: el servidor no lee ni extrae ningún archivo, solo escribe notas Markdown.
 
 ```sh
 npm ci && npm run build
@@ -162,17 +157,11 @@ tokens_file = "tokens.toml"
 address = "127.0.0.1"
 port = 8782
 
-[ocr]                                           # todas las claves son opcionales
-enabled = true
-languages = "spa+eng"                           # códigos de idioma de tesseract; por defecto "eng"
-max_pages = 50                                  # páginas de un PDF escaneado que pasan por OCR
-page_timeout_seconds = 120                      # por página (render + reconocimiento) o imagen
-# dpi = 300; tesseract = "tesseract"; pdftoppm = "pdftoppm"
 ```
 
-Subidas para `attach`: `curl -T file.pdf -H "Authorization: Bearer $TOKEN" http://host:8782/uploads/file.pdf` devuelve un `upload_id`. No hay límite de tamaño. El cuerpo JSON de `/mcp` está limitado a 32 MB, sitio de sobra para un `publish` de varias notas largas.
+El cuerpo JSON de `/mcp` está limitado a 32 MB, sitio de sobra para un `publish` de varias notas largas.
 
-El servidor guarda el repo de notas en `data_dir/repo` y es su único escritor: ni remoto git, ni fetch, ni push, ni webhook que reciba uno. Las claves de la sincronización que se ha quitado (`[remote]`, `fetch_interval_seconds`, `webhook_secret_file`) y el endpoint `/hooks/git` ya no existen; un `config.toml` antiguo sigue valiendo, y el servidor nombra esas claves en el log (`config.ignored_keys`) en vez de negarse a arrancar.
+El servidor guarda el repo de notas en `data_dir/repo` y es su único escritor: ni remoto git, ni fetch, ni push, ni webhook que reciba uno. Las claves de la sincronización que se ha quitado (`[remote]`, `fetch_interval_seconds`, `webhook_secret_file`), las de la extracción de archivos adjuntos que también se ha quitado (`[ocr]`, `pdftotext`) y los endpoints `/hooks/git` y `/uploads/:filename` ya no existen; un `config.toml` antiguo sigue valiendo, y el servidor nombra esas claves en el log (`config.ignored_keys`) en vez de negarse a arrancar.
 
 ### NixOS
 
@@ -185,12 +174,11 @@ El servidor guarda el repo de notas en `data_dir/repo` y es su único escritor: 
     enable = true;
     listen = { address = "127.0.0.1"; port = 8782; };
     tokensFile = "/var/lib/secrets/cli-memoria/tokens.toml";   # root:cli-memoria 0640
-    # ocr = { enable = true; languages = [ "spa" "eng" ]; maxPages = 50; pageTimeoutSeconds = 120; dpi = 300; };
   };
 }
 ```
 
-Tras `cli-memoria token add … --file <tokensFile>`, ejecuta `systemctl reload cli-memoria`. El paquete trae `pdftotext`, `pdftoppm` y `tesseract`; el módulo instala los datos de los idiomas de `ocr.languages` (por defecto español e inglés), y solo compila ese tesseract con `ocr.enable` activado. Consulta [`nix/module.nix`](nix/module.nix) para ver todas las opciones (se mantiene la compatibilidad con `services.my-memory` y `listen.private` para instalaciones existentes). `remote`, `webhookSecretFile` y `fetchIntervalSeconds` se han eliminado del módulo NixOS: retíralos al actualizar si una configuración existente aún los definía.
+Tras `cli-memoria token add … --file <tokensFile>`, ejecuta `systemctl reload cli-memoria`. El paquete trae `git` y nada más: no hay extracción de adjuntos, así que ni `poppler-utils` ni `tesseract`. Consulta [`nix/module.nix`](nix/module.nix) para ver todas las opciones (se mantiene la compatibilidad con `services.my-memory` y `listen.private` para instalaciones existentes). `remote`, `webhookSecretFile`, `fetchIntervalSeconds` y `ocr` se han eliminado del módulo NixOS: retíralos al actualizar si una configuración existente aún los definía, y borra los binarios y sus notas compañeras del repo de notas (ver *Sin archivos adjuntos* abajo).
 
 ### Conectar clientes
 
@@ -231,6 +219,7 @@ Después dale al agente el enlace de instalación ([Dale a tu agente un enlace](
 
 - **`type` y `status`.** `type` dice qué es una nota (una persona, un proyecto, una referencia…, ver `[rules.type]`); `status` dice en qué punto está: `idea`, `active`, `waiting` o `paused`. Los dos son opcionales y solo se exigen si `memory.toml` lo pide; `search` puede filtrar por ellos.
 - **`type: record`.** Una lista o un registro, pensados para ser largos y quedarse como están: `lint` no los marca como `stale` ni `oversized`, y la regla de tamaño de `[rules]` los deja en paz.
+- **Sin archivos adjuntos.** La memoria es Markdown; los documentos viven en los archivos de lisa y la nota los cita en su texto. `lint --kind binary` lista lo que siga siendo un archivo de otro tipo, y nunca tumba al servidor: esos archivos se catalogan (así un `[[enlace]]` a uno sigue resolviéndose) y no se leen nunca. Quitarlos es un commit en git, porque las herramientas solo escriben notas (`revert` puede deshacer el commit que añadió uno, pero nunca recuperar su contenido: `NOT_RESTORABLE`).
 - **Líneas pendientes.** Una sección `## Pendiente` lleva un item por línea, `- [ ] qué · quién · 2026-03-14 [origen]` (`- [x]` si está hecho; la fecha puede ser `2026-03` o `sin plazo`). Las lee la herramienta `deadlines`; `[rules.pending]` comprueba su forma en cada escritura.
 
 ## Desarrollo

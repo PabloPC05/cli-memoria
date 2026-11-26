@@ -35,7 +35,7 @@ export interface Rules {
 	/** Folders the rules leave alone, besides the archive and the root files. */
 	exclude: string[];
 	frontmatter: { required: boolean; action: RuleAction };
-	type: { field: string; allowed: string[] | null; untypedFolders: string[]; attachmentType: string | null; action: RuleAction };
+	type: { field: string; allowed: string[] | null; untypedFolders: string[]; action: RuleAction };
 	/** `types`: the note types that must carry a status (empty: every typed note). */
 	status: { field: string; types: string[]; allowed: string[]; action: RuleAction } | null;
 	/** `sections`: the sections whose lines are pending lines (`sectionLines` shape), checked line by line. */
@@ -105,8 +105,6 @@ export function typeOfText(rules: Rules, text: string): string | null {
 }
 
 export interface CheckOptions {
-	/** Only these rules (attach checks only the frontmatter of the note it generates). */
-	only?: RuleId[];
 	/**
 	 * Lines of append-only sections this write may remove: what a reverted commit itself added, or what enters the
 	 * same section of another note of the same submission (`checkBatch`).
@@ -166,7 +164,7 @@ export function parseRules(value: unknown): Rules | null {
 	const rules: Rules = {
 		exclude: doc.exclude === undefined ? [] : strings(doc.exclude, "rules.exclude", (v) => FOLDER.test(v)),
 		frontmatter: { required: false, action: "block" },
-		type: { field: "type", allowed: null, untypedFolders: [], attachmentType: null, action: "block" },
+		type: { field: "type", allowed: null, untypedFolders: [], action: "block" },
 		status: null,
 		pending: { sections: [], action: "warn" },
 		obsolete: { patterns: [], allowDated: true, action: "block" },
@@ -185,17 +183,14 @@ export function parseRules(value: unknown): Rules | null {
 
 	const type = table(doc.type, "rules.type");
 	if (type) {
-		unknownKeys(type, "rules.type", ["field", "allowed", "untyped_folders", "attachment_type", "action"]);
+		unknownKeys(type, "rules.type", ["field", "allowed", "untyped_folders", "action"]);
 		const field = type.field === undefined ? "type" : text(type.field, "rules.type.field");
 		if (!/^[A-Za-z_][\w-]*$/.test(field)) throw new Error("rules.type.field must be a field name");
 		const allowed = strings(type.allowed, "rules.type.allowed");
-		const attachmentType = type.attachment_type === undefined ? null : text(type.attachment_type, "rules.type.attachment_type");
-		if (attachmentType !== null && !allowed.includes(attachmentType)) throw new Error(`rules.type.attachment_type «${attachmentType}» is not in rules.type.allowed`);
 		rules.type = {
 			field,
 			allowed,
 			untypedFolders: type.untyped_folders === undefined ? [] : strings(type.untyped_folders, "rules.type.untyped_folders", (v) => FOLDER.test(v)),
-			attachmentType,
 			action: action(type, "rules.type", "block"),
 		};
 	}
@@ -387,8 +382,7 @@ export function datesThePast(line: string): boolean {
  * Violations a note has as it stands (every rule but `append_only`, which compares two versions).
  * Used for each side of a write and, on its own, by `lint` and `cli-memoria check`.
  */
-export function noteViolations(rules: Rules, path: string, text: string, only?: RuleId[], context?: RuleContext): Violation[] {
-	const on = (r: RuleId) => !only || only.includes(r);
+export function noteViolations(rules: Rules, path: string, text: string, context?: RuleContext): Violation[] {
 	const p = parse(text);
 	const out: Violation[] = [];
 	const add = (rule: RuleId, act: RuleAction, key: string, line: number | null, message: string, fix: string) => out.push({ rule, line, message, fix, action: act, key: `${rule}:${key}` });
@@ -396,11 +390,11 @@ export function noteViolations(rules: Rules, path: string, text: string, only?: 
 	const typeList = rules.type.allowed?.join(", ") ?? "";
 	const type = p.fields[rules.type.field];
 
-	if (on("frontmatter") && rules.frontmatter.required && !p.hasFrontmatter) {
+	if (rules.frontmatter.required && !p.hasFrontmatter) {
 		add("frontmatter", rules.frontmatter.action, "missing", 1, "the note has no frontmatter", `start it with a block between --- lines holding name, description${typed ? ` and ${rules.type.field} (one of: ${typeList})` : ""}`);
 	}
 
-	if (on("type") && typed && (p.hasFrontmatter || !(on("frontmatter") && rules.frontmatter.required))) {
+	if (typed && (p.hasFrontmatter || !rules.frontmatter.required)) {
 		const allowed = rules.type.allowed as string[];
 		const value = p.fields[rules.type.field];
 		const untyped = rules.type.untypedFolders.length ? ` (only notes in ${rules.type.untypedFolders.map((f) => `${f}/`).join(", ")} go without it)` : "";
@@ -413,7 +407,7 @@ export function noteViolations(rules: Rules, path: string, text: string, only?: 
 		}
 	}
 
-	if (on("status") && rules.status && (p.hasFrontmatter || !(on("frontmatter") && rules.frontmatter.required))) {
+	if (rules.status && (p.hasFrontmatter || !rules.frontmatter.required)) {
 		const { field, types, allowed } = rules.status;
 		// Without `types`, every note that says what it is must say where it stands; a note of another type is left alone.
 		const needs = (t: unknown) => (types.length === 0 ? typeof t === "string" : typeof t === "string" && types.includes(t));
@@ -439,7 +433,7 @@ export function noteViolations(rules: Rules, path: string, text: string, only?: 
 		}
 	}
 
-	if (on("pending") && rules.pending.sections.length) {
+	if (rules.pending.sections.length) {
 		// One item per line of the pending sections, in a fixed shape, so `deadlines` can read them.
 		const { lines } = sectionLines(p, rules.pending.sections);
 		const names = rules.pending.sections.map((s) => `«## ${s}»`).join(", ");
@@ -464,20 +458,18 @@ export function noteViolations(rules: Rules, path: string, text: string, only?: 
 		}
 	}
 
-	if (on("obsolete")) {
-		rules.obsolete.patterns.forEach((pat, i) => {
-			if (pat.except.some((e) => pathMatches(path, e))) return;
-			p.lines.forEach((line, l) => {
-				if (rules.obsolete.allowDated && datesThePast(line)) return;
-				for (const m of line.matchAll(pat.regex)) {
-					if (!m[0]) continue;
-					add("obsolete", rules.obsolete.action, `${i}:${m[0].toLowerCase()}`, l + 1, `«${clip(m[0], 60)}» is a retired name this memory no longer uses`, pat.fix ?? "remove it or write the name of what replaced it");
-				}
-			});
+	rules.obsolete.patterns.forEach((pat, i) => {
+		if (pat.except.some((e) => pathMatches(path, e))) return;
+		p.lines.forEach((line, l) => {
+			if (rules.obsolete.allowDated && datesThePast(line)) return;
+			for (const m of line.matchAll(pat.regex)) {
+				if (!m[0]) continue;
+				add("obsolete", rules.obsolete.action, `${i}:${m[0].toLowerCase()}`, l + 1, `«${clip(m[0], 60)}» is a retired name this memory no longer uses`, pat.fix ?? "remove it or write the name of what replaced it");
+			}
 		});
-	}
+	});
 
-	if (on("forbidden_section") && rules.forbiddenSections.sections.length) {
+	if (rules.forbiddenSections.sections.length) {
 		const forbidden = new Set(rules.forbiddenSections.sections.map(normalizeWords));
 		for (const h of p.headings) {
 			if (!forbidden.has(h.norm)) continue;
@@ -493,7 +485,7 @@ export function noteViolations(rules: Rules, path: string, text: string, only?: 
 	}
 
 	const template = typeof type === "string" ? rules.templates.byType[type] : undefined;
-	if (on("template") && template && !rules.type.untypedFolders.includes(topFolder(path))) {
+	if (template && !rules.type.untypedFolders.includes(topFolder(path))) {
 		const level = rules.templates.level;
 		const ranks = new Map(template.map((t, i) => [normalizeWords(t), i]));
 		const order = template.join(" · ");
@@ -513,8 +505,8 @@ export function noteViolations(rules: Rules, path: string, text: string, only?: 
 	}
 
 	const max = rules.size.maxChars;
-	// A note of type `record` (a list, a log) is meant to be long, and an attachment note carries a file's text.
-	if (on("size") && max !== null && text.length > max && !p.fields.attachment && !(typeof type === "string" && type.trim().toLowerCase() === RECORD)) {
+	// A note of type `record` (a list, a log) is meant to be long.
+	if (max !== null && text.length > max && !(typeof type === "string" && type.trim().toLowerCase() === RECORD)) {
 		add(
 			"size",
 			rules.size.action,
@@ -552,8 +544,8 @@ function byLine(a: Violation, b: Violation): number {
  * count (so editing a line that already had an old problem is fine), and `append_only` sections may not lose lines.
  */
 export function checkWrite(rules: Rules, after: NoteText, before: NoteText | null, opts: CheckOptions = {}): WriteCheck {
-	const now = noteViolations(rules, after.path, after.text, opts.only, opts.context);
-	const was = before ? noteViolations(rules, before.path, before.text, opts.only, opts.context) : [];
+	const now = noteViolations(rules, after.path, after.text, opts.context);
+	const was = before ? noteViolations(rules, before.path, before.text, opts.context) : [];
 	const fresh: Violation[] = [];
 	const existing: Violation[] = [];
 	const afterLines = after.text.split("\n").map((l) => l.replace(/\r$/, ""));
@@ -586,8 +578,7 @@ export function checkWrite(rules: Rules, after: NoteText, before: NoteText | nul
 		existing.push(...ranked.slice(k));
 	}
 
-	const on = (r: RuleId) => !opts.only || opts.only.includes(r);
-	if (before && on("append_only") && rules.appendOnly.sections.length) {
+	if (before && rules.appendOnly.sections.length) {
 		const old = sectionLines(parse(before.text), rules.appendOnly.sections);
 		if (old.lines.length) {
 			const neu = sectionLines(parse(after.text), rules.appendOnly.sections);
@@ -630,9 +621,10 @@ export function checkWrite(rules: Rules, after: NoteText, before: NoteText | nul
 export function checkBatch(rules: Rules, entries: { after: NoteText | null; before: NoteText | null; opts?: CheckOptions }[]): WriteCheck[] {
 	const entering = new Map<string, number>();
 	const leaving = new Map<string, number>();
+	/** Retired names of each side: one that leaves a note may enter, unchanged, another note of the same submission. */
 	const counts = (n: NoteText | null) => {
 		const out = new Map<string, number>();
-		if (n) for (const v of noteViolations(rules, n.path, n.text, ["obsolete"])) out.set(v.key, (out.get(v.key) ?? 0) + 1);
+		if (n) for (const v of noteViolations(rules, n.path, n.text)) if (v.rule === "obsolete") out.set(v.key, (out.get(v.key) ?? 0) + 1);
 		return out;
 	};
 	const mentions = entries.map((e) => ({ was: counts(e.before), now: counts(e.after) }));

@@ -28,7 +28,7 @@ describe("configuration", () => {
 
 	it("reads every rule with its default action", () => {
 		expect(rules.frontmatter).toEqual({ required: true, action: "block" });
-		expect(rules.type).toMatchObject({ field: "type", untypedFolders: ["skills"], attachmentType: "Notes", action: "block" });
+		expect(rules.type).toMatchObject({ field: "type", untypedFolders: ["skills"], action: "block" });
 		expect(rules.obsolete.patterns.map((p) => p.pattern)).toEqual(["\\bmemoria_[a-z_]+", "\\bLisa IA\\b"]);
 		expect(rules.obsolete.action).toBe("block");
 		expect(rules.appendOnly).toEqual({ sections: ["Fuentes"], action: "block" });
@@ -43,7 +43,7 @@ describe("configuration", () => {
 		expect(bad("[rules.obsolete]\npatterns = ['(']")).toThrow(/rules\.obsolete\.patterns\[0\]\.pattern is not a valid regular expression/);
 		expect(bad("[rules.obsolete]\npatterns = ['x*']")).toThrow(/matches the empty text/);
 		expect(bad('[rules.type]\nallowed = ["Work"]\n[rules.templates]\nPeople = ["A"]')).toThrow(/rules\.templates\.People: «People» is not in rules\.type\.allowed/);
-		expect(bad('[rules.type]\nallowed = ["Work"]\nattachment_type = "Notes"')).toThrow(/attachment_type «Notes» is not in rules\.type\.allowed/);
+		expect(bad('[rules.type]\nallowed = ["Work"]\nattachment_type = "Notes"')).toThrow(/\[rules\.type\] has unknown keys: attachment_type/);
 		expect(bad('[rules.size]\nmax_chars = 0')).toThrow(/max_chars must be a positive integer/);
 		expect(bad('[rules.append_only]\nsections = ["Fuentes"]\naction = "maybe"')).toThrow(/action must be "block" or "warn"/);
 		expect(bad('[rules.append_only]\nsection = ["Fuentes"]')).toThrow(/unknown keys: section/);
@@ -307,10 +307,6 @@ describe("size", () => {
 		expect(checkWrite(strict, { path: "topics/x.md", text: big(81) }, { path: "topics/x.md", text: big(80) }).blocking).toHaveLength(1);
 		expect(checkWrite(strict, { path: "topics/x.md", text: big(79) }, { path: "topics/x.md", text: big(80) }).blocking).toEqual([]);
 	});
-
-	it("leaves attachment companions alone", () => {
-		expect(noteViolations(rules, "topics/x.md", big(80).replace("type: Notes", "type: Notes\nattachment: x.pdf"))).toEqual([]);
-	});
 });
 
 describe("findings of a note as it stands", () => {
@@ -321,7 +317,7 @@ describe("findings of a note as it stands", () => {
 			["obsolete", 8],
 			["forbidden_section", 10],
 		]);
-		expect(noteViolations(rules, "topics/vieja.md", text, ["obsolete"]).map((v) => v.rule)).toEqual(["obsolete"]);
+		expect(noteViolations(rules, "topics/vieja.md", text).map((v) => v.rule)).toEqual(["type", "obsolete", "forbidden_section"]);
 	});
 });
 

@@ -25,7 +25,6 @@ export interface NoteMeta {
 	description: string | null;
 	aliases: string[];
 	superseded: string | null;
-	attachment: string | null;
 }
 
 export interface ParsedNote extends SplitNote {
@@ -133,7 +132,7 @@ export function parseNote(text: string, conventions: Conventions): ParsedNote {
 	}
 	return {
 		...split,
-		meta: { fields, title: str(fields.name), description, aliases, superseded, attachment: str(fields.attachment) },
+		meta: { fields, title: str(fields.name), description, aliases, superseded },
 		problems,
 	};
 }

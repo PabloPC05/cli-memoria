@@ -6,7 +6,6 @@ required = true
 [rules.type]
 allowed = ["Profile", "Preference", "Work", "People", "Notes"]
 untyped_folders = ["skills"]
-attachment_type = "Notes"
 
 [rules.obsolete]
 patterns = [

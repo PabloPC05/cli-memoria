@@ -8,7 +8,6 @@ import { addToken, TokenStore } from "../src/auth/tokens.js";
 import { createApp } from "../src/http.js";
 import { silentLogger } from "../src/log.js";
 import { SETUP_GUIDE_URI, SETUP_GUIDE_URL, setupGuide } from "../src/setup-guide.js";
-import { UploadStore } from "../src/uploads.js";
 import { makeMemory, note, tempDir } from "./helpers.js";
 
 describe("setup guide", () => {
@@ -39,9 +38,7 @@ describe("setup guide over MCP", () => {
 		env = await makeMemory({ "yo/perfil.md": note("Perfil", "Quién es") });
 		const tokensFile = join(env.root, "tokens.toml");
 		token = await addToken(tokensFile, "sam-reader", "Sam (reader)", "read");
-		const uploads = new UploadStore(join(env.root, "data", "uploads"));
-		await uploads.init();
-		const app = createApp({ memory: env.memory, tokens: new TokenStore(tokensFile), uploads, log: silentLogger });
+		const app = createApp({ memory: env.memory, tokens: new TokenStore(tokensFile), log: silentLogger });
 		server = await new Promise((resolve) => {
 			const s = app.listen(0, "127.0.0.1", () => resolve(s));
 		});

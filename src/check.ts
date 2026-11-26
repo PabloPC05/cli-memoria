@@ -49,7 +49,7 @@ export async function checkTree(git: Git, conventions: Conventions, rev = "HEAD"
 	paths.forEach((path, i) => {
 		const text = texts[i];
 		if (text === null || text === undefined) return;
-		const violations = noteViolations(rules, path, text, undefined, context);
+		const violations = noteViolations(rules, path, text, context);
 		if (violations.length) findings.push({ path, violations });
 	});
 	return { notes: paths.length, findings };

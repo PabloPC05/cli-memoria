@@ -1,18 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
-import { copyFile, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { stringify as stringifyYaml } from "yaml";
 import { CONVENTIONS_FILE, type Conventions, defaultConventions, parseConventions } from "./conventions.js";
 import { MemoryError } from "./errors.js";
-import { extractAttachment, type Extraction } from "./extract.js";
 import { parseNote, splitFrontmatter } from "./frontmatter.js";
 import { Git } from "./git.js";
 import { type LintArgs, lint } from "./lint.js";
 import { type Logger, silentLogger } from "./log.js";
 import { firstH1, rewriteWikiLinks, sectionsMatching, splitSections, targetNameOf } from "./markdown.js";
-import type { OcrRunner } from "./ocr.js";
 import { deadlineKey, parsePendingLine, PENDING_SECTION } from "./pending.js";
 import { parseTypedLinks } from "./relations.js";
 import {
@@ -33,14 +30,11 @@ import {
 } from "./rules.js";
 import { SETUP_GUIDE_URI, SETUP_GUIDE_URL } from "./setup-guide.js";
 import { buildFtsQuery, type LinkRow, type NoteRow, type SearchHit, SearchIndex } from "./search-index.js";
-import type { UploadStore } from "./uploads.js";
 import {
 	blobHash,
 	checkNewFilename,
 	checkPath,
-	dirOf,
 	type FileChange,
-	joinPath,
 	levenshtein,
 	lookAlikeLabels,
 	looksLikeSame,
@@ -70,10 +64,6 @@ export interface MemoryOptions {
 	/** Domain of the author emails: `<client-id>@<domain>`. */
 	authorDomain?: string;
 	committer?: { name: string; email: string };
-	uploads?: UploadStore | null;
-	pdftotext?: string;
-	/** OCR for scanned PDFs and images; null or absent means no OCR. */
-	ocr?: OcrRunner | null;
 	log?: Logger;
 }
 
@@ -95,7 +85,7 @@ export type SearchArgs = {
 };
 
 export interface Warning {
-	code: "BROKEN_LINKS" | "UNKNOWN_RELATIONS" | "EXTRACTION_EMPTY" | "EXTRACTION_PARTIAL" | "NO_CHANGES" | "FRONTMATTER_PROBLEMS" | "RULES_WARNINGS" | "RULES_EXISTING";
+	code: "BROKEN_LINKS" | "UNKNOWN_RELATIONS" | "NO_CHANGES" | "FRONTMATTER_PROBLEMS" | "RULES_WARNINGS" | "RULES_EXISTING";
 	message: string;
 	[key: string]: unknown;
 }
@@ -175,7 +165,6 @@ export class MemoryService {
 	private readonly lock = new Mutex();
 	private readonly log: Logger;
 	private readonly branch: string;
-	private lfs = false;
 	/** Cached MCP instructions, keyed by HEAD and the conventions hash. */
 	private instructionsCache: { key: string; text: string } | null = null;
 	/** While a `publish` runs: the notes it writes, judged together at the end instead of one by one. */
@@ -205,9 +194,6 @@ export class MemoryService {
 		] as const) {
 			await this.git.run(["config", "--local", k, v]);
 		}
-		this.lfs = await this.git.lfsAvailable();
-		if (this.lfs) await this.git.run(["lfs", "install", "--local", "--skip-smudge"], { allowFail: true });
-
 		const head = await this.git.head();
 		if (!(await this.git.isClean())) {
 			const dirty = (await this.git.out(["status", "--porcelain", "--untracked-files=all"])).trim().split("\n");
@@ -260,7 +246,12 @@ export class MemoryService {
 
 	/** Reads and parses a file for the index. Async part only: the index itself is then updated synchronously. */
 	private async prepareFile(path: string): Promise<() => void> {
-		if (!path.toLowerCase().endsWith(".md")) return this.isRootFile(path) ? () => undefined : () => this.index.putAsset(path);
+		// A file that is not a note (a binary, which belongs in the archives of lisa) is only catalogued so links to it
+		// still resolve and `lint` can point at it; its content is never read.
+		if (!path.toLowerCase().endsWith(".md")) {
+			const size = await lstat(this.abs(path)).then((info) => info.size).catch(() => null);
+			return this.isRootFile(path) ? () => undefined : () => this.index.putAsset(path, size);
+		}
 		const content = await readFile(join(this.opts.repoDir, path), "utf8");
 		const parsed = parseNote(content, this.conventions);
 		const name = noteName(path);
@@ -285,7 +276,6 @@ export class MemoryService {
 			status: asText(parsed.meta.fields[this.conventions.rules?.status?.field ?? "status"]),
 			archived,
 			supersededBy: parsed.meta.superseded,
-			attachment: parsed.meta.attachment,
 			blobHash: blobHash(content),
 			size: Buffer.byteLength(content),
 			problems,
@@ -980,7 +970,6 @@ export class MemoryService {
 		}
 		if (direction !== "out") {
 			const incoming = [...this.index.linksIn(row.path, relation)];
-			if (row.attachment) incoming.push(...this.index.linksIn(joinPath(dirOf(row.path), row.attachment), relation));
 			const texts = new Map<string, string[]>();
 			const inList = [];
 			for (const l of incoming) {
@@ -1200,17 +1189,6 @@ export class MemoryService {
 			if (taken.length) throw new MemoryError("NAME_TAKEN", `A note named «${newName}» already exists at ${taken[0]?.path}.`, { existing: taken.map((t) => t.path) });
 		}
 		const paths = [row.path, to];
-		// Binary of an attachment companion follows its note to the new folder.
-		if (row.attachment && dirOf(row.path) !== dirOf(to)) {
-			const fromBin = joinPath(dirOf(row.path), row.attachment);
-			const toBin = joinPath(dirOf(to), row.attachment);
-			if (await this.exists(toBin)) throw new MemoryError("ALREADY_EXISTS", `«${toBin}» already exists.`, { path: toBin });
-			if (await this.exists(fromBin)) {
-				await mkdir(dirname(this.abs(toBin)), { recursive: true });
-				await rename(this.abs(fromBin), this.abs(toBin));
-				paths.push(fromBin, toBin);
-			}
-		}
 		await mkdir(dirname(this.abs(to)), { recursive: true });
 		if (caseOnly) {
 			const tmp = `${this.abs(row.path)}.${randomBytes(4).toString("hex")}.mv`;
@@ -1254,18 +1232,12 @@ export class MemoryService {
 		this.checkHash(row.path, current, args.hash, true);
 		// In a publish, what this note had may go to another note of it (merging notes).
 		if (this.rulesBatch && rulesApply(this.conventions, row.path)) this.rulesBatch.push({ after: null, before: { path: row.path, text: current }, opts: {} });
-		const binary = row.attachment ? joinPath(dirOf(row.path), row.attachment) : null;
-		const backlinks = [...this.linksTo(row.path), ...(binary ? this.index.linksIn(binary) : [])].filter((l) => l.srcPath !== row.path);
+		const backlinks = this.linksTo(row.path).filter((l) => l.srcPath !== row.path);
 		if (backlinks.length) {
 			throw new MemoryError("HAS_BACKLINKS", `Other notes link to «${row.name}»; fix or remove those links first.`, { backlinks: backlinks.map((l) => ({ src_path: l.srcPath, line: l.line })) });
 		}
 		await rm(this.abs(row.path));
-		const paths = [row.path];
-		if (binary && (await this.exists(binary))) {
-			await rm(this.abs(binary));
-			paths.push(binary);
-		}
-		return { paths, result: { path: row.path } };
+		return { paths: [row.path], result: { path: row.path } };
 	}
 
 	/**
@@ -1408,8 +1380,9 @@ export class MemoryService {
 	/**
 	 * Undoes a commit, or only what it did to one note: every file it touched goes back to its state before it,
 	 * as one new commit. Later changes to the same files are kept when they do not overlap (three-way merge);
-	 * otherwise nothing is changed and it fails with REVERT_CONFLICT. Binaries are never rewritten from history:
-	 * they can be removed (undoing an attach) or moved back, but not restored. `.gitattributes` is left alone.
+	 * otherwise nothing is changed and it fails with REVERT_CONFLICT. A file that is not a note (a binary, which belongs
+	 * in the archives of lisa, not here) is never rewritten from history: it can be removed or moved back, but not
+	 * restored. `.gitattributes` is left alone.
 	 */
 	revert(client: ClientIdentity, args: NoteRef & { commit: string; reason: string }): Promise<WriteResult> {
 		return this.mutate(
@@ -1438,7 +1411,7 @@ export class MemoryService {
 
 				const isText = (p: string) => /\.md$/i.test(p) || !p.includes("/");
 				const notRestorable = (p: string) =>
-					new MemoryError("NOT_RESTORABLE", `«${p}» is a binary attachment; revert cannot bring its old content back. Attach the file again${only ? "" : ", or revert only the note with «path»"}.`, { path: p });
+					new MemoryError("NOT_RESTORABLE", `«${p}» is not a note; revert cannot bring its old content back. Put the file back by hand${only ? "" : ", or revert only the note with «path»"}.`, { path: p });
 				const conflict = async (p: string, why: string) => {
 					const later = (await this.git.out(["log", "--format=%H %s", `${target}..HEAD`, "--", p])).trim().split("\n").filter(Boolean);
 					return new MemoryError("REVERT_CONFLICT", `«${p}» ${why} since ${short}; nothing was reverted. Change it by hand instead.`, {
@@ -1585,94 +1558,4 @@ export class MemoryService {
 			},
 		);
 	}
-
-	async attach(
-		client: ClientIdentity,
-		args: {
-			path: string;
-			source: { upload_id?: string; base64?: string };
-			name?: string;
-			title?: string;
-			description: string;
-			aliases?: string[];
-			/** The companion note's type; defaults to the rules' `attachment_type`. */
-			type?: string;
-			reason: string;
-			confirm_new?: boolean;
-		},
-	): Promise<WriteResult> {
-		if (client.scope !== "write") throw READ_ONLY;
-		const uploads = this.opts.uploads;
-		if (!uploads) throw new MemoryError("INTERNAL", "Uploads are not configured on this server.");
-		const binPath = checkPath(args.path, this.conventions, "asset");
-		checkNewFilename(binPath, this.conventions);
-		if (!args.source || (!args.source.upload_id && !args.source.base64)) throw new MemoryError("INVALID_ARGUMENT", "«source» needs upload_id or base64.");
-		const fileName = binPath.split("/").pop() as string;
-		const upload = args.source.upload_id ? await uploads.get(args.source.upload_id) : await uploads.get((await uploads.fromBase64(args.source.base64 as string, fileName, client.id)).id);
-		const ext = (fileName.split(".").pop() as string).toLowerCase();
-		// Extraction runs before taking the write lock: it can be slow and touches only the upload.
-		const extraction: Extraction = await extractAttachment(upload.file, ext, { pdftotext: this.opts.pdftotext, ocr: this.opts.ocr });
-		const result = await this.mutate(client, "attach", args.reason, async () => {
-			if (!this.lfs) throw new MemoryError("LFS_UNAVAILABLE", "git-lfs is not installed on the server.");
-			const dir = dirOf(binPath);
-			const companionName = (args.name ?? fileName.replace(/\.[^.]+$/, "")).replace(/\.md$/i, "");
-			const companion = joinPath(dir, `${companionName}.md`);
-			checkPath(companion, this.conventions, "note");
-			checkNewFilename(companion, this.conventions);
-			await this.assertNoSymlink(binPath);
-			await this.assertNoSymlink(companion);
-			if (typeof args.description !== "string" || !args.description.trim()) throw new MemoryError("INVALID_ARGUMENT", "«description» is required.");
-			if (await this.exists(binPath)) throw new MemoryError("ALREADY_EXISTS", `«${binPath}» already exists.`, { path: binPath });
-			if (await this.exists(companion)) throw new MemoryError("ALREADY_EXISTS", `«${companion}» already exists.`, { path: companion });
-			const takenNote = this.index.notesByName(companionName);
-			if (takenNote.length) throw new MemoryError("NAME_TAKEN", `A note named «${companionName}» already exists at ${takenNote[0]?.path}.`, { existing: takenNote.map((t) => t.path) });
-			const takenAsset = this.index.assetsByName(fileName);
-			if (takenAsset.length) throw new MemoryError("NAME_TAKEN", `A file named «${fileName}» already exists at ${takenAsset[0]}.`, { existing: takenAsset });
-			const title = args.title?.trim() || fileName;
-			const aliases = Array.isArray(args.aliases) ? args.aliases.filter((a) => typeof a === "string" && a.trim()) : [];
-			if (!args.confirm_new) {
-				const candidates = this.duplicateCandidates([companionName.replace(/-/g, " "), title, ...aliases]);
-				if (candidates.length) throw new MemoryError("DUPLICATE_CANDIDATES", "Some existing notes look like the same thing. If this really is new, call attach again with confirm_new: true.", { candidates });
-			}
-			// LFS rule for this extension, in the same commit.
-			const paths = [binPath, companion];
-			const attr = await this.git.out(["check-attr", "filter", "--", binPath]);
-			if (!/filter: lfs\s*$/.test(attr.trim())) {
-				const current = (await this.exists(".gitattributes")) ? await this.readText(".gitattributes") : "";
-				await this.writeText(".gitattributes", `${current}${current && !current.endsWith("\n") ? "\n" : ""}*.${ext} filter=lfs diff=lfs merge=lfs -text\n`);
-				paths.push(".gitattributes");
-			}
-			await mkdir(dirname(this.abs(binPath)), { recursive: true });
-			try {
-				await rename(upload.file, this.abs(binPath));
-			} catch {
-				await copyFile(upload.file, this.abs(binPath));
-			}
-			const fm: Record<string, unknown> = { name: title, description: args.description.replace(/\s+/g, " ").trim(), aliases };
-			const typeRule = this.conventions.rules?.type;
-			const type = (typeof args.type === "string" && args.type.trim()) || typeRule?.attachmentType || null;
-			if (type) fm[typeRule?.field ?? "type"] = type;
-			fm.attachment = fileName;
-			fm.extracted_with = extraction.method;
-			let body = `# ${title}\n\n![[${fileName}]]\n`;
-			if (extraction.ocr) body += `\n> ${this.conventions.attachments.ocrNotice.replace("{languages}", extraction.ocr.languages)}\n`;
-			if (extraction.image && extraction.pages.length === 1) body += `\n${extraction.pages[0]?.text}\n`;
-			else for (const page of extraction.pages) body += `\n## ${this.conventions.attachments.pageHeading.replace("{n}", String(page.number))}\n\n${page.text}\n`;
-			const content = `---\n${stringifyYaml(fm, { lineWidth: 0 }).trimEnd()}\n---\n${body}`;
-			this.validateNote(companion, content);
-			// The text comes from the file as it is: only the frontmatter the server writes is held to the rules here.
-			const warnings: Warning[] = this.checkRules({ path: companion, text: content }, null, { only: ["frontmatter", "type"] });
-			await this.writeText(companion, content);
-			if (extraction.method === "none") warnings.push({ code: "EXTRACTION_EMPTY", message: `No text was extracted: ${extraction.reason ?? "unknown reason"}.` });
-			const { skippedPages = 0, failedPages = [] } = extraction.ocr ?? {};
-			if (skippedPages || failedPages.length) {
-				const parts = [skippedPages ? `the last ${skippedPages} of ${extraction.pageCount} pages were not OCR'd (page limit)` : "", failedPages.length ? `OCR failed on page(s) ${failedPages.join(", ")}` : ""].filter(Boolean);
-				warnings.push({ code: "EXTRACTION_PARTIAL", message: `Only part of the text was extracted: ${parts.join("; ")}.`, skipped_pages: skippedPages, failed_pages: failedPages });
-			}
-			return { paths, result: { path: companion, attachment: binPath, pages: extraction.pages.length, extracted_with: extraction.method }, warnings, contentPath: companion };
-		});
-		await uploads.remove(upload.meta.id).catch(() => undefined);
-		return result;
-	}
 }
-

@@ -9,7 +9,6 @@ import { buildClientsReport, ClientActivity, type ClientsService, renderClientsT
 import { toolCalls, createApp } from "../src/http.js";
 import { silentLogger } from "../src/log.js";
 import type { ClientIdentity } from "../src/memory.js";
-import { UploadStore } from "../src/uploads.js";
 import { makeMemory, note, tempDir } from "./helpers.js";
 
 const sam: ClientIdentity = { id: "sam-laptop", name: "Sam (laptop)", scope: "write" };
@@ -146,15 +145,13 @@ describe("clients over MCP", () => {
 		writeToken = await addToken(tokensFile, "sam-laptop", "Sam (laptop)", "write");
 		readToken = await addToken(tokensFile, "alex-reader", "Alex (reader)", "read");
 		const tokens = new TokenStore(tokensFile);
-		const uploads = new UploadStore(join(env.root, "data", "uploads"));
-		await uploads.init();
 		activity = new ClientActivity(join(env.root, "data", "activity.sqlite"));
 		const clients: ClientsService = {
 			record: (c, t) => activity.record(c, t),
 			report: () =>
 				buildClientsReport({ git: env.memory.git, repoDir: env.memory.opts.repoDir, staticClients: () => tokens.list(), activity: () => activity.all() }),
 		};
-		const app = createApp({ memory: env.memory, tokens, uploads, log: silentLogger, clients });
+		const app = createApp({ memory: env.memory, tokens, log: silentLogger, clients });
 		server = await new Promise((resolve) => {
 			const s = app.listen(0, "127.0.0.1", () => resolve(s));
 		});

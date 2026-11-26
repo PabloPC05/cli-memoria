@@ -13,7 +13,6 @@ let
     mkIf
     mkMerge
     mkOption
-    optional
     optionalAttrs
     types
     ;
@@ -53,7 +52,7 @@ let
     dataDir = mkOption {
       type = types.str;
       default = "/var/lib/${defaultName}";
-      description = "Directory holding the notes repo clone, SQLite index, activity log and uploads.";
+      description = "Directory holding the notes repo clone and its SQLite index.";
     };
 
     branch = mkOption {
@@ -71,7 +70,7 @@ let
       address = mkOption {
         type = types.str;
         default = "127.0.0.1";
-        description = "Bind address for the HTTP listener (MCP and uploads).";
+        description = "Bind address for the HTTP listener (MCP).";
       };
       port = mkOption {
         type = types.port;
@@ -95,42 +94,6 @@ let
       '';
     };
 
-    ocr = {
-      enable = mkOption {
-        type = types.bool;
-        default = true;
-        description = "OCR scanned PDFs (pdftoppm + tesseract) and images (tesseract) when they are attached.";
-      };
-      languages = mkOption {
-        type = types.listOf types.str;
-        default = [
-          "spa"
-          "eng"
-        ];
-        example = [
-          "spa"
-          "eng"
-          "fra"
-        ];
-        description = "Tesseract languages, in order of preference; their language data is installed for the service.";
-      };
-      maxPages = mkOption {
-        type = types.ints.positive;
-        default = 50;
-        description = "Pages of a scanned PDF that are OCR'd; the rest is left out with a warning.";
-      };
-      pageTimeoutSeconds = mkOption {
-        type = types.ints.positive;
-        default = 120;
-        description = "Time limit for rendering and recognising one page or image.";
-      };
-      dpi = mkOption {
-        type = types.ints.positive;
-        default = 300;
-        description = "Resolution at which scanned PDF pages are rendered for OCR.";
-      };
-    };
-
     logLevel = mkOption {
       type = types.enum [
         "debug"
@@ -145,9 +108,6 @@ let
   mkService =
     unitName: cfg:
     let
-      # Tesseract with just the language data the OCR config asks for. Only referenced (so only built) with OCR on.
-      ocrTesseract = pkgs.tesseract.override { enableLanguages = lib.unique cfg.ocr.languages; };
-
       # No secrets travel as systemd credentials any more: the git remote and its webhook are gone (the notes repo is
       # local and the server is its only writer). The tokens file is read directly (see tokensFile).
       credentials = [ ];
@@ -172,19 +132,6 @@ let
           inherit (cfg) branch;
           author_domain = cfg.authorDomain;
           log_level = cfg.logLevel;
-          pdftotext = "${pkgs.poppler-utils}/bin/pdftotext";
-          ocr =
-            {
-              enabled = cfg.ocr.enable;
-            }
-            // optionalAttrs cfg.ocr.enable {
-              languages = lib.concatStringsSep "+" cfg.ocr.languages;
-              max_pages = cfg.ocr.maxPages;
-              page_timeout_seconds = cfg.ocr.pageTimeoutSeconds;
-              inherit (cfg.ocr) dpi;
-              tesseract = "${ocrTesseract}/bin/tesseract";
-              pdftoppm = "${pkgs.poppler-utils}/bin/pdftoppm";
-            };
           listen = effectiveListen;
         }
         // optionalAttrs (cfg.tokensFile != null) { tokens_file = cfg.tokensFile; }
@@ -193,13 +140,6 @@ let
       configFile = toml.generate "${unitName}.toml" settings;
     in
     mkIf cfg.enable {
-      assertions = [
-        {
-          assertion = !cfg.ocr.enable || cfg.ocr.languages != [ ];
-          message = "services.${unitName}: ocr.languages must name at least one language";
-        }
-      ];
-
       users.users.${cfg.user} = {
         isSystemUser = mkDefault true;
         group = mkDefault cfg.group;

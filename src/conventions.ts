@@ -16,7 +16,7 @@ export interface Conventions {
 	};
 	notes: {
 		requiredFields: string[];
-		/** Applies to new names only (create, move, attach). */
+		/** Applies to new names only (create, move). */
 		filenamePattern: RegExp;
 		supersededField: string;
 		maxDescription: number;
@@ -24,12 +24,6 @@ export interface Conventions {
 	instructions: {
 		/** File sent as MCP instructions, relative to the repo root; `null` for none. */
 		file: string | null;
-	};
-	attachments: {
-		/** Heading of each extracted page in a companion note; `{n}` is the page number. */
-		pageHeading: string;
-		/** Line put in a companion note whose text comes from OCR; `{languages}` is replaced. */
-		ocrNotice: string;
 	};
 	relations: {
 		/** Relation keys agents may use in `key:: [[x]]`, lowercase; `null` means any. */
@@ -46,7 +40,7 @@ export interface Conventions {
 		inferenceDays: number;
 		/** Words of the provenance marker that flags an inference: `(deducido)` or `(deducido, 2026-01-31)`. */
 		inferredMarkers: string[];
-		/** Notes larger than this many bytes are `oversized` (attachment companions are exempt). */
+		/** Notes larger than this many bytes are `oversized`. */
 		maxBytes: number;
 		/** A missing target linked from at least this many notes is a `missing_page` rather than a `broken_link`. */
 		missingPageMin: number;
@@ -71,7 +65,6 @@ export function defaultConventions(): Conventions {
 			maxDescription: 200,
 		},
 		instructions: { file: "AGENTS.md" },
-		attachments: { pageHeading: "Page {n}", ocrNotice: "Text recognised with OCR ({languages}); it may contain errors." },
 		relations: { allowed: null },
 		lint: { exclude: [], orphanExclude: [], staleDays: 180, inferenceDays: 90, inferredMarkers: ["deducido"], maxBytes: 16_384, missingPageMin: 2, mentionMinLength: 4, mentionExcludeLabels: [] },
 		rules: null,
@@ -130,16 +123,6 @@ export function parseConventions(text: string): Conventions {
 		if (instructions.file === false || instructions.file === "") c.instructions.file = null;
 		else if (typeof instructions.file === "string" && !instructions.file.includes("..")) c.instructions.file = instructions.file;
 		else throw new Error("instructions.file must be a path inside the repo");
-	}
-
-	const attachments = table(doc.attachments, "attachments");
-	if (attachments.page_heading !== undefined) {
-		if (typeof attachments.page_heading !== "string" || !attachments.page_heading.includes("{n}")) throw new Error("attachments.page_heading must be a string containing {n}");
-		c.attachments.pageHeading = attachments.page_heading;
-	}
-	if (attachments.ocr_notice !== undefined) {
-		if (typeof attachments.ocr_notice !== "string" || !attachments.ocr_notice.trim()) throw new Error("attachments.ocr_notice must be a non-empty string");
-		c.attachments.ocrNotice = attachments.ocr_notice.trim();
 	}
 
 	const relations = table(doc.relations, "relations");

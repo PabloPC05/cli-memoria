@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import type { Level } from "./log.js";
-import { defaultOcrSettings, type OcrSettings } from "./ocr.js";
 
 export interface Listen {
 	address: string;
@@ -15,10 +14,8 @@ export interface ServerConfig {
 	authorDomain: string;
 	listen: Listen;
 	tokensFile: string | null;
-	pdftotext: string;
-	ocr: OcrSettings;
 	logLevel: Level;
-	/** Keys of the file this version no longer uses (a git remote, the push webhook…): ignored, but said in the log. */
+	/** Keys of the file this version no longer uses (a git remote, the push webhook, file extraction…): ignored, but said in the log. */
 	ignoredKeys: string[];
 }
 
@@ -26,30 +23,6 @@ function str(v: unknown, key: string, fallback?: string): string {
 	if (v === undefined && fallback !== undefined) return fallback;
 	if (typeof v !== "string" || !v) throw new Error(`${key} must be a non-empty string`);
 	return v;
-}
-
-function positiveInt(v: unknown, key: string, fallback: number): number {
-	if (v === undefined) return fallback;
-	if (typeof v !== "number" || !Number.isInteger(v) || v < 1) throw new Error(`${key} must be a positive integer`);
-	return v;
-}
-
-function ocrSettings(v: unknown): OcrSettings {
-	if (v === undefined) return { ...defaultOcrSettings };
-	if (typeof v !== "object" || v === null || Array.isArray(v)) throw new Error("[ocr] must be a table");
-	const t = v as Record<string, unknown>;
-	if (t.enabled !== undefined && typeof t.enabled !== "boolean") throw new Error("ocr.enabled must be true or false");
-	const languages = str(t.languages, "ocr.languages", defaultOcrSettings.languages);
-	if (!/^[A-Za-z0-9_]+(\+[A-Za-z0-9_]+)*$/.test(languages)) throw new Error("ocr.languages must be tesseract language codes joined with +, e.g. \"spa+eng\"");
-	return {
-		enabled: t.enabled ?? defaultOcrSettings.enabled,
-		languages,
-		maxPages: positiveInt(t.max_pages, "ocr.max_pages", defaultOcrSettings.maxPages),
-		pageTimeoutSeconds: positiveInt(t.page_timeout_seconds, "ocr.page_timeout_seconds", defaultOcrSettings.pageTimeoutSeconds),
-		dpi: positiveInt(t.dpi, "ocr.dpi", defaultOcrSettings.dpi),
-		tesseract: str(t.tesseract, "ocr.tesseract", defaultOcrSettings.tesseract),
-		pdftoppm: str(t.pdftoppm, "ocr.pdftoppm", defaultOcrSettings.pdftoppm),
-	};
 }
 
 function parseListen(v: unknown, key: string): Listen {
@@ -60,11 +33,12 @@ function parseListen(v: unknown, key: string): Listen {
 }
 
 /**
- * Keys of the configuration that this server no longer uses: the git remote it cloned, fetched and pushed to, and
- * the webhook that told it to. They are left in place in existing files and only mentioned in the log: removing
- * them from a working configuration must never make the server refuse to start.
+ * Keys of the configuration that this server no longer uses: the git remote it cloned and fetched, the webhook that
+ * told it to, and the extraction of attached files (pdftotext and OCR of scans and images). They are left in place in
+ * existing files and only mentioned in the log: removing them from a working configuration must never make the
+ * server refuse to start.
  */
-const IGNORED_KEYS = ["remote", "fetch_interval_seconds", "webhook_secret_file"] as const;
+const IGNORED_KEYS = ["remote", "fetch_interval_seconds", "webhook_secret_file", "pdftotext", "ocr"] as const;
 
 export function loadConfig(file: string): ServerConfig {
 	const base = resolve(file, "..");
@@ -80,8 +54,6 @@ export function loadConfig(file: string): ServerConfig {
 		authorDomain: str(doc.author_domain, "author_domain", "cli-memoria.invalid"),
 		listen,
 		tokensFile: doc.tokens_file === undefined ? null : resolve(base, str(doc.tokens_file, "tokens_file")),
-		pdftotext: str(doc.pdftotext, "pdftotext", "pdftotext"),
-		ocr: ocrSettings(doc.ocr),
 		logLevel: (["debug", "info", "warn", "error"].includes(doc.log_level as string) ? doc.log_level : "info") as Level,
 		ignoredKeys: IGNORED_KEYS.filter((key) => doc[key] !== undefined),
 	};
