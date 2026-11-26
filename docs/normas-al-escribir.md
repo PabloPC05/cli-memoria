@@ -4,12 +4,12 @@ Diseño, principios y evaluación empírica de las reglas de escritura en códig
 
 ## Resumen
 
-- **El código pone las normas.** Cada escritura del servidor (`create`, `edit`, `write`, `move`, `revert`, `attach`, `publish`) se comprueba contra las reglas que el repositorio de notas declara en la tabla `[rules]` de su `memory.toml`. Un agente que no lea o no siga `AGENTS.md` no puede saltárselas: el servidor rechaza la escritura con `RULES_VIOLATED`.
+- **El código pone las normas.** Cada escritura del servidor (`create`, `edit`, `write`, `move`, `revert`, `publish`) se comprueba contra las reglas que el repositorio de notas declara en la tabla `[rules]` de su `memory.toml`. Un agente que no lea o no siga `AGENTS.md` no puede saltárselas: el servidor rechaza la escritura con `RULES_VIOLATED`.
 - **Solo bloquea lo nuevo.** La versión anterior de la nota es la referencia. Lo que la nota ya tenía mal no impide editarla (vuelve como aviso `RULES_EXISTING`), pero una escritura no puede añadir problemas nuevos.
 - **Mensajes que corrigen.** Cada problema ocupa una línea con la regla, la línea de la nota, qué está mal y cómo arreglarlo (principio de SWE-agent, [arXiv:2405.15793](https://arxiv.org/abs/2405.15793): mensajes de error accionables en el mismo turno). Por ejemplo: `obsolete, line 14: «memoria_search» is a retired name this memory no longer uses. Fix: use the memoria CLI (memoria buscar, leer, copia, publicar…).`
 - **Partir una nota en un solo envío (`publish`).** Una línea que sale de una sección de solo añadido (p. ej. `## Fuentes`) no cuenta como borrada si entra, sin cambios, en la misma sección de otra nota del mismo envío. Un envío es una llamada a `publish` (lo que envía `memoria publicar`) o un mismo commit de varias notas. En escrituras sueltas la regla sigue igual, y el rechazo sugiere hacer la partición en un solo envío.
 - **Nombres retirados: instrucciones no, historia sí.** Una mención en una línea con una fecha explícita `AAAA-MM-DD` fuera de los marcadores de origen `[…]` (por ejemplo «retirado el 2026-11-22») es historia: no bloquea ni avisa. En un envío, una mención que sale de una nota y entra en otra tampoco es nueva.
-- **Configurable y opcional.** Sin `[rules]` en `memory.toml` el servidor no aplica ninguna regla adicional. Las reglas viven en `memory.toml`, que ninguna herramienta puede escribir: solo el propietario, con git.
+- **Configurable y opcional.** Sin `[rules]` en `memory.toml` el servidor no aplica ninguna regla adicional. Las reglas viven en `memory.toml`, que ninguna herramienta puede escribir: solo el propietario, con git. Las claves que esta versión ya no lee (la tabla `[attachments]` y `rules.type.attachment_type`, de las notas compañeras de `attach`) se ignoran en vez de rechazar el archivo, para que una configuración antigua conserve el resto de sus reglas.
 - **Evaluación sobre una memoria real de ~280 notas:**
   - 49 de 282 notas tenían problemas previos con las reglas propuestas.
   - **0 de 926** ediciones normales simuladas quedaron bloqueadas por problemas preexistentes.
@@ -22,7 +22,6 @@ Diseño, principios y evaluación empírica de las reglas de escritura en códig
 | `create`, `edit`, `write` | Reglas completas, comparando con la versión anterior de la nota (ninguna en `create`). |
 | `move` | La nota movida se juzga en su destino frente a su origen (sacarla del archivo o de una carpeta sin tipo convierte sus problemas en nuevos). Las notas cuyos enlaces se reescriben solo bloquean si la reescritura añade algo. |
 | `revert` | Reglas completas frente a la nota actual; una sección de solo añadido puede perder únicamente las líneas que añadió el commit que se deshace. Una nota borrada que vuelve se compara con su última versión. |
-| `attach` | Frontmatter y `type` de la nota compañera (`type` del parámetro o `attachment_type`). El texto extraído del documento se conserva tal cual. |
 | `delete` | No escribe contenido (solo bloquea `HAS_BACKLINKS`). |
 | `publish` | Varios commits (`create`, `write`, `move`, `delete`) en un solo envío atómico (todo o nada). Las reglas se juzgan al final sobre el conjunto, permitiendo mover líneas de `append_only` o menciones obsoletas al partir/fusionar notas. |
 | `lint` | Tipo `rules` (`cli-memoria lint --kind rules` o herramienta `lint`): una entrada por nota con los problemas actuales, sin modelo. |
@@ -40,9 +39,9 @@ Diseño, principios y evaluación empírica de las reglas de escritura en códig
 | `append_only` | Las líneas existentes de las secciones listadas (p. ej. `Fuentes`) no se modifican ni se borran; se puede añadir y reordenar (se ignoran líneas en blanco y espacios finales). | `block` | Línea a línea entre la versión anterior y la nueva. En `publish`, una línea que sale de una nota y entra idéntica en la misma sección de otra del mismo envío queda cubierta. |
 | `forbidden_section` | Encabezados prohibidos (de cualquier nivel, sin distinguir mayúsculas ni tildes, fuera de bloques de código). | `block` | Por encabezado. |
 | `template` | Las secciones del nivel indicado de un tipo con plantilla coinciden con las de la plantilla y van en orden. | `warn` | Por encabezado fuera de plantilla o fuera de orden. |
-| `size` | Caracteres de la nota por encima de `max_chars` (quedan fuera las notas compañeras de adjuntos y las de `type: record`). | `warn` | Si cruza el límite o si ya lo superaba y crece. |
+| `size` | Caracteres de la nota por encima de `max_chars` (quedan fuera las de `type: record`). | `warn` | Si cruza el límite o si ya lo superaba y crece. |
 
-Quedan fuera de todas las reglas los archivos de la raíz (`AGENTS.md`, `README.md`), la carpeta de archivo (`archive/`) y las carpetas de `[rules] exclude`.
+Quedan fuera de todas las reglas los archivos de la raíz (`AGENTS.md`, `README.md`), la carpeta de archivo (`archive/`) y las carpetas de `[rules] exclude`. Las reglas solo miran notas `.md`: un archivo de otro tipo no se escribe desde aquí (la memoria es Markdown y los documentos viven en los archivos de lisa), así que `lint` lo señala como `binary` y las reglas no lo juzgan.
 
 ### Respuestas del servidor
 
@@ -68,7 +67,6 @@ required = true                      # action = "block"
 field = "type"                       # por defecto
 allowed = ["Profile", "Preference", "Work", "People", "Notes"]
 untyped_folders = ["skills"]         # sus notas van sin tipo
-attachment_type = "Notes"            # tipo por defecto de las notas compañeras de attach
 
 [rules.obsolete]
 allow_dated = true                   # una línea con fecha AAAA-MM-DD fuera de […] es historia

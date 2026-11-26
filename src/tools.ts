@@ -327,7 +327,7 @@ export async function createMcpServer(memory: MemoryService, client: ClientIdent
 		{
 			title: "Undo a change",
 			description:
-				"Undoes a previous commit (a hash from `recent` or `history`) with a new commit: every note it touched goes back to how it was before it. Give path or name to undo only what it did to that note. Undoing a create deletes the note (refused with HAS_BACKLINKS while other notes link to it); undoing a delete brings it back; undoing a move moves it back. Later changes to the same notes are kept when they don't overlap, otherwise it fails with REVERT_CONFLICT and changes nothing. Binary attachments can be removed or moved back but not restored (NOT_RESTORABLE).",
+				"Undoes a previous commit (a hash from `recent` or `history`) with a new commit: every note it touched goes back to how it was before it. Give path or name to undo only what it did to that note. Undoing a create deletes the note (refused with HAS_BACKLINKS while other notes link to it); undoing a delete brings it back; undoing a move moves it back. Later changes to the same notes are kept when they don't overlap, otherwise it fails with REVERT_CONFLICT and changes nothing. A file that is not a note (a binary) can be removed or moved back but not restored (NOT_RESTORABLE).",
 			inputSchema: {
 				commit: z.string().describe("The commit to undo, e.g. a hash from `recent` or `history`."),
 				path: notePath.describe("Only undo what the commit did to this note. Give path, name or neither."),
@@ -337,33 +337,6 @@ export async function createMcpServer(memory: MemoryService, client: ClientIdent
 			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
 		},
 		wrap("revert", (a: { commit: string; path?: string; name?: string; reason: string }) => memory.revert(client, a)),
-	);
-
-	server.registerTool(
-		"attach",
-		{
-			title: "Attach a file",
-			description:
-				"Stores a binary (PDF, image…) with git LFS and creates a companion note next to it with its text so it can be searched: PDFs via pdftotext, and scanned PDFs and images (png, jpg, webp, tiff) via OCR when the server has it. Send the bytes as base64 for small files, or upload first with PUT /uploads/<filename> and pass upload_id.",
-			inputSchema: {
-				path: z.string().describe("Where the file goes, e.g. «temas/escritura-casa.pdf»."),
-				upload_id: z.string().optional(),
-				base64: z.string().optional(),
-				name: z.string().optional().describe("Companion note name; defaults to the file name without extension."),
-				title: z.string().optional().describe("Human title of the companion note."),
-				description: z.string().describe("One line describing the file."),
-				aliases: z.array(z.string()).optional(),
-				type: z.string().optional().describe("The companion note's type, when this memory's rules ask for one (see the instructions)."),
-				reason,
-				confirm_new: z.boolean().optional(),
-			},
-			annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
-		},
-		wrap(
-			"attach",
-			(a: { path: string; upload_id?: string; base64?: string; name?: string; title?: string; description: string; aliases?: string[]; type?: string; reason: string; confirm_new?: boolean }) =>
-				memory.attach(client, { ...a, source: { upload_id: a.upload_id, base64: a.base64 } }),
-		),
 	);
 
 	return server;

@@ -36,7 +36,6 @@ export class Git {
 			LC_ALL: "C",
 			LANG: "C",
 			GIT_TERMINAL_PROMPT: "0",
-			GIT_LFS_SKIP_SMUDGE: "1",
 			GIT_EDITOR: "true",
 			...this.options.env,
 			...extra,
@@ -120,9 +119,5 @@ export class Git {
 
 	async exists(rev: string): Promise<boolean> {
 		return (await this.run(["cat-file", "-e", `${rev}^{commit}`], { allowFail: true })).code === 0;
-	}
-
-	async lfsAvailable(): Promise<boolean> {
-		return (await this.run(["lfs", "version"], { allowFail: true })).code === 0;
 	}
 }

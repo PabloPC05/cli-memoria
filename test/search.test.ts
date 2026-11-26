@@ -197,7 +197,7 @@ describe("deadlines", () => {
 	it("reads «Pendiente» when the memory has [rules] but no [rules.pending]", async () => {
 		env = await makeMemory(
 			{
-				"memory.toml": `[folders]\nallowed = ["yo", "personas", "temas", "proyectos", "archivo"]\narchive = "archivo"\nindex_full = ["yo"]\n\n[notes]\nsuperseded_field = "sustituida_por"\n\n[attachments]\npage_heading = "Página {n}"\n\n[rules.frontmatter]\nrequired = true\n`,
+				"memory.toml": `[folders]\nallowed = ["yo", "personas", "temas", "proyectos", "archivo"]\narchive = "archivo"\nindex_full = ["yo"]\n\n[notes]\nsuperseded_field = "sustituida_por"\n\n[rules.frontmatter]\nrequired = true\n`,
 				"temas/tareas.md": note("Tareas", "Lo que hay que hacer", "## Pendiente\n\n- [ ] Regar el huerto · Alex · 2026-05-02\n"),
 			},
 			undefined,
@@ -209,7 +209,7 @@ describe("deadlines", () => {
 	it("reads another section when [rules.pending] says so", async () => {
 		env = await makeMemory(
 			{
-				"memory.toml": `[folders]\nallowed = ["yo", "personas", "temas", "proyectos", "archivo"]\narchive = "archivo"\nindex_full = ["yo"]\n\n[notes]\nsuperseded_field = "sustituida_por"\n\n[attachments]\npage_heading = "Página {n}"\n\n[rules.pending]\nsection = "Tareas"\n`,
+				"memory.toml": `[folders]\nallowed = ["yo", "personas", "temas", "proyectos", "archivo"]\narchive = "archivo"\nindex_full = ["yo"]\n\n[notes]\nsuperseded_field = "sustituida_por"\n\n[rules.pending]\nsection = "Tareas"\n`,
 				"temas/tareas.md": note("Tareas", "Lo que hay que hacer", "## Tareas\n\n- [ ] Regar el huerto · Alex · 2026-05-02\n\n## Pendiente\n\n- [ ] Esto ya no cuenta · Alex · 2026-05-02\n"),
 			},
 			undefined,
@@ -285,7 +285,7 @@ describe("deadlines", () => {
 			"- [ ] Rota hecho",
 		].join("\n");
 		env = await makeMemory({
-			"memory.toml": `[folders]\nallowed = ["yo", "personas", "temas", "proyectos", "archivo"]\narchive = "archivo"\nindex_full = ["yo"]\n\n[notes]\nsuperseded_field = "sustituida_por"\n\n[attachments]\npage_heading = "Página {n}"\n\n[rules.pending]\nsection = "Pendiente"\naction = "warn"\n`,
+			"memory.toml": `[folders]\nallowed = ["yo", "personas", "temas", "proyectos", "archivo"]\narchive = "archivo"\nindex_full = ["yo"]\n\n[notes]\nsuperseded_field = "sustituida_por"\n\n[rules.pending]\nsection = "Pendiente"\naction = "warn"\n`,
 			"proyectos/pendiente.md": conH1Pendiente,
 		});
 		expect(env.memory.deadlines({}).items.map((i) => ({ path: i.path, line: i.line, text: i.text }))).toEqual([
@@ -293,7 +293,7 @@ describe("deadlines", () => {
 			{ path: "proyectos/pendiente.md", line: 17, text: "En cola h3" },
 		]);
 		const rules = env.memory.conventions.rules as Rules;
-		const violations = noteViolations(rules, "proyectos/pendiente.md", conH1Pendiente, ["pending"]);
+		const violations = noteViolations(rules, "proyectos/pendiente.md", conH1Pendiente);
 		expect(violations.map((v) => v.line)).toEqual([13, 18]);
 	});
 });

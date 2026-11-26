@@ -6,9 +6,8 @@ import type { ClientsService } from "./clients.js";
 import type { Logger } from "./log.js";
 import type { ClientIdentity, MemoryService } from "./memory.js";
 import { createMcpServer } from "./tools.js";
-import type { UploadStore } from "./uploads.js";
 
-/** Largest JSON body `/mcp` accepts: a `publish` of several long notes or an `attach` sent as base64. */
+/** Largest JSON body `/mcp` accepts: a `publish` of several long notes. */
 export const MAX_MCP_BODY = "32mb";
 
 type AuthedRequest = Request & { auth?: AuthInfo };
@@ -84,10 +83,10 @@ function errorHandler(log: Logger) {
 }
 
 /**
- * HTTP app: stateless MCP endpoint authenticated with per-client static Bearer tokens, and streaming uploads
- * (`PUT /uploads/:filename`). There is no git remote and no push webhook: this process is the only writer.
+ * HTTP app: stateless MCP endpoint authenticated with per-client static Bearer tokens. There is no git remote and no
+ * push webhook: this process is the only writer.
  */
-export function createApp(opts: { memory: MemoryService; tokens: TokenStore; uploads: UploadStore; log: Logger; clients?: ClientsService | null }): express.Express {
+export function createApp(opts: { memory: MemoryService; tokens: TokenStore; log: Logger; clients?: ClientsService | null }): express.Express {
 	const app = express();
 	app.disable("x-powered-by");
 
@@ -108,32 +107,6 @@ export function createApp(opts: { memory: MemoryService; tokens: TokenStore; upl
 	const authenticated = (req: Request, res: Response, next: NextFunction) => {
 		if (authenticate(req, res)) next();
 	};
-
-	app.put(
-		"/uploads/:filename",
-		authenticated,
-		asyncRoute(async (req, res) => {
-			const client = identityFrom(req);
-			if (client.scope !== "write") {
-				res.status(403).json({ error: "forbidden", message: "This client has read-only access." });
-				return;
-			}
-			const filename = String(req.params.filename ?? "");
-			if (!/^[^/\\\0]{1,255}$/.test(filename) || filename.startsWith(".")) {
-				res.status(400).json({ error: "invalid_filename" });
-				return;
-			}
-			const declared = req.header("content-length") ? Number(req.header("content-length")) : null;
-			if (!(await opts.uploads.hasRoomFor(declared))) {
-				res.status(507).json({ error: "insufficient_storage" });
-				return;
-			}
-			const started = Date.now();
-			const meta = await opts.uploads.receive(req, filename, client.id);
-			opts.log("info", "upload", { client: client.id, size: meta.size, ms: Date.now() - started });
-			res.status(201).json({ upload_id: meta.id, size: meta.size, sha256: meta.sha256 });
-		}),
-	);
 
 	app.all("/mcp", authenticated, express.json({ limit: MAX_MCP_BODY }), asyncRoute(mcpHandler(opts.memory, opts.log, opts.clients ?? null)));
 	app.use((_req, res) => {

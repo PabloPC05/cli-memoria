@@ -12,7 +12,7 @@ A self-hosted, git-backed memory for AI agents: a compact **CLI (`memoria`)** fo
 - **Safe for several agents at once.** One writer queue, optimistic concurrency (`hash` from `read`) and atomic multi-commit `publish`. The server is the only writer: there is no git remote to push to or fetch from.
 - **Your conventions, not ours.** The notes repo declares its folders, required frontmatter, write rules and filename pattern in `memory.toml`; its `AGENTS.md` is sent to every client as MCP instructions, with a short index.
 - **Per-agent static tokens.** One Bearer token per agent (`read` or `write` scope), stored as SHA-256 hashes and reloaded on `SIGHUP`. Read-only tokens only see read tools.
-- **Attachments.** Binaries go to git LFS with a companion note holding their text (PDFs via `pdftotext`; scanned PDFs and images via local OCR with `tesseract`, when installed), so they are searchable too.
+- **Notes only.** The memory is Markdown and nothing else: no attached files, no OCR, no git-lfs. The documents themselves live in the archives of lisa, and a note points at them in its text. A repo that still carries a binary is read without breaking (it is catalogued so links to it keep resolving) and `lint` reports it as `binary` until it moves out.
 - **Typed links.** `works_at:: [[acme]]` says what a link means, and `links` can filter by it.
 
 How it works inside (index, write flow, concurrency, auth): [docs/design.md](docs/design.md). Write-rules design and evaluation (Spanish): [docs/normas-al-escribir.md](docs/normas-al-escribir.md).
@@ -55,7 +55,7 @@ On Claude Code it can also install, if you want, a hook that brings relevant not
 | `history` | Commits that touched a note: who, when, why |
 | `recent` | Latest changes to the whole memory: per commit when, who (author and client), tool, reason and the notes it touched; filters `since` (`2026-05-01` or `7d`), `folder`, `client` |
 | `deadlines` | The pending lines of the notes, soonest first: from the «Pendiente» sections, one item per line (`- [ ] what · who · 2026-03-14 [origin]`). Month-only deadlines open their month, undated ones go last; `include_done`, `include_undated`, `folder`, `limit` |
-| `lint` | Maintenance worklist, worst first: bad frontmatter and superseded notes outside the archive, write-rule violations, broken links, look-alike duplicates, old inferences, missing pages, unlinked mentions, orphans, stale and oversized notes. Counts per kind; filter by `kinds`, `folder`, `limit` |
+| `lint` | Maintenance worklist, worst first: bad frontmatter and superseded notes outside the archive, write-rule violations, broken links, look-alike duplicates, old inferences, missing pages, unlinked mentions, orphans, stale notes, files that are not notes (`binary`) and oversized notes. Counts per kind; filter by `kinds`, `folder`, `limit` |
 | `clients` | Who is connected: every token with last seen (time and tool), writes in the last 7 and 30 days, and the `memory-setup` version it left in the notes. Never returns secrets |
 | `create` | New note; unique names across folders; refuses look-alike duplicates unless `confirm_new` |
 | `edit` | Exact text replacements, all or nothing |
@@ -64,7 +64,6 @@ On Claude Code it can also install, if you want, a hook that brings relevant not
 | `delete` | Remove a note (it stays in history); refused while other notes link to it |
 | `publish` | Atomic multi-commit submission (`create`, `write`, `move`, `delete`), judged together against `[rules]` |
 | `revert` | Undo a commit from `recent`/`history` with a new commit, or only what it did to one note; keeps later changes that don't overlap, refuses with `REVERT_CONFLICT` otherwise |
-| `attach` | Store a file in LFS with a searchable companion note |
 
 Clients with a read-only token only see the read tools: `list`, `search`, `deadlines`, `read`, `links`, `history`, `recent`, `lint` and `clients`.
 
@@ -82,7 +81,7 @@ aliases: [uni, carrera]
 ---
 # Universidad
 
-Text, with links like [[otra-nota]], [[otra-nota#Sección|texto]] or ![[documento.pdf]].
+Text, with links like [[otra-nota]], [[otra-nota#Sección|texto]] or an embed like ![[otra-nota]].
 ```
 
 File names (without `.md`) must be unique across the repo, so `[[name]]` always resolves; this is what Obsidian does with "shortest path" links.
@@ -107,10 +106,6 @@ max_description  = 200
 [instructions]
 file = "AGENTS.md"
 
-[attachments]
-page_heading = "Page {n}"
-ocr_notice   = "Text recognised with OCR ({languages}); it may contain errors."
-
 [relations]
 allowed = ["works_at", "lives_with"]  # warn on other keys; without it, keys in use are suggested
 
@@ -120,7 +115,7 @@ orphan_exclude     = ["me"]        # never reported as orphans; defaults to fold
 stale_days         = 180           # unchanged for longer → stale
 inference_days     = 90            # "(deducido, 2026-01-31)" older than this → old_inference
 inferred_markers   = ["deducido"]  # provenance words that mark an inference
-max_bytes          = 16384         # bigger → oversized (attachment notes are exempt)
+max_bytes          = 16384         # bigger → oversized
 missing_page_min   = 2             # a missing target linked from this many notes → missing_page
 mention_min_length = 4             # shortest name or alias looked for as an unlinked mention
 mention_exclude_labels = []        # labels never looked for as an unlinked mention (besides folders.index_full)
@@ -140,7 +135,7 @@ action  = "warn"                   # checks that every line is «- [ ] what · w
 
 ## Running it
 
-Requirements: Node.js 24, git, git-lfs, and optionally poppler-utils (`pdftotext` for PDF text, `pdftoppm` for OCR of scans) and `tesseract` with the language data you want (for OCR of scanned PDFs and images). Missing tools are reported at startup (`ocr.tools` in the log) and only make that extraction unavailable.
+Requirements: Node.js 24 and git. Nothing else: the server never reads or extracts a file, it only writes Markdown notes.
 
 ```sh
 npm ci && npm run build
@@ -162,17 +157,11 @@ tokens_file = "tokens.toml"
 address = "127.0.0.1"
 port = 8782
 
-[ocr]                                           # every key is optional
-enabled = true
-languages = "spa+eng"                           # tesseract language codes; default "eng"
-max_pages = 50                                  # pages of a scanned PDF that are OCR'd
-page_timeout_seconds = 120                      # per page (render + recognition) or image
-# dpi = 300; tesseract = "tesseract"; pdftoppm = "pdftoppm"
 ```
 
-Uploads for `attach`: `curl -T file.pdf -H "Authorization: Bearer $TOKEN" http://host:8782/uploads/file.pdf` returns an `upload_id`. There is no size limit. The JSON body of `/mcp` is capped at 32 MB, which is room for a `publish` of several long notes.
+The JSON body of `/mcp` is capped at 32 MB, which is room for a `publish` of several long notes.
 
-The server keeps the notes repo in `data_dir/repo` and is its only writer: no git remote, no fetch, no push, and no webhook to receive one. The keys of the removed git sync (`[remote]`, `fetch_interval_seconds`, `webhook_secret_file`) and the `/hooks/git` endpoint are gone; an old `config.toml` still works, and the server names those keys in the log (`config.ignored_keys`) instead of refusing to start.
+The server keeps the notes repo in `data_dir/repo` and is its only writer: no git remote, no fetch, no push, and no webhook to receive one. The keys of the removed git sync (`[remote]`, `fetch_interval_seconds`, `webhook_secret_file`), of the removed extraction of attached files (`[ocr]`, `pdftotext`), and the `/hooks/git` and `/uploads/:filename` endpoints are gone; an old `config.toml` still works, and the server names those keys in the log (`config.ignored_keys`) instead of refusing to start.
 
 ### NixOS
 
@@ -185,12 +174,11 @@ The server keeps the notes repo in `data_dir/repo` and is its only writer: no gi
     enable = true;
     listen = { address = "127.0.0.1"; port = 8782; };
     tokensFile = "/var/lib/secrets/cli-memoria/tokens.toml";   # root:cli-memoria 0640
-    # ocr = { enable = true; languages = [ "spa" "eng" ]; maxPages = 50; pageTimeoutSeconds = 120; dpi = 300; };
   };
 }
 ```
 
-After `cli-memoria token add … --file <tokensFile>`, run `systemctl reload cli-memoria`. The package brings `pdftotext`, `pdftoppm` and `tesseract`; the module installs the language data listed in `ocr.languages` (default Spanish and English), and builds that tesseract only when `ocr.enable` is on. See [`nix/module.nix`](nix/module.nix) for all options (`services.my-memory` and `listen.private` remain supported for existing deployments). `remote`, `webhookSecretFile` and `fetchIntervalSeconds` have been removed from the NixOS module: remove them when updating if an existing NixOS configuration still sets them.
+After `cli-memoria token add … --file <tokensFile>`, run `systemctl reload cli-memoria`. The package brings `git` and nothing else: there is no extraction of attached files, so no `poppler-utils` and no `tesseract`. See [`nix/module.nix`](nix/module.nix) for all options (`services.my-memory` and `listen.private` remain supported for existing deployments). `remote`, `webhookSecretFile`, `fetchIntervalSeconds` and `ocr` have been removed from the NixOS module: remove them when updating if an existing NixOS configuration still sets them, and delete the binaries and their companion notes from the notes repo (see *No attached files* below).
 
 ### Connecting clients
 
@@ -231,6 +219,7 @@ Then give the agent the setup link ([Give your agent one link](#give-your-agent-
 
 - **`type` and `status`.** `type` says what a note is (a person, a project, a reference…, see `[rules.type]`); `status` says where it stands: `idea`, `active`, `waiting` or `paused`. Both are optional and only enforced if `memory.toml` asks for it; `search` can filter by them.
 - **`type: record`.** A list or a log, meant to be long and to stay as it is: `lint` does not report it as `stale` or `oversized`, and the size rule of `[rules]` leaves it alone.
+- **No attached files.** The memory is Markdown; documents live in the archives of lisa and a note cites them in its text. `lint --kind binary` lists whatever is still a file of another kind, and it never stops the server: such files are catalogued (so `[[a-link]]` to one still resolves) and never read. Removing them is a commit in git, since the tools only write notes (`revert` can undo the commit that added one, but never bring its content back: `NOT_RESTORABLE`).
 - **Pending lines.** A `## Pendiente` section holds one item per line, `- [ ] what · who · 2026-03-14 [origin]` (`- [x]` when done; the date may be `2026-03` or `sin plazo`). The `deadlines` tool reads them; `[rules.pending]` checks their shape on every write.
 
 ## Development

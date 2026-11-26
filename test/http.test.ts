@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -10,9 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { addToken, TokenStore } from "../src/auth/tokens.js";
 import { createApp, MAX_MCP_BODY } from "../src/http.js";
 import { silentLogger } from "../src/log.js";
-import { UploadStore } from "../src/uploads.js";
 import { makeMemory, note } from "./helpers.js";
-import { makePdf } from "./pdf.js";
 
 function listen(app: express.Express): Promise<{ server: Server; url: string }> {
 	return new Promise((resolve) => {
@@ -31,10 +28,7 @@ beforeAll(async () => {
 	writeToken = await addToken(tokensFile, "claude-surface", "Claude Code (Surface)", "write");
 	readToken = await addToken(tokensFile, "omb-lector", "Bot lector", "read");
 	const tokens = new TokenStore(tokensFile);
-	const uploads = new UploadStore(join(env.root, "data", "uploads"));
-	await uploads.init();
-	(env.memory.opts as { uploads: UploadStore }).uploads = uploads;
-	srv = await listen(createApp({ memory: env.memory, tokens, uploads, log: silentLogger }));
+	srv = await listen(createApp({ memory: env.memory, tokens, log: silentLogger }));
 });
 
 afterAll(async () => {
@@ -60,7 +54,7 @@ describe("HTTP server", () => {
 		const client = await mcp(srv.url, writeToken, "chat-7");
 		expect(client.getInstructions()).toContain("[[perfil]]");
 		const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-		expect(tools).toEqual(["attach", "create", "deadlines", "delete", "edit", "history", "links", "lint", "list", "move", "publish", "read", "recent", "revert", "search", "write"]);
+		expect(tools).toEqual(["create", "deadlines", "delete", "edit", "history", "links", "lint", "list", "move", "publish", "read", "recent", "revert", "search", "write"]);
 		const created = parse(await client.callTool({ name: "create", arguments: { path: "personas/sara.md", content: note("Sara", "Amiga", "Le gusta el té."), reason: "Nueva" } }));
 		expect(created.commit).toBeTruthy();
 		const hist = parse(await client.callTool({ name: "history", arguments: { name: "sara" } })) as { commits: { author: string; trailers: Record<string, string> }[] };
@@ -100,31 +94,10 @@ describe("HTTP server", () => {
 		expect(r2.status).toBe(401);
 	});
 
-	it("uploads without a size limit and attaches a PDF with its text", async () => {
-		const pdf = makePdf(["Escritura de compraventa del piso", "Notario en Oviedo, 2026"]);
-		const up = await fetch(`${srv.url}/uploads/escritura.pdf`, { method: "PUT", headers: { authorization: `Bearer ${writeToken}` }, body: pdf });
-		expect(up.status).toBe(201);
-		const meta = (await up.json()) as { upload_id: string; size: number; sha256: string };
-		expect(meta.size).toBe(pdf.length);
-		expect(meta.sha256).toBe(createHash("sha256").update(pdf).digest("hex"));
-		const ro = await fetch(`${srv.url}/uploads/x.pdf`, { method: "PUT", headers: { authorization: `Bearer ${readToken}` }, body: "x" });
-		expect(ro.status).toBe(403);
-		const client = await mcp(srv.url, writeToken);
-		const att = parse(await client.callTool({ name: "attach", arguments: { path: "temas/escritura-piso.pdf", upload_id: meta.upload_id, title: "Escritura del piso", description: "Escritura de compraventa del piso de Oviedo", reason: "Adjuntar escritura" } }));
-		expect(att).toMatchObject({ path: "temas/escritura-piso.md", attachment: "temas/escritura-piso.pdf", pages: 2 });
-		const read = parse(await client.callTool({ name: "read", arguments: { name: "escritura-piso" } })) as { content: string; sections: { heading: string }[] };
-		expect(read.content).toContain("![[escritura-piso.pdf]]");
-		expect(read.sections.map((s) => s.heading)).toEqual(["Escritura del piso", "Página 1", "Página 2"]);
-		const hits = parse(await client.callTool({ name: "search", arguments: { query: "notario" } })) as { hits: { path: string; section: { heading: string } }[] };
-		expect(hits.hits[0]).toMatchObject({ path: "temas/escritura-piso.md", section: { heading: "Página 2" } });
-		const attrs = await env.memory.git.out(["show", "HEAD:.gitattributes"]);
-		expect(attrs).toContain("*.pdf filter=lfs");
-		const pointer = await env.memory.git.out(["show", "HEAD:temas/escritura-piso.pdf"]);
-		expect(pointer).toContain("version https://git-lfs.github.com/spec/v1");
-		// A page without text is treated as a scan.
-		const scan = parse(await client.callTool({ name: "attach", arguments: { path: "temas/escaneo.pdf", base64: makePdf([""]).toString("base64"), description: "Un escaneo", reason: "Escaneo", confirm_new: true } })) as { warnings: { code: string }[] };
-		expect(scan.warnings.map((w) => w.code)).toContain("EXTRACTION_EMPTY");
-		await client.close();
+	it("no longer accepts uploads: binaries live in the archives of lisa", async () => {
+		const r = await fetch(`${srv.url}/uploads/escritura.pdf`, { method: "PUT", headers: { authorization: `Bearer ${writeToken}` }, body: "x" });
+		expect(r.status).toBe(404);
+		expect(await r.json()).toEqual({ error: "not_found" });
 	});
 });
 

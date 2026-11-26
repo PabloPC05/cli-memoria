@@ -34,10 +34,6 @@ self:
     machine.succeed("systemctl start cli-memoria")
     machine.wait_for_open_port(8782)
 
-    # OCR tools are found at startup (tesseract with spa+eng, pdftoppm).
-    machine.succeed("journalctl -u cli-memoria -o cat | grep ocr.tools | grep -F '\"pdf\":true,\"image\":true'")
-    machine.succeed("journalctl -u cli-memoria -o cat | grep ocr.tools | grep -F '\"languages\":\"spa+eng\"'")
-
     def call(body):
         return machine.succeed(
             "curl -sf http://127.0.0.1:8782/mcp "
@@ -48,6 +44,13 @@ self:
 
     init = call('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')
     assert "cli-memoria" in init, init
+
+    # The memory is notes only: no attachments, no uploads, no OCR. The list is anchored on a tool that must be
+    # there, so a failed call cannot make the check pass on its own.
+    tools = call('{"jsonrpc":"2.0","id":9,"method":"tools/list","params":{}}')
+    assert '"search"' in tools, tools
+    assert "attach" not in tools, tools
+    machine.fail("curl -sf -X PUT http://127.0.0.1:8782/uploads/x.pdf -H 'Authorization: Bearer " + token + "' --data-binary x")
 
     seeded = call('{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create","arguments":{"path":"temas/universidad.md","content":"---\\nname: Universidad\\ndescription: Carrera\\n---\\n# Universidad\\n\\nCinco asignaturas.\\n","reason":"Nota inicial"}}}')
     assert '\\"commit\\"' in seeded, seeded

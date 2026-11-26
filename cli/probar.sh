@@ -1006,10 +1006,6 @@ rc_es 2 "borrar sin --si: no la quita"
 corre m1 borrar topics/cafes --razon "Fuera cafés" --si
 rc_es 0 "borrar --si: la quita"
 [ ! -f "$REPO/topics/cafes.md" ] && ok "borrar: el servidor ya no la tiene" || mal "borrar: el servidor ya no la tiene"
-corre m1 adjuntar docs/x.pdf --archivo "$T/nueva-cafes.md" --descripcion "Una prueba" --razon "Adjunto" --simular
-espera '"herramienta": "attach"' "adjuntar --simular: enseña la llamada"
-corre m1 adjuntar docs/x.pdf --descripcion "Una prueba" --razon "Adjunto"
-rc_es 2 "adjuntar sin --archivo: error de uso"
 corre m1 borrar topics/nada-de-nada --razon "x" --si
 [ "$RC" = 1 ] && ok "borrar una nota que no existe: falla (rc 1, del servidor)" || mal "borrar una nota que no existe: falla" "rc=$RC $SAL"
 c1 fetch -q 2>/dev/null; m1 actualizar >/dev/null 2>&1

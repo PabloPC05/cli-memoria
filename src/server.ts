@@ -6,8 +6,6 @@ import type { ServerConfig } from "./config.js";
 import { createApp } from "./http.js";
 import { jsonLogger, type Logger } from "./log.js";
 import { MemoryService } from "./memory.js";
-import { detectOcr } from "./ocr.js";
-import { UploadStore } from "./uploads.js";
 
 export interface RunningServer {
 	memory: MemoryService;
@@ -20,24 +18,18 @@ function listen(app: ReturnType<typeof createApp>, address: string, port: number
 	return new Promise((resolve, reject) => {
 		const server = app.listen(port, address, () => resolve(server));
 		server.once("error", reject);
-		server.requestTimeout = 0; // uploads have no time limit
+		server.requestTimeout = 0; // a big publish has no time limit
 		server.headersTimeout = 60_000;
 	});
 }
 
 export async function startServer(config: ServerConfig, log: Logger = jsonLogger(undefined, config.logLevel)): Promise<RunningServer> {
-	if (config.ignoredKeys.length) log("warn", "config.ignored_keys", { keys: config.ignoredKeys, why: "this server no longer syncs with a git remote nor accepts a push webhook; the notes repo lives in data_dir" });
-	const uploads = new UploadStore(join(config.dataDir, "uploads"));
-	await uploads.init();
-	const ocr = await detectOcr(config.ocr, log);
+	if (config.ignoredKeys.length) log("warn", "config.ignored_keys", { keys: config.ignoredKeys, why: "this server no longer syncs with a git remote, accepts a push webhook nor extracts text from attached files; the notes repo lives in data_dir" });
 	const memory = new MemoryService({
 		repoDir: join(config.dataDir, "repo"),
 		indexPath: join(config.dataDir, "index.sqlite"),
 		branch: config.branch,
 		authorDomain: config.authorDomain,
-		uploads,
-		pdftotext: config.pdftotext,
-		ocr,
 		log,
 	});
 	await memory.start();
@@ -61,9 +53,7 @@ export async function startServer(config: ServerConfig, log: Logger = jsonLogger
 		}
 	}, 60_000);
 	flushActivity.unref();
-	const server = await listen(createApp({ memory, tokens, uploads, log, clients }), config.listen.address, config.listen.port);
-	const sweep = setInterval(() => uploads.sweep().catch(() => undefined), 60 * 60 * 1000);
-	sweep.unref();
+	const server = await listen(createApp({ memory, tokens, log, clients }), config.listen.address, config.listen.port);
 	log("info", "server.started", {
 		listen: `${config.listen.address}:${config.listen.port}`,
 		tokens: tokens.count,
@@ -73,7 +63,6 @@ export async function startServer(config: ServerConfig, log: Logger = jsonLogger
 		tokens,
 		server,
 		stop: async () => {
-			clearInterval(sweep);
 			clearInterval(flushActivity);
 			await new Promise<void>((r) => server.close(() => r()));
 			await memory.stop();

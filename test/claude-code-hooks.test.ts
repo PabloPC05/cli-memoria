@@ -8,7 +8,6 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { addToken, TokenStore } from "../src/auth/tokens.js";
 import { createApp } from "../src/http.js";
 import { silentLogger } from "../src/log.js";
-import { UploadStore } from "../src/uploads.js";
 import { makeMemory, note } from "./helpers.js";
 
 /** The Claude Code hooks shipped with the setup guide are dependency-free scripts with self-running tests. */
@@ -48,9 +47,7 @@ describe("inject-memory hook against the real server", () => {
 		});
 		const tokensFile = join(env.root, "tokens.toml");
 		token = await addToken(tokensFile, "hook", "Inject hook", "read");
-		const uploads = new UploadStore(join(env.root, "data", "uploads"));
-		await uploads.init();
-		const app = createApp({ memory: env.memory, tokens: new TokenStore(tokensFile), uploads, log: silentLogger });
+		const app = createApp({ memory: env.memory, tokens: new TokenStore(tokensFile), log: silentLogger });
 		server = await new Promise((resolve) => {
 			const s = app.listen(0, "127.0.0.1", () => resolve(s));
 		});

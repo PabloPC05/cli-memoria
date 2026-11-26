@@ -52,7 +52,7 @@ nix/memoria.nix      el paquete `memoria` del flake
   - Las notas en bruto están en `MEMORIA_DIR`, para `rg -n` cuando haga falta algo que `buscar` no da.
 - **Escribir** siempre lo hace el servidor (firma con la credencial del agente y aplica las reglas de `memory.toml`):
   - una nota cada vez, con esta misma CLI y por MCP (también sin `MEMORIA_DIR`): `crear`, `editar`, `escribir`,
-    `mover`, `borrar --si` (sin `--si` no borra), `adjuntar` y `revertir`;
+    `mover`, `borrar --si` (sin `--si` no borra) y `revertir`;
   - cambios de varias notas a la vez (hace falta `MEMORIA_DIR`): `memoria copia` hace un `git clone` de trabajo, se
     edita y se commitea con git, y `memoria publicar` lleva esos commits al servidor, con el hash de cada nota para no
     pisar cambios ajenos. Si el servidor tiene la herramienta `publish` (la busca en su lista de herramientas), va todo

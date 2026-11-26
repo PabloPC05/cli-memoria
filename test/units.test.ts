@@ -181,7 +181,7 @@ describe("paths and names", () => {
 		expect(() => checkPath("temas/doc.md", conv, "asset")).toThrow();
 	});
 
-	it("checks the filename pattern for notes and attachments", () => {
+	it("checks the filename pattern for notes and for files that are not notes", () => {
 		expect(() => checkNewFilename("yo/Perfil.md", conv)).toThrow(/pattern/);
 		expect(() => checkNewFilename("temas/escritura-casa.pdf", conv)).not.toThrow();
 		expect(() => checkNewFilename("temas/Escritura.PDF", conv)).toThrow();
@@ -211,7 +211,8 @@ describe("conventions", () => {
 		expect(conv.notes.supersededField).toBe("sustituida_por");
 		expect(() => parseConventions('[notes]\nfilename_pattern = "("')).toThrow(/regular expression/);
 		expect(() => parseConventions("[folders]\nallowed = [1]")).toThrow();
-		expect(() => parseConventions('[attachments]\npage_heading = "Página"')).toThrow();
+		// `[attachments]` is an old table (attached files and their OCR are gone): it is ignored, never fatal.
+		expect(parseConventions('[attachments]\npage_heading = "Página"').notes.requiredFields).toEqual(defaultConventions().notes.requiredFields);
 		expect(defaultConventions().relations.allowed).toBeNull();
 		expect(parseConventions('[relations]\nallowed = ["Trabaja_en", "vive_con"]').relations.allowed).toEqual(["trabaja_en", "vive_con"]);
 		expect(() => parseConventions('[relations]\nallowed = ["vive con"]')).toThrow(/relations.allowed/);
@@ -276,6 +277,19 @@ describe("index schema and config", () => {
 		expect(loadConfig(file).listen).toEqual({ address: "127.0.0.1", port: 8782 });
 		await writeFile(file, 'data_dir = "data"\n[listen.private]\nport = 8783\n');
 		expect(loadConfig(file).listen).toEqual({ address: "127.0.0.1", port: 8783 });
+	});
+
+	it("names the keys it no longer uses instead of refusing an old config", async () => {
+		const dir = await tempDir();
+		const file = join(dir, "config.toml");
+		// The keys of the git sync and of the extraction of attached files, as an old install left them.
+		await writeFile(
+			file,
+			'data_dir = "data"\nremote = "git@example.com:notes.git"\npdftotext = "pdftotext"\nfetch_interval_seconds = 60\n[listen]\nport = 8782\n[ocr]\nenabled = true\nlanguages = "spa+eng"\n',
+		);
+		const config = loadConfig(file);
+		expect(config.ignoredKeys).toEqual(["remote", "fetch_interval_seconds", "pdftotext", "ocr"]);
+		expect(config.dataDir.endsWith("data")).toBe(true);
 	});
 });
 

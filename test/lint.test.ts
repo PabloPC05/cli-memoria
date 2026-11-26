@@ -78,7 +78,21 @@ describe("lint", () => {
 		expect(ofKind(r.items, "orphan").map((i) => i.notes[0])).toEqual(["personas/luis.md", "temas/huerto.md", "temas/universidades.md"]);
 		expect(ofKind(r.items, "stale")).toEqual([]);
 		expect(ofKind(r.items, "oversized")).toEqual([]);
-		expect(r.counts).toEqual({ problems: 2, broken_link: 1, duplicate_candidates: 1, old_inference: 1, missing_page: 1, unlinked_mention: 1, orphan: 3, stale: 0, oversized: 0 });
+		expect(r.counts).toEqual({ problems: 2, broken_link: 1, duplicate_candidates: 1, old_inference: 1, missing_page: 1, unlinked_mention: 1, orphan: 3, stale: 0, binary: 0, oversized: 0 });
+	});
+
+	it("points at the files that are not notes, which belong in the archives of lisa", async () => {
+		env = await makeMemory(SEED);
+		const repo = join(env.root, "data/repo");
+		// An old repo may still carry one: the server indexes it as an asset, never reads it, and lint says where it
+		// should go. A link to it keeps resolving, so nothing breaks while it is moved out.
+		await writeFile(join(repo, "temas/factura.pdf"), "%PDF-1.4\n");
+		await env.memory.git.run(["add", "--", "temas/factura.pdf"]);
+		await env.memory.git.run(["commit", "-q", "-m", "una factura"]);
+		await env.memory.rebuildIndex();
+		expect(env.memory.lint({ kinds: ["binary"] }).items).toEqual([
+			{ kind: "binary", notes: ["temas/factura.pdf"], detail: { bytes: 9, fix: expect.stringContaining("archives of lisa") } },
+		]);
 	});
 
 	it("dates staleness and undated inferences from git", async () => {
@@ -164,7 +178,7 @@ mention_min_length = 5
 			const path = `temas/${name}.md`;
 			const title = name.replace(/-/g, " ");
 			index.putNote(
-				{ path, name, folder: "temas", title, description: parsed.meta.description, aliases: parsed.meta.aliases, type: null, status: null, archived: false, supersededBy: null, attachment: null, blobHash: blobHash(content), size: content.length, problems: [] },
+				{ path, name, folder: "temas", title, description: parsed.meta.description, aliases: parsed.meta.aliases, type: null, status: null, archived: false, supersededBy: null, blobHash: blobHash(content), size: content.length, problems: [] },
 				splitSections(parsed.body, parsed.bodyLine, title),
 				parseTypedLinks(content),
 			);

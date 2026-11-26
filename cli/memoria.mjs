@@ -76,8 +76,6 @@ también sin MEMORIA_DIR). --razon es el mensaje del cambio; --simular enseña l
   memoria mover <nota> <destino> --razon <texto> [--hash H]                Mueve o renombra (los [[enlaces]] se reescriben); a archive/ la retira.
   memoria borrar <nota> --razon <texto> --si [--hash H]                    Borra (queda en el historial; falla mientras otras notas la enlacen).
       Sin --si no borra: solo si el usuario lo pidió.
-  memoria adjuntar <ruta> --archivo <f> --descripcion <texto> --razon <texto> [--titulo T] [--nombre N] [--alias A] [--confirmar-nueva]
-      Guarda un binario (PDF, imagen…) y crea al lado su nota con el texto. Hasta 6 MB.
   memoria revertir <commit> --razon <texto> [--nota X]                     Deshace un cambio de historial o recientes con otro.
 
 Cambios de varias notas a la vez (copia de trabajo + git; requiere MEMORIA_DIR):
@@ -93,7 +91,7 @@ Cambios de varias notas a la vez (copia de trabajo + git; requiere MEMORIA_DIR):
       comprueba las reglas de la memoria. Con --razon hace antes un commit con todo lo pendiente. --simular no envía nada: lo enseña.
       --aplanar publica el resultado final de todos los commits (no uno a uno) con la razón hecha de sus asuntos: sirve si un
       commit intermedio no se puede publicar y otro posterior lo arregla.
-      Al acabar, tu copia queda igual que el servidor. Solo notas .md: los adjuntos van con memoria adjuntar.
+      Al acabar, tu copia queda igual que el servidor. Solo notas .md: los documentos viven en los archivos de lisa.
   memoria actualizar
       Trae los cambios nuevos del servidor a tu copia (rebase de tus commits sin publicar; si choca, lo deja como estaba).
 
@@ -1052,39 +1050,13 @@ async function revertir(pos, op) {
   return 0;
 }
 
-const TOPE_ADJUNTO = 6 * 1024 * 1024;
-
-async function adjuntar(pos, op) {
-  if (pos.length !== 1) throw new Fallo("uso: memoria adjuntar <ruta> --archivo <f> --descripcion <texto> --razon <texto>", 2);
-  exigirRazon(op);
-  if (!op.archivo) throw new Fallo("falta --archivo: el binario que se guarda", 2);
-  if (!op.descripcion) throw new Fallo("falta --descripcion: una línea que diga qué es", 2);
-  let bytes;
-  try {
-    if (statSync(op.archivo).size > TOPE_ADJUNTO) throw new Fallo(`${op.archivo} pasa de ${TOPE_ADJUNTO / 1048576} MB: por aquí solo caben los pequeños`, 2);
-    bytes = readFileSync(op.archivo);
-  } catch (e) {
-    if (e instanceof Fallo) throw e;
-    throw new Fallo(`no pude leer ${op.archivo} (${e.code ?? e.message})`, 2);
-  }
-  const argumentos = {
-    path: pos[0], base64: bytes.toString("base64"), description: op.descripcion, reason: op.razon,
-    ...(op.titulo ? { title: op.titulo } : {}), ...(op.nombre ? { name: op.nombre } : {}), ...(op.alias?.length ? { aliases: op.alias } : {}),
-    ...(op.confirmar_nueva ? { confirm_new: true } : {})
-  };
-  if (simular(op, "attach", argumentos)) return 0;
-  const r = await conServidor(ctx => usarOFallar(ctx, "attach", argumentos));
-  console.log(r.texto);
-  return 0;
-}
-
 // --- escribir en nativo: copia de trabajo, git y `memoria publicar` ------------------------------------------------
 
 // git sin configuración global ni del sistema (dentro de srt, ~/.gitconfig es un /dev/null que git no puede abrir) y sin
-// preguntar nada. LFS sin descargar: los adjuntos no están en la copia, solo sus punteros.
+// preguntar nada.
 const ENTORNO_GIT = {
   ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", GIT_EDITOR: "true",
-  GIT_LFS_SKIP_SMUDGE: "1", GIT_OPTIONAL_LOCKS: "0"
+  GIT_OPTIONAL_LOCKS: "0"
 };
 
 /**
@@ -1257,7 +1229,7 @@ function comprobar(commits) {
       for (const ruta of x.estado === "R" ? [x.de, x.ruta] : [x.ruta]) {
         const mal = porque => problemas.push(`${donde}: ${ruta}: ${porque}`);
         const partes = ruta.split("/");
-        if (!/\.md$/i.test(ruta)) mal("no es una nota .md (los adjuntos y el resto de archivos no se publican así: memoria adjuntar)");
+        if (!/\.md$/i.test(ruta)) mal("no es una nota .md: la memoria solo lleva notas, los documentos van a los archivos de lisa");
         else if (partes.some(p => p.startsWith("."))) mal("las rutas ocultas no valen");
         else if (partes.length === 1 && !reglas.raiz.includes(ruta)) mal(`en la raíz solo puede haber ${reglas.raiz.join(", ")}; ponla en una carpeta`);
         else if (partes.length > 1 && reglas.carpetas && !reglas.carpetas.includes(partes[0])) {
@@ -1618,7 +1590,6 @@ const OPCIONES = {
   escribir: { razon: "valor", archivo: "valor", hash: "valor", simular: "bool" },
   mover: { razon: "valor", hash: "valor", simular: "bool" },
   borrar: { razon: "valor", hash: "valor", si: "bool", simular: "bool" },
-  adjuntar: { razon: "valor", archivo: "valor", descripcion: "valor", titulo: "valor", nombre: "valor", alias: "lista", confirmar_nueva: "bool", simular: "bool" },
   revertir: { razon: "valor", nota: "valor", simular: "bool" },
   historial: { limite: "entero", json: "bool" },
   enlaces: { entrantes: "bool", salientes: "bool", relacion: "valor", json: "bool" },
@@ -1671,7 +1642,6 @@ async function principal(argv) {
     case "mover": return moverNota(pos, op);
     case "borrar": return borrarNota(pos, op);
     case "revertir": return revertir(pos, op);
-    case "adjuntar": return adjuntar(pos, op);
   }
   return 2;
 }

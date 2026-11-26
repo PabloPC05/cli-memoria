@@ -180,27 +180,6 @@ describe("rules on every write path", () => {
 		await publish(commits[0] as string, "HEAD", "Cómo buscar; Quita la herramienta vieja");
 		expect(await readFile(join(m.opts.repoDir, "people/ana.md"), "utf8")).toBe(await readFile(join(copy, "people/ana.md"), "utf8"));
 	});
-
-	it("attach: the companion note gets the type the rules ask for", async () => {
-		const lfs = (() => {
-			try {
-				execFileSync("git", ["lfs", "version"], { stdio: "ignore" });
-				return true;
-			} catch {
-				return false;
-			}
-		})();
-		if (!lfs) return; // like the other attach tests, it needs git-lfs
-		env = await makeMemory(SEED);
-		const m = env.memory;
-		const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64").toString("base64");
-		const r = await m.attach(writer, { path: "projects/logo.png", source: { base64: png }, description: "El logo", reason: "Logo" });
-		expect(await readFile(join(m.opts.repoDir, r.path), "utf8")).toMatch(/\ntype: Notes\nattachment: logo\.png\n/);
-		const w = await m.attach(writer, { path: "projects/plano.png", source: { base64: png }, description: "El plano", type: "Work", reason: "Plano" });
-		expect(await readFile(join(m.opts.repoDir, w.path), "utf8")).toContain("\ntype: Work\n");
-		await refused(m.attach(writer, { path: "projects/otro.png", source: { base64: png }, description: "Otro", type: "Imagen", reason: "Otro" }));
-	});
-
 });
 
 describe("publish: several commits as one submission", () => {
@@ -411,9 +390,6 @@ archive = "archive"
 
 [notes]
 superseded_field = "superseded_by"
-
-[attachments]
-page_heading = "Page {n}"
 
 [rules.status]
 types = ["project"]

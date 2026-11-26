@@ -4,20 +4,7 @@
   nodejs_24,
   makeWrapper,
   git,
-  git-lfs,
-  poppler-utils,
-  tesseract,
 }:
-
-let
-  # OCR for scanned PDFs and images; only the language data the default config uses.
-  tesseractOcr = tesseract.override {
-    enableLanguages = [
-      "eng"
-      "spa"
-    ];
-  };
-in
 
 buildNpmPackage {
   pname = "cli-memoria";
@@ -42,18 +29,11 @@ buildNpmPackage {
 
   nativeBuildInputs = [ makeWrapper ];
 
-  # git, git-lfs, poppler (pdftotext, pdftoppm) and tesseract are called as programs; the wrapper
-  # puts the pinned ones first. OCR stays optional at runtime: without them it is just unavailable.
+  # git is called as a program; the wrapper puts the pinned one first. Nothing else is needed: the memory is Markdown
+  # notes, and the documents it cites live in the archives of lisa (no attachments, no OCR, no git-lfs).
   postInstall = ''
     wrapProgram $out/bin/cli-memoria \
-      --prefix PATH : ${
-        lib.makeBinPath [
-          git
-          git-lfs
-          poppler-utils
-          tesseractOcr
-        ]
-      }
+      --prefix PATH : ${lib.makeBinPath [ git ]}
     ln -s cli-memoria $out/bin/my-memory
   '';
 

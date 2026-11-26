@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { Section } from "./markdown.js";
 import type { TypedLink } from "./relations.js";
 
-export const SCHEMA_VERSION = "5";
+export const SCHEMA_VERSION = "6";
 
 export interface NoteRecord {
 	path: string;
@@ -17,7 +17,6 @@ export interface NoteRecord {
 	status: string | null;
 	archived: boolean;
 	supersededBy: string | null;
-	attachment: string | null;
 	blobHash: string;
 	size: number;
 	problems: string[];
@@ -72,7 +71,6 @@ CREATE TABLE IF NOT EXISTS notes (
   status TEXT,
   archived INTEGER NOT NULL,
   superseded_by TEXT,
-  attachment TEXT,
   blob_hash TEXT NOT NULL,
   size INTEGER NOT NULL,
   created_at TEXT, created_by TEXT,
@@ -80,7 +78,7 @@ CREATE TABLE IF NOT EXISTS notes (
   problems TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS notes_name ON notes (name COLLATE NOCASE);
-CREATE TABLE IF NOT EXISTS assets (path TEXT PRIMARY KEY, name TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS assets (path TEXT PRIMARY KEY, name TEXT NOT NULL, size INTEGER);
 CREATE INDEX IF NOT EXISTS assets_name ON assets (name COLLATE NOCASE);
 CREATE TABLE IF NOT EXISTS sections (
   id INTEGER PRIMARY KEY,
@@ -126,7 +124,6 @@ function toNote(r: Row): NoteRow {
 		status: (r.status as string | null) ?? null,
 		archived: r.archived === 1,
 		supersededBy: (r.superseded_by as string | null) ?? null,
-		attachment: (r.attachment as string | null) ?? null,
 		blobHash: r.blob_hash as string,
 		size: r.size as number,
 		problems: JSON.parse(r.problems as string) as string[],
@@ -223,8 +220,8 @@ export class SearchIndex {
 		this.removeNote(note.path);
 		this.db
 			.prepare(
-				`INSERT INTO notes (path, name, folder, title, description, aliases, type, status, archived, superseded_by, attachment, blob_hash, size, created_at, created_by, updated_at, updated_by, problems)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO notes (path, name, folder, title, description, aliases, type, status, archived, superseded_by, blob_hash, size, created_at, created_by, updated_at, updated_by, problems)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(
 				note.path,
@@ -237,7 +234,6 @@ export class SearchIndex {
 				note.status,
 				note.archived ? 1 : 0,
 				note.supersededBy,
-				note.attachment,
 				note.blobHash,
 				note.size,
 				(previous?.created_at as string | null) ?? null,
@@ -267,8 +263,8 @@ export class SearchIndex {
 		this.db.prepare("UPDATE notes SET updated_at = ?, updated_by = ?, created_at = COALESCE(created_at, ?), created_by = COALESCE(created_by, ?) WHERE path = ?").run(dates.updatedAt, dates.updatedBy, dates.updatedAt, dates.updatedBy, path);
 	}
 
-	putAsset(path: string): void {
-		this.db.prepare("INSERT OR REPLACE INTO assets (path, name) VALUES (?, ?)").run(path, (path.split("/").pop() as string).toLowerCase());
+	putAsset(path: string, size: number | null = null): void {
+		this.db.prepare("INSERT OR REPLACE INTO assets (path, name, size) VALUES (?, ?, ?)").run(path, (path.split("/").pop() as string).toLowerCase(), size);
 	}
 
 	removeAsset(path: string): void {
@@ -303,6 +299,10 @@ export class SearchIndex {
 
 	assetsByName(name: string): string[] {
 		return (this.db.prepare("SELECT path FROM assets WHERE name = ? COLLATE NOCASE").all(name) as Row[]).map((r) => r.path as string);
+	}
+
+	allAssets(): { path: string; size: number | null }[] {
+		return (this.db.prepare("SELECT path, size FROM assets ORDER BY path").all() as Row[]).map((r) => ({ path: r.path as string, size: (r.size as number | null) ?? null }));
 	}
 
 	allNotes(): NoteRow[] {

@@ -17,7 +17,7 @@ const INLINE_FIELD = new RegExp(String.raw`[[(](${KEY})::(?=\s)`, "gu");
 const FRONTMATTER_KEY = new RegExp(`^(${KEY}):`, "u");
 
 /** Frontmatter fields that hold text, not relations, even when they contain a link. */
-const NOT_RELATIONS = new Set(["name", "description", "aliases", "attachment"]);
+const NOT_RELATIONS = new Set(["name", "description", "aliases"]);
 
 export function parseTypedLinks(text: string): TypedLink[] {
 	const links = parseWikiLinks(text);
