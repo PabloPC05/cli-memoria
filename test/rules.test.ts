@@ -43,7 +43,8 @@ describe("configuration", () => {
 		expect(bad("[rules.obsolete]\npatterns = ['(']")).toThrow(/rules\.obsolete\.patterns\[0\]\.pattern is not a valid regular expression/);
 		expect(bad("[rules.obsolete]\npatterns = ['x*']")).toThrow(/matches the empty text/);
 		expect(bad('[rules.type]\nallowed = ["Work"]\n[rules.templates]\nPeople = ["A"]')).toThrow(/rules\.templates\.People: «People» is not in rules\.type\.allowed/);
-		expect(bad('[rules.type]\nallowed = ["Work"]\nattachment_type = "Notes"')).toThrow(/\[rules\.type\] has unknown keys: attachment_type/);
+		// `attachment_type` typed the companion notes of the removed `attach`: ignored, so the rest of the rules survive.
+		expect(parseConventions('[rules.type]\nallowed = ["Work"]\nattachment_type = "Notes"').rules?.type.allowed).toEqual(["Work"]);
 		expect(bad('[rules.size]\nmax_chars = 0')).toThrow(/max_chars must be a positive integer/);
 		expect(bad('[rules.append_only]\nsections = ["Fuentes"]\naction = "maybe"')).toThrow(/action must be "block" or "warn"/);
 		expect(bad('[rules.append_only]\nsection = ["Fuentes"]')).toThrow(/unknown keys: section/);

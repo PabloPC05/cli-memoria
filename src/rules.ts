@@ -183,7 +183,9 @@ export function parseRules(value: unknown): Rules | null {
 
 	const type = table(doc.type, "rules.type");
 	if (type) {
-		unknownKeys(type, "rules.type", ["field", "allowed", "untyped_folders", "action"]);
+		// `attachment_type` typed the companion notes of the removed `attach` tool: it is accepted and ignored, so an
+		// old `memory.toml` keeps every other rule instead of being refused as a whole.
+		unknownKeys(type, "rules.type", ["field", "allowed", "untyped_folders", "attachment_type", "action"]);
 		const field = type.field === undefined ? "type" : text(type.field, "rules.type.field");
 		if (!/^[A-Za-z_][\w-]*$/.test(field)) throw new Error("rules.type.field must be a field name");
 		const allowed = strings(type.allowed, "rules.type.allowed");

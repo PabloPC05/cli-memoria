@@ -88,6 +88,8 @@ function table(value: unknown, key: string): Record<string, unknown> {
 /** Parses `memory.toml`. Throws with a readable message when the file is invalid; the caller keeps the last valid one. */
 export function parseConventions(text: string): Conventions {
 	const doc = parseToml(text) as Record<string, unknown>;
+	// Tables this version no longer reads (the `[attachments]` of the removed `attach` tool) are left alone: an old
+	// `memory.toml` keeps working, and the conventions it still declares stay in force.
 	const c = defaultConventions();
 	const folders = table(doc.folders, "folders");
 	if (folders.allowed !== undefined) c.folders.allowed = stringList(folders.allowed, "folders.allowed", (v) => FOLDER.test(v));
